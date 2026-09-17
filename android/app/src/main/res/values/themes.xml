@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      主题继承自框架的 Material 主题：工程用的是 ComponentActivity + Compose，
+      没有引入 AppCompat，因此不能用 Theme.AppCompat.* 作为父主题。
+      NoActionBar 是因为界面自己画 TopAppBar。
+    -->
+    <style name="Theme.SmsGateway" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

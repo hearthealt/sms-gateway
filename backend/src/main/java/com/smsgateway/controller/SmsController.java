@@ -1,0 +1,118 @@
+package com.smsgateway.controller;
+
+import com.smsgateway.model.dto.*;
+import com.smsgateway.service.ClientSmsService;
+import com.smsgateway.service.SmsService;
+import com.smsgateway.service.WaitingService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDateTime;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * 短信接口。
+ *
+ * <p>这里混了两类调用方，鉴权走不同的拦截器（见 {@code SecurityConfig}）：
+ * <ul>
+ *   <li>{@code POST /receive} —— 设备上报，DeviceAuthInterceptor（deviceToken）</li>
+ *   <li>{@code GET /list}、{@code GET /wait} —— 外部调用方，ClientAuthInterceptor（API Key）</li>
+ * </ul>
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/sms")
+@RequiredArgsConstructor
+public class SmsController {
+
+    private final SmsService smsService;
+    private final WaitingService waitingService;
+    private final ClientSmsService clientSmsService;
+
+    /** pageSize 上限，避免调用方一次把整库拉爆。 */
+    private static final int MAX_PAGE_SIZE = 100;
+
+    @PostMapping("/receive")
+    public ResponseEntity<ApiResult<SmsReceiveResponse>> receive(
+            @Valid @RequestBody SmsReceiveRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+
+        log.info("SMS receive request: deviceId={}, localMessageId={}, sender={}",
+                request.getDeviceId(), request.getLocalMessageId(), request.getSender());
+
+        SmsReceiveResponse response = smsService.receiveSms(request, idempotencyKey);
+
+        if (response.isDuplicate()) {
+            return ResponseEntity.ok(ApiResult.success("duplicate", response));
+        }
+        return ResponseEntity.ok(ApiResult.success(response));
+    }
+
+    /**
+     * 查询已采集的短信。所有条件可选，都不传就是「取全部」。
+     *
+     * <p>只有号码和时间两个维度 —— 外部调用方不关心发送方是谁。
+     * phone 会先归一化，再靠 {@code like %phone%} 容忍库里存的 +86 前缀，历史数据不用迁移。
+     *
+     * <p>时间参数用 ISO-8601（{@code 2026-09-17T15:29:21}），与响应里的 receiveTime 同格式，
+     * 调用方拿到的值可以直接回传。刻意不加 {@code @DateTimeFormat} 指定 pattern ——
+     * Spring 默认的 ISO_LOCAL_DATE_TIME 能同时接受带不带毫秒的写法，比写死 pattern 宽容。
+     */
+    @GetMapping("/list")
+    public ResponseEntity<ApiResult<PageResult<ClientSmsView>>> list(
+            @RequestParam(value = "phone", required = false) String phone,
+            @RequestParam(value = "startTime", required = false) LocalDateTime startTime,
+            @RequestParam(value = "endTime", required = false) LocalDateTime endTime,
+            @RequestParam(value = "page", defaultValue = "1") int page,
+            @RequestParam(value = "pageSize", defaultValue = "20") int pageSize) {
+
+        int safePage = Math.max(page, 1);
+        int safePageSize = Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE);
+
+        log.info("SMS list request: phone={}, startTime={}, endTime={}, page={}, pageSize={}",
+                phone, startTime, endTime, safePage, safePageSize);
+
+        return ResponseEntity.ok(ApiResult.success(
+                clientSmsService.list(phone, startTime, endTime, safePage, safePageSize)));
+    }
+
+    /**
+     * 阻塞等待指定号码收到的验证码。
+     *
+     * <p>不带 sender —— 外部调用方只知道接收号码，不该需要知道是谁发的。
+     * 已存在的验证码立即返回；否则挂起到超时，调用方不用自己写轮询。
+     */
+    @GetMapping("/wait")
+    public ResponseEntity<ApiResult<SmsWaitResponse>> wait(
+            @RequestParam("phone") String phone,
+            @RequestParam(value = "timeout", defaultValue = "60") long timeout) {
+
+        log.info("SMS wait request: phone={}, timeout={}s", phone, timeout);
+
+        CompletableFuture<SmsWaitResponse> future = waitingService.waitForSms(phone, timeout);
+
+        try {
+            SmsWaitResponse response = future.get();
+            return ResponseEntity.ok(ApiResult.success(response));
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof TimeoutException) {
+                return ResponseEntity.status(HttpStatus.REQUEST_TIMEOUT)
+                        .body(ApiResult.error(408, "wait timeout"));
+            }
+            log.error("Error waiting for SMS", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResult.error(500, "internal server error"));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResult.error(500, "interrupted"));
+        }
+    }
+}

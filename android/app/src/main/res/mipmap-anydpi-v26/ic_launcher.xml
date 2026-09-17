@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- minSdk 为 26，自适应图标在所有目标设备上都可用，无需再提供各密度 PNG。
+     背景层从纯色色值换成 drawable：要渐变就必须是可绘制对象，色值只能填单色。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

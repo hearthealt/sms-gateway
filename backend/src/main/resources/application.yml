@@ -1,0 +1,36 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 3000
+
+app:
+  secret:
+    key: sms-gateway-secret-key-2024
+  # 外部调用方密钥不再走配置：由管理后台「API 密钥」页签发，存 api_key 表。
+  api-key:
+    # 密钥校验结果在 Redis 中的缓存时长（秒）。禁用/删除会主动失效，无需等它过期。
+    cache-ttl-seconds: 60
+  admin:
+    # 首次启动且 admin_user 表为空时，用这组配置创建管理员账号（BCrypt 哈希后入库）。
+    # 生产环境请通过环境变量覆盖。
+    default-username: admin
+    default-password: zaq1,lp-
+    # 管理后台登录 token 在 Redis 中的有效期（秒）
+    token-ttl-seconds: 7200

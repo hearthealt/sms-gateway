@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 9（API 28）起默认禁止明文 HTTP，而本项目后端是局域网内的
+  http://<ip>:8080 服务。不放开的话，所有请求会被系统直接拦截，
+  App 表现为「连不上服务器」且不会有任何业务日志。
+
+  这里放开 base-config 而不是列举域名，是因为服务器地址由用户在界面上填写，
+  可以是任意局域网 IP，无法预先枚举。
+
+  如果后端将来上了 HTTPS，把 cleartextTrafficPermitted 改回 false 即可收紧。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
