@@ -7,8 +7,24 @@ import java.net.URI
 data class QrConfig(
     /** 字段可空是为了兼容 Gson：缺字段时它不会报错，而是给 null。 */
     val url: String? = null,
-    val deviceName: String? = null
-)
+    val deviceName: String? = null,
+
+    /**
+     * 设备恢复码：管理员在控制台为某台设备签发，扫码的设备会**采用**这个身份
+     * （覆盖本机的设备标识与重注册密钥）。
+     *
+     * 这两个字段**不该由手机自己生成**。本应用里的「配置二维码」只产出
+     * url + deviceName；如果身份也能由任意一台手机写进二维码，那么给你看一张码
+     * 就能让你的手机"变成"攻击者的设备，此后你的短信全部记在他名下、
+     * 而他有后台权限能读走。所以恢复码必须出自管理后台。
+     */
+    val deviceId: String? = null,
+    val enrollSecret: String? = null
+) {
+    /** 是否携带了完整的设备身份。缺一不可 —— 只有一半会导致注册必失败。 */
+    val hasIdentity: Boolean
+        get() = !deviceId.isNullOrBlank() && !enrollSecret.isNullOrBlank()
+}
 
 sealed interface QrParseResult {
     data class Ok(val config: QrConfig) : QrParseResult
@@ -46,10 +62,21 @@ object QrConfigCodec {
         val url = config.url?.trim().orEmpty()
         validateUrl(url)?.let { return QrParseResult.Invalid(it) }
 
+        // 身份字段只能成对出现：只给一半的话注册必然失败（服务端要么没有 deviceId 可比，
+        // 要么拿不出密钥），在这里挡掉比让用户到注册页再看一次报错要好。
+        val hasDeviceId = !config.deviceId.isNullOrBlank()
+        val hasSecret = !config.enrollSecret.isNullOrBlank()
+        if (hasDeviceId != hasSecret) {
+            return QrParseResult.Invalid("恢复码不完整：deviceId 与 enrollSecret 必须同时提供")
+        }
+
         return QrParseResult.Ok(
             QrConfig(
                 url = url.trimEnd('/'),
-                deviceName = config.deviceName?.trim()?.takeIf { it.isNotBlank() }
+                deviceName = config.deviceName?.trim()?.takeIf { it.isNotBlank() },
+                // 合法性不在这里判定 —— 由服务端在注册时比对密钥哈希，那才是权威。
+                deviceId = config.deviceId?.trim()?.takeIf { it.isNotBlank() },
+                enrollSecret = config.enrollSecret?.trim()?.takeIf { it.isNotBlank() }
             )
         )
     }

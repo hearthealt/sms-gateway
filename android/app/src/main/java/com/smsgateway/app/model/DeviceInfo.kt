@@ -6,7 +6,14 @@ data class DeviceInfo(
     val platform: String = "android",
     /** 读不到本机号码时为 null，Gson 会省略该字段，后端存 null 而不是假号码。 */
     val phone: String? = null,
-    val appVersion: String = "1.0.0"
+    val appVersion: String = "1.0.0",
+    /**
+     * 重注册密钥：本机首次注册时生成并保管，服务端只存它的 SHA-256。
+     *
+     * 这个 deviceId 在服务端已存在时，必须带上它才拿得到令牌 —— 否则任何知道
+     * 设备号的人都能把自己冒充成这台设备。重装丢失后由管理员在控制台签发恢复码取回。
+     */
+    val enrollSecret: String? = null
 )
 
 data class DeviceTokenData(

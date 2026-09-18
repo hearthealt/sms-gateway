@@ -220,7 +220,7 @@ fun QrConfigScreen(
     pendingConfig?.let { config ->
         AlertDialog(
             onDismissRequest = { pendingConfig = null },
-            title = { Text("确认导入配置") },
+            title = { Text(if (config.hasIdentity) "确认采用设备身份" else "确认导入配置") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -240,6 +240,27 @@ fun QrConfigScreen(
                     config.deviceName?.let {
                         Text("设备名称：$it", fontSize = 13.sp)
                     }
+
+                    // 带身份时这一段是整个流程里唯一能拦住「冒充」的地方：
+                    // 采用之后，本机上报的短信会记在**那台**设备名下。
+                    // 所以既要显眼，也要把设备号原样摆出来让人核对。
+                    if (config.hasIdentity) {
+                        Text(
+                            text = "⚠ 这张二维码同时携带了设备身份。采用之后，本机将以该设备" +
+                                "的名义上报短信 —— 请先确认这就是你自己的设备。",
+                            fontSize = 13.sp,
+                            color = Color(0xFFC62828)
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = config.deviceId.orEmpty(),
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
                     Text(
                         text = "导入后需要重新注册设备（令牌与服务器绑定）。",
                         fontSize = 12.sp,
@@ -250,10 +271,28 @@ fun QrConfigScreen(
             confirmButton = {
                 TextButton(onClick = {
                     val url = config.url.orEmpty()
-                    viewModel.importServerUrl(url)
-                    config.deviceName?.let { viewModel.updateDeviceName(it) }
+                    // 与设置页「保存」同一套校验：不合格就不写、也不谎报成功。
+                    // 二维码的格式校验只看 scheme 和主机名，挡不住端口越界（:80801）这类地址。
+                    val imported = if (config.hasIdentity) {
+                        viewModel.adoptEnrollIdentity(
+                            deviceId = config.deviceId.orEmpty(),
+                            enrollSecret = config.enrollSecret.orEmpty(),
+                            serverUrl = url
+                        )
+                    } else {
+                        viewModel.importServerUrl(url)
+                    }
+                    if (imported) {
+                        config.deviceName?.let { viewModel.updateDeviceName(it) }
+                    }
                     pendingConfig = null
-                    toast("配置已导入，请到设置里重新注册设备")
+                    toast(
+                        when {
+                            !imported -> "地址格式不合法，未导入"
+                            config.hasIdentity -> "已采用设备身份，请重新注册设备"
+                            else -> "配置已导入，请到设置里重新注册设备"
+                        }
+                    )
                 }) { Text("确认导入") }
             },
             dismissButton = {

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用标记。与启动图标同一套意象：一封正在向外转发信号的信封。
+
+  刻意做成纯白、由调用方 tint 着色 —— 放在深蓝头部上时是白的，放在白底 logo 块上
+  可以染成品牌蓝，一份资源两处用。要注意 tint 走的是 SrcIn，只替换颜色、保留透明度，
+  所以这里层与层之间的浓度差（下面那道弧 65%）会原样保留。
+
+  尺寸只有 22dp 上下，所以比启动图标简化了一档：两道弧而不是三道，
+  信封也去掉了圆角矩形的描边，只留折线 —— 这个尺寸再细就糊成一团了。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- 外侧信号弧 -->
+    <path
+        android:pathData="M5.99,7.81 A6.4,6.4 0 0 1 18.01,7.81"
+        android:strokeColor="#A6FFFFFF"
+        android:strokeWidth="1.9"
+        android:strokeLineCap="round" />
+
+    <!-- 内侧信号弧 -->
+    <path
+        android:pathData="M8.99,8.91 A3.2,3.2 0 0 1 15.01,8.91"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.9"
+        android:strokeLineCap="round" />
+
+    <!-- 信封轮廓 -->
+    <path
+        android:pathData="M7.5,12 L16.5,12 A2,2 0 0 1 18.5,14 L18.5,17.5 A2,2 0 0 1 16.5,19.5 L7.5,19.5 A2,2 0 0 1 5.5,17.5 L5.5,14 A2,2 0 0 1 7.5,12 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineJoin="round" />
+
+    <!-- 信封盖折线 -->
+    <path
+        android:pathData="M7.8,14 L12,17 L16.2,14"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -58,11 +58,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- 覆盖安装后重启服务：不加 MY_PACKAGE_REPLACED 的话，推一次版本更新
+             就会让进程连同前台服务一起被杀且无人补拉，车队集体静默失联。
+             它同时也是「可在后台启动前台服务」的官方豁免入口之一。 -->
         <receiver
             android:name=".receiver.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>

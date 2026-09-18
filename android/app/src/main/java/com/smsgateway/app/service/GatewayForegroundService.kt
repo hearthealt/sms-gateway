@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.smsgateway.app.MainActivity
+import com.smsgateway.app.R
 import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.HeartbeatSender
 import kotlinx.coroutines.*
@@ -87,7 +88,7 @@ class GatewayForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("短信网关运行中")
+            .setContentTitle(getString(R.string.app_name) + "运行中")
             .setContentText(status)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
@@ -143,10 +144,10 @@ class GatewayForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "短信网关",
+                getString(R.string.app_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "短信网关后台服务通知"
+                description = getString(R.string.app_name) + "后台服务通知"
                 setShowBadge(false)
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

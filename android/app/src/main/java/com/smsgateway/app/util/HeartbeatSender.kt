@@ -62,6 +62,12 @@ object HeartbeatSender {
         return try {
             val response = RetrofitClient.getApiService().heartbeat(request)
             if (!response.isSuccessful) {
+                if (response.code() == 401) {
+                    // 令牌被拒 = 服务端不认这台设备了（设备记录被删、或换了主密钥）。
+                    // 必须清掉本地令牌，否则 isRegistered 永远是 true，界面一直显示
+                    // 「已注册」而实际一条也传不上去，现场根本想不到要重新注册。
+                    AuthState.markTokenRejected(app)
+                }
                 Log.w(TAG, "Heartbeat rejected: HTTP ${response.code()}")
                 return false
             }

@@ -14,8 +14,10 @@ import com.google.gson.Gson
 import com.smsgateway.app.database.AppDatabase
 import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.*
+import com.smsgateway.app.network.ProbeResult
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.service.GatewayForegroundService
+import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
@@ -56,8 +58,27 @@ data class DashboardState(
     val todaySmsCount: Int = 0,
     val todayCodeCount: Int = 0,
     val isRegistering: Boolean = false,
-    val registerError: String? = null,
+    val registerMessage: String? = null,
+    /**
+     * 被禁用横幅上「检查状态」的结论。
+     *
+     * **只给那个横幅用。** 它是持久展示的：禁用状态下用户要拿它留在屏幕上对照，
+     * 所以不该走一闪而过的通道。设置页原先也往这里写，结果是「地址格式不合法」
+     * 一直挂在页面上擦不掉 —— 共享一个持久字段就会这样。
+     */
     val testResult: String? = null,
+
+    // 设置页的一次性提示
+    /** 测试连接进行中。按钮据此切成「测试中…」并禁用。 */
+    val isTestingConnection: Boolean = false,
+    /**
+     * 设置页的一次性提示：测试连接的结论、清理本地记录的结果等。
+     * 设置页消费后立即清空，以 snackbar 一闪而过。
+     *
+     * 单独一个字段而不是复用上面的 testResult：那个是持久展示的，
+     * 写进去的消息不会自己消失，会在页面上留一句擦不掉的残留。
+     */
+    val settingsMessage: String? = null,
     /** 被管理员禁用：上传会被服务端拒绝，界面要明说，不能让人以为一切正常。 */
     val isDisabled: Boolean = false,
 
@@ -108,6 +129,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private val registerInFlight = AtomicBoolean(false)
 
+    /**
+     * 探活请求的并发闸门。理由同上：连点会起出多个并发探测，谁先回来谁把
+     * isTestingConnection 置为结束，于是按钮提前解禁、提示串台。
+     *
+     * 设置页也会在探测期间禁用按钮，但那是界面层的表达；真正防住重复的是这里 ——
+     * 界面状态可能因为重组、返回再进入而落后半步。
+     */
+    private val testInFlight = AtomicBoolean(false)
+
     private val database = AppDatabase.getInstance(application)
     private val prefs = DevicePrefs.get(application)
 
@@ -136,6 +166,21 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.value = _state.value.copy(isDisabled = disabled)
             }
         }
+
+        // 服务端拒绝了令牌（设备被删、或换了主密钥）。AuthState 已经把本地令牌清掉，
+        // 而 isRegistered 是 deviceId/deviceToken 的派生属性，所以界面上的「已注册」
+        // 会自动换成「设备未注册」；这里再补一句说明，免得用户以为是自己点错了什么。
+        viewModelScope.launch {
+            AuthState.tokenRejected.collect { rejected ->
+                if (!rejected) return@collect
+                _state.value = _state.value.copy(
+                    deviceId = DevicePrefs.deviceId(getApplication()),
+                    deviceToken = "",
+                    registerMessage = "服务端已不认这台设备（令牌失效），请重新注册"
+                )
+                AuthState.consume()
+            }
+        }
     }
 
     private fun loadSavedState() {
@@ -154,9 +199,21 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      * 保存服务器地址。默认值 10.0.2.2 只是模拟器访问宿主机的别名，
      * 真机必须改成后端所在机器的局域网 IP，所以这里必须可配置。
      */
-    fun updateServerUrl(url: String) {
+    fun updateServerUrl(url: String): Boolean {
         val normalized = url.trim().trimEnd('/').ifBlank { DevicePrefs.DEFAULT_SERVER_URL }
+
+        // 必须在这里挡住非法地址，因为它一旦落盘就很难收拾：Retrofit 是懒构造的，
+        // 直到下一次心跳/注册才拿它去建 baseUrl 并抛 IllegalArgumentException ——
+        // 那时崩溃点离「刚敲错一个字」已经很远，而且地址还在 prefs 里，每次启动都崩，
+        // 用户只能清应用数据。所以宁可存不进去。
+        if (!RetrofitClient.isValidBaseUrl(normalized)) {
+            // 不写任何状态字段：失败由按钮那边用 snackbar 一闪而过地报出。
+            // 写进状态就会在页面上留一句擦不掉的残留，之前正是这个问题。
+            return false
+        }
+
         applyServerUrl(getApplication(), normalized)
+        return true
     }
 
     /**
@@ -178,12 +235,36 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         _state.value = _state.value.copy(
             serverUrl = normalized,
             deviceToken = if (changed) "" else _state.value.deviceToken,
-            registerError = if (changed) "服务器地址已变更，请重新注册设备" else _state.value.registerError
+            registerMessage = if (changed) "服务器地址已变更，请重新注册设备" else _state.value.registerMessage
         )
     }
 
-    /** 供二维码导入使用：校验通过后由界面确认，再调用这里写入。 */
-    fun importServerUrl(url: String) = updateServerUrl(url)
+    /** 供二维码导入使用：由界面确认后调用这里写入。@return 同 [updateServerUrl]。 */
+    fun importServerUrl(url: String): Boolean = updateServerUrl(url)
+
+    /**
+     * 采用二维码里的设备身份 —— 即管理员在控制台签发的恢复码。
+     *
+     * 这是设备重装（本地密钥随应用数据一起没了）、或老设备首次启用重注册校验之后，
+     * 唯一能取回身份的途径。设备标识与重注册密钥一起覆盖，旧令牌一并清掉：
+     * 令牌是签发在**旧身份**上的，留着会让 isRegistered 仍为真、App 拿着它一路 401。
+     *
+     * @return 地址合法并已写入时 true；false 表示地址不合法，什么都没改。
+     */
+    fun adoptEnrollIdentity(deviceId: String, enrollSecret: String, serverUrl: String): Boolean {
+        val normalized = serverUrl.trim().trimEnd('/').ifBlank { DevicePrefs.DEFAULT_SERVER_URL }
+        if (!RetrofitClient.isValidBaseUrl(normalized)) return false
+
+        val app = getApplication<Application>()
+        DevicePrefs.adoptEnrollIdentity(app, deviceId, enrollSecret)
+        applyServerUrl(app, normalized)
+
+        _state.value = _state.value.copy(
+            deviceId = DevicePrefs.deviceId(app),
+            registerMessage = "已采用恢复码中的设备身份，请重新注册设备"
+        )
+        return true
+    }
 
     private fun restoreRetrofitConfig() {
         RetrofitClient.ensureConfigured(getApplication())
@@ -239,9 +320,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun clearRegisterError() {
-        if (_state.value.registerError != null) {
-            _state.value = _state.value.copy(registerError = null)
+    fun clearRegisterMessage() {
+        if (_state.value.registerMessage != null) {
+            _state.value = _state.value.copy(registerMessage = null)
         }
     }
 
@@ -305,7 +386,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         // 连点两下曾会发出两个并发请求、各生成一个随机设备号，服务端于是多出一台「新设备」。
         if (!registerInFlight.compareAndSet(false, true)) return
 
-        _state.value = _state.value.copy(isRegistering = true, registerError = null)
+        _state.value = _state.value.copy(isRegistering = true, registerMessage = null)
 
         viewModelScope.launch {
             try {
@@ -324,7 +405,8 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                         deviceName = effectiveDeviceName(),
                         platform = "android",
                         phone = phone,
-                        appVersion = BuildConfig.VERSION_NAME
+                        appVersion = BuildConfig.VERSION_NAME,
+                        enrollSecret = DevicePrefs.getOrCreateEnrollSecret(app)
                     )
                 )
 
@@ -353,7 +435,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                     _state.value = _state.value.copy(
                         deviceToken = token,
                         phone = phone.orEmpty(),
-                        registerError = null
+                        // 成功也要说一声。原先这里置 null，于是点了「重新注册」之后
+                        // 界面上什么都不变 —— 现场无从判断到底成没成，只能靠猜。
+                        registerMessage = "注册成功"
                     )
 
                     SmsUploadWorker.enqueue(app)
@@ -364,7 +448,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                     // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
                     val detail = parseErrorMessage(response.errorBody()?.string())
                     _state.value = _state.value.copy(
-                        registerError = "注册失败（HTTP ${response.code()}）" +
+                        registerMessage = "注册失败（HTTP ${response.code()}）" +
                             (detail?.let { "：$it" } ?: "")
                     )
                 }
@@ -373,12 +457,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: IOException) {
                 Log.e(TAG, "Registration failed: server unreachable", e)
                 _state.value = _state.value.copy(
-                    registerError = "连不上服务器，请到设置里检查服务器地址"
+                    registerMessage = "连不上服务器，请到设置里检查服务器地址"
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Registration failed", e)
                 _state.value = _state.value.copy(
-                    registerError = "注册失败：${e.message ?: e.javaClass.simpleName}"
+                    registerMessage = "注册失败：${e.message ?: e.javaClass.simpleName}"
                 )
             } finally {
                 registerInFlight.set(false)
@@ -399,27 +483,53 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** 设置页的「测试连接」：测输入框里当前这个地址，不必先保存。 */
     fun testConnection(rawUrl: String) {
+        if (!testInFlight.compareAndSet(false, true)) return
+
         val url = rawUrl.trim().ifBlank { DevicePrefs.DEFAULT_SERVER_URL }
-        _state.value = _state.value.copy(testResult = "测试中…")
+        _state.value = _state.value.copy(isTestingConnection = true)
 
         viewModelScope.launch {
             try {
-                val code = RetrofitClient.probe(url)
-                _state.value = _state.value.copy(testResult = "已连通（HTTP $code）")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    testResult = "连不上：${e.message ?: e.javaClass.simpleName}"
-                )
+                // probe 不再抛异常，连不上也是 ProbeResult 的一种，所以无需再包 try/catch
+                val (_, message) = describeProbe(RetrofitClient.probe(url))
+                _state.value = _state.value.copy(settingsMessage = message)
+            } finally {
+                // 放在 finally：协程被取消时也要把闸门和「测试中」状态放掉，
+                // 否则按钮会永远停在禁用态，用户只能杀掉应用。
+                testInFlight.set(false)
+                _state.value = _state.value.copy(isTestingConnection = false)
             }
         }
     }
 
-    fun clearTestResult() {
-        if (_state.value.testResult != null) {
-            _state.value = _state.value.copy(testResult = null)
+    /** 设置页展示完提示后调用，避免下次进设置页又冒出来。 */
+    fun clearSettingsMessage() {
+        if (_state.value.settingsMessage != null) {
+            _state.value = _state.value.copy(settingsMessage = null)
         }
+    }
+
+    /**
+     * 把探测结果翻成给现场人员看的一行字，第二项是「是否通过」。
+     *
+     * 自检页原先给「服务器连通」写死了 true —— 只要 probe 没抛异常就报通过，拿到 404
+     * 也打绿勾。这里统一由结果决定，「设置页」和「自检页」两个调用点不再各判各的。
+     */
+    private fun describeProbe(result: ProbeResult): Pair<Boolean, String> = when (result) {
+        is ProbeResult.Online ->
+            if (result.databaseUp) {
+                true to "已连通（服务正常）"
+            } else {
+                // 判为不通过：服务器活着但库挂了时，注册和上报全会失败，
+                // 显示成一切正常比显示成连不上更误事。
+                false to "服务在线，但它的数据库连不上，注册和上报都会失败"
+            }
+
+        is ProbeResult.NotOurService ->
+            false to "有响应但不是本服务（HTTP ${result.httpCode}），检查地址和端口是否填错"
+
+        is ProbeResult.Unreachable ->
+            false to "连不上：${result.reason}"
     }
 
     // ---------- 队列页 ----------
@@ -467,9 +577,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val removed = database.smsQueueDao().deleteAllUploaded()
                 Log.i(TAG, "Cleared $removed uploaded rows")
-                _state.value = _state.value.copy(testResult = "已清理 $removed 条已上传记录")
+                _state.value = _state.value.copy(settingsMessage = "已清理 $removed 条已上传记录")
             } catch (e: Exception) {
+                // 以前这里只写日志：清理失败时界面毫无反应，用户会以为按钮没生效，
+                // 然后一直点。失败也必须说出来。
                 Log.e(TAG, "Clear uploaded failed", e)
+                _state.value = _state.value.copy(
+                    settingsMessage = "清理失败：${e.message ?: e.javaClass.simpleName}"
+                )
             }
         }
     }
@@ -561,14 +676,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             )
 
             if (registered) {
-                try {
-                    val code = RetrofitClient.probe(DevicePrefs.serverUrl(app))
-                    add("服务器连通", true, "已连通（HTTP $code）")
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    add("服务器连通", false, "连不上：${e.message ?: e.javaClass.simpleName}")
-                }
+                // 探测结果自带「是否通过」。原先这里第二个参数写死 true，于是 404 也报通过。
+                val (serverOk, serverDetail) = describeProbe(
+                    RetrofitClient.probe(DevicePrefs.serverUrl(app))
+                )
+                add("服务器连通", serverOk, serverDetail)
 
                 val heartbeatOk = HeartbeatSender.send(app)
                 add(

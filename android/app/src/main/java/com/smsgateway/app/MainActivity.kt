@@ -11,11 +11,16 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -23,19 +28,26 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FactCheck
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
@@ -58,6 +70,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 让内容画到系统栏底下：首页那条渐变才能一直顶到状态栏，
+        // 而不是被一条深灰的横条截断（那是没开沉浸式时最显旧的一处）。
+        // 各页的 Scaffold 会自己处理内边距；首页是自己画的头部，见 HomeHeader 的 statusBarsPadding。
+        enableEdgeToEdge()
 
         requestRuntimePermissions()
 
@@ -120,10 +137,10 @@ fun GatewayApp(viewModel: DashboardViewModel) {
     // 没有导航库，系统返回键就得自己接。少了这一句，在子页面按返回会直接退出应用。
     BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
 
-    LaunchedEffect(state.registerError) {
-        state.registerError?.let { message ->
+    LaunchedEffect(state.registerMessage) {
+        state.registerMessage?.let { message ->
             snackbarHostState.showSnackbar(message)
-            viewModel.clearRegisterError()
+            viewModel.clearRegisterMessage()
         }
     }
 
@@ -192,89 +209,201 @@ fun HomeScreen(
 ) {
     val checks = rememberDeviceChecks()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("短信网关", fontWeight = FontWeight.Bold) },
-                actions = {
-                    IconButton(onClick = onOpenSelfTest) {
-                        Icon(Icons.AutoMirrored.Filled.FactCheck, contentDescription = "自检", tint = Color.White)
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // 顺序即优先级：最可能让人「什么也没发生」的问题排在最上面
-            if (!checks.smsPermission) {
-                PermissionBanner()
-            }
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            HomeHeader(onOpenSelfTest = onOpenSelfTest, onOpenSettings = onOpenSettings)
 
-            if (state.isDisabled) {
-                DisabledBanner(onCheckStatus = onCheckStatus, testResult = state.testResult)
-            }
-
-            if (!checks.ignoringBatteryOptimizations) {
-                BatteryBanner()
-            }
-
-            if (!state.isRegistered) {
-                RegistrationGuideCard(
-                    isRegistering = state.isRegistering,
-                    onRegister = onRegister
-                )
-            }
-
-            StatusCard(
-                state = state,
-                onOpenQueue = onOpenQueue,
-                onOpenServerSms = onOpenServerSms
-            )
-
-            Button(
-                onClick = onToggleService,
+            // 内容做成一张顶部圆角的「纸」，压在渐变头部上。
+            // 这是参考图里最值得留下的一笔：成本只是一个 Surface + 圆角，辨识度却上来了。
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(12.dp),
-                // 未注册不许启动。**被禁用时仍然允许启动** —— 心跳是设备唯一能发现自己
-                // 被恢复的通道，禁掉它就会造出「不可启动 → 不轮询 → 永远学不到已恢复」的死锁。
-                enabled = state.isRegistered || state.isRunning,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (state.isRunning) Color(0xFFF44336) else Color(0xFF1976D2)
-                )
+                    .weight(1f),
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                color = Color(0xFFF4F6FA)
             ) {
-                Icon(
-                    imageVector = if (state.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                    contentDescription = null
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = if (state.isRunning) "停止网关" else "启动网关", fontSize = 16.sp)
-            }
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp)
+                        // 底部让开手势条/导航栏，否则最后一行会被压在下面
+                        .navigationBarsPadding()
+                        .padding(top = 20.dp, bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // 顺序即优先级：最可能让人「什么也没发生」的问题排在最上面
+                    if (!checks.smsPermission) {
+                        PermissionBanner()
+                    }
 
-            if (!state.isRegistered) {
-                Text(
-                    text = "设备注册成功后才能启动网关。",
-                    fontSize = 12.sp,
-                    color = Color.Gray,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                    if (state.isDisabled) {
+                        DisabledBanner(onCheckStatus = onCheckStatus, testResult = state.testResult)
+                    }
+
+                    if (!checks.ignoringBatteryOptimizations) {
+                        BatteryBanner()
+                    }
+
+                    if (!state.isRegistered) {
+                        RegistrationGuideCard(
+                            isRegistering = state.isRegistering,
+                            onRegister = onRegister
+                        )
+                    }
+
+                    // 自上而下就是优先级：能不能用 → 怎么操作 → 今天干了多少 → 这台是谁
+                    HeroStatusCard(state = state)
+
+                    GatewayActionButton(
+                        isRunning = state.isRunning,
+                        // 未注册不许启动。**被禁用时仍然允许启动** —— 心跳是设备唯一能
+                        // 发现自己被恢复的通道，禁掉它就会造出「不可启动 → 不轮询 →
+                        // 永远学不到已恢复」的死锁。
+                        enabled = state.isRegistered || state.isRunning,
+                        onClick = onToggleService
+                    )
+
+                    MetricGrid(
+                        state = state,
+                        onOpenQueue = onOpenQueue,
+                        onOpenServerSms = onOpenServerSms
+                    )
+
+                    IdentityRow(state = state, onOpenSettings = onOpenSettings)
+                }
             }
+        }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+}
+
+/**
+ * 顶部渐变头部。
+ *
+ * 只放品牌与应用名，**不放「安全 · 稳定 · 便捷」那类标语** —— 这是内部工具，
+ * 现场一天要开十次，那行字占的高度不如留给状态。操作入口（自检、设置）留在这里，
+ * 与内容页分开，滚动时不会跟着跑。
+ */
+@Composable
+private fun HomeHeader(onOpenSelfTest: () -> Unit, onOpenSettings: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(listOf(Color(0xFF0D47A1), Color(0xFF1E88E5)))
+            )
+            // 开了沉浸式之后得自己让开状态栏，否则标题会被时间、电量压住
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(Color.White),
+            contentAlignment = Alignment.Center
+        ) {
+            // 与启动图标同一套意象：信封 + 信号波。
+            // 白底蓝标是一个真正的 logo 块，而不是一个默认的 Material 图标 ——
+            // 应用图标长什么样、界面里就是什么样，两者对得上才叫品牌。
+            Icon(
+                painter = painterResource(R.drawable.ic_logo_mark),
+                contentDescription = null,
+                tint = Color(0xFF1E88E5),
+                modifier = Modifier.size(24.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        // 取 @string/app_name 而非再写一遍字面量：这个名字改过一次，
+        // 当时只改了清单里的 label，标题栏留了旧名，两处不同步就是这么来的。
+        Text(
+            text = stringResource(R.string.app_name),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        IconButton(onClick = onOpenSelfTest) {
+            Icon(Icons.AutoMirrored.Filled.FactCheck, contentDescription = "自检", tint = Color.White)
+        }
+        IconButton(onClick = onOpenSettings) {
+            Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White)
+        }
+    }
+}
+
+/**
+ * 主操作：一个大圆钮。
+ *
+ * 圆钮只表达**动作**（动作名写在圆里），状态由它上面那张卡负责 ——
+ * 两者刻意分开。把状态色涂到按钮上，会让「红色＝正在运行（点我停）」和
+ * 「红色＝出问题了」混成一件事，而这台设备真出问题时恰恰最需要一眼看出来。
+ * 按钮的红色只表示「这一下会停掉它」，是破坏性操作的常规语义。
+ */
+@Composable
+private fun GatewayActionButton(isRunning: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    // 用动画过渡而不是硬切：开关网关是个有后果的动作，颜色突变会让人觉得"跳了一下"
+    val actionColor by animateColorAsState(
+        targetValue = if (isRunning) Color(0xFFE53935) else Color(0xFF1E88E5),
+        label = "actionColor"
+    )
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(148.dp)
+                .clip(CircleShape)
+                // 用描边环而不是半透明色块：半透明填充会和页面底色混在一起、边缘发糊，
+                // 描边是有明确边界的一圈，投影之下更像一个真正的按钮。
+                .border(
+                    width = 10.dp,
+                    color = if (enabled) actionColor.copy(alpha = 0.14f) else Color(0xFFEEEEEE),
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(116.dp)
+                    .clip(CircleShape)
+                    .background(if (enabled) actionColor else Color(0xFFBDBDBD))
+                    .clickable(enabled = enabled, onClick = onClick),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = if (isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (isRunning) "停止网关" else "启动网关",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+            }
+        }
+
+        if (!enabled) {
+            Text(
+                text = "设备注册成功后才能启动网关",
+                fontSize = 12.sp,
+                color = Color(0xFF9E9E9E)
+            )
         }
     }
 }
@@ -414,78 +543,260 @@ private fun RegistrationGuideCard(isRegistering: Boolean, onRegister: () -> Unit
     }
 }
 
+// ==================== 主页状态区 ====================
+
+/**
+ * 最上方那张「一眼判断」的卡：一句话说清现在到底能不能用。
+ *
+ * 它是整个界面的视觉重心 —— 现场打开这个应用，十次里有九次只想知道这一件事。
+ */
 @Composable
-private fun StatusCard(
+private fun HeroStatusCard(state: DashboardState) {
+    // 只取一次 now：同一帧里分两处算相对时间，会算出两个不同的值
+    val now = System.currentTimeMillis()
+    val hero = heroStatus(state, now)
+
+    // 状态会变（比如刚启动 → 已连接），颜色跟着渐变过去，比整块突然换色舒服
+    val accent by animateColorAsState(targetValue = hero.accent, label = "heroAccent")
+    val background by animateColorAsState(targetValue = hero.background, label = "heroBackground")
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = background)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 22.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = hero.icon,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(
+                    text = hero.title,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = accent
+                )
+                Text(
+                    text = hero.subtitle,
+                    fontSize = 13.sp,
+                    color = accent.copy(alpha = 0.8f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 三个指标块。数字下面那行小字不是装饰 —— 它回答的是「这个数字意味着什么」。
+ *
+ * 「今日验证码 0」本身看不出好坏：是真没短信，还是收到了却没识别出来？
+ * 后者要去查采集规则，前者什么都不用做 —— 差别全在那行小字里。
+ */
+/**
+ * 三个指标一格排开，中间细分隔线。
+ *
+ * 数字下面那行小字不是装饰 —— 它回答的是「这个数字意味着什么」：
+ * 「今日验证码 0」本身看不出好坏，配上「有短信，未提取到」才知道要去查采集规则，
+ * 而「今天还没有收到」说明什么都不用做。差别全在那行小字里。
+ */
+@Composable
+private fun MetricGrid(
     state: DashboardState,
     onOpenQueue: () -> Unit,
     onOpenServerSms: () -> Unit
 ) {
-    // 后端判离线的阈值是 90 秒，超过就标红，免得盯着一个旧时间戳以为一切正常
-    val now = System.currentTimeMillis()
-    val heartbeatStale = state.lastHeartbeatAt?.let { now - it > HEARTBEAT_STALE_MS } ?: false
-    val server = serverStatus(state, now)
-
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (state.isRunning) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
-        )
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (state.isRunning) Icons.Default.CheckCircle else Icons.Default.Cancel,
-                    contentDescription = null,
-                    tint = if (state.isRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (state.isRunning) "● 网关运行中" else "○ 网关已停止",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (state.isRunning) Color(0xFF2E7D32) else Color(0xFFC62828)
-                )
-            }
-
-            HorizontalDivider()
-
-            // 「未设置」这类展示文案留在界面层，state 里存的是原始空串
-            StatusRow(label = "设备", value = state.deviceId.abbreviateId())
-            StatusRow(label = "手机号", value = state.phone.ifBlank { "未设置" })
-            StatusRow(
-                label = "服务器",
-                value = server.text,
-                valueColor = if (server.problem) Color(0xFFC62828) else null
-            )
-            StatusRow(
-                label = "最后心跳",
-                value = formatRelative(state.lastHeartbeatAt, now),
-                valueColor = if (heartbeatStale) Color(0xFFC62828) else null
-            )
-
-            // 这两行可点进详情页：一个看还没传上去的（本地队列），一个看已经传上去的（服务端判定）
-            StatusRow(
+            MetricCell(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.CloudUpload,
+                value = state.pendingCount,
                 label = "待上传",
-                value = "${state.pendingCount}",
-                valueColor = if (state.pendingCount > 0) Color(0xFFF57C00) else null,
+                hint = if (state.pendingCount == 0) "全部已上传" else "正在重试",
+                // 颜色**只用来报警**，不做身份装饰。
+                // 三个数字各染一色（蓝/绿/灰）看着热闹，但橙色的"出事了"就被淹没了；
+                // 现在常态一律用同一个墨色，只有真需要处理的那一项才跳出来。
+                alert = state.pendingCount > 0,
                 onClick = onOpenQueue
             )
-            StatusRow(
+            MetricDivider()
+            MetricCell(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Forum,
+                value = state.todaySmsCount,
                 label = "今日短信",
-                value = "${state.todaySmsCount}",
+                hint = if (state.todaySmsCount == 0) "今天还没有收到" else "点开看明细",
+                alert = false,
                 onClick = onOpenServerSms
             )
-            StatusRow(
+            MetricDivider()
+            MetricCell(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.VerifiedUser,
+                value = state.todayCodeCount,
                 label = "今日验证码",
-                value = "${state.todayCodeCount}",
+                hint = when {
+                    state.todayCodeCount > 0 -> "点开看明细"
+                    // 有短信却一条验证码都没提取出来，这才是真该去查规则的情况
+                    state.todaySmsCount > 0 -> "有短信，未提取到"
+                    else -> "今天还没有收到"
+                },
+                alert = state.todayCodeCount == 0 && state.todaySmsCount > 0,
                 onClick = onOpenServerSms
             )
         }
+    }
+}
+
+@Composable
+private fun MetricDivider() {
+    Box(
+        modifier = Modifier
+            .width(1.dp)
+            .height(46.dp)
+            .background(Color(0xFFEEEEEE))
+    )
+}
+
+@Composable
+private fun MetricCell(
+    modifier: Modifier,
+    icon: ImageVector,
+    value: Int,
+    label: String,
+    hint: String,
+    /** 这一项是否需要人去处理。只有它为真时颜色才跳出来。 */
+    alert: Boolean,
+    onClick: () -> Unit
+) {
+    val alertColor = Color(0xFFE65100)
+    // 数字和提示一起变 —— 只把数字染橙的话，一个橙色的「0」反而更让人费解
+    val valueColor = if (alert) alertColor else Color(0xFF263238)
+    val iconColor = if (alert) alertColor else Color(0xFF78909C)
+
+    Column(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = iconColor,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF546E7A)
+            )
+        }
+        Text(
+            text = value.toString(),
+            fontSize = 26.sp,
+            fontWeight = FontWeight.Bold,
+            color = valueColor
+        )
+        Text(
+            text = hint,
+            fontSize = 11.sp,
+            color = if (alert) alertColor.copy(alpha = 0.75f) else Color(0xFF9E9E9E),
+            textAlign = TextAlign.Center,
+            lineHeight = 13.sp,
+            maxLines = 2
+        )
+    }
+}
+
+/**
+ * 设备身份。刻意放在最下面、且不加卡片 —— 这两项配好之后就不会再变，
+ * 只需要「需要时找得到」，不需要「每次打开都看见」。点进去是设置页。
+ */
+@Composable
+private fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
+    // 装进卡片而不是直接摊在灰底上：这两行是「一块内容」而不是两行飘着的字，
+    // 有边界之后它才和上面几块读起来是一套东西。
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Column(modifier = Modifier.padding(vertical = 2.dp)) {
+            IdentityLine(
+                icon = Icons.Default.Smartphone,
+                label = "设备",
+                value = state.deviceId.abbreviateId(),
+                onClick = onOpenSettings
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 44.dp, end = 14.dp),
+                thickness = 1.dp,
+                color = Color(0xFFF0F0F0)
+            )
+            IdentityLine(
+                icon = Icons.Default.Phone,
+                label = "手机号",
+                value = state.phone.ifBlank { "未设置" },
+                onClick = onOpenSettings
+            )
+        }
+    }
+}
+
+@Composable
+private fun IdentityLine(icon: ImageVector, label: String, value: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Color(0xFF90A4AE),
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(text = label, fontSize = 14.sp, color = Color(0xFF546E7A))
+        Spacer(modifier = Modifier.weight(1f))
+        Text(text = value, fontSize = 13.sp, color = Color(0xFF37474F))
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = Color(0xFFBDBDBD),
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 
@@ -514,6 +825,15 @@ fun SettingsScreen(
 
     fun toast(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    // 设置页的提示（测试连接结论、清理记录结果）一闪而过，不在页面上留残余。
+    // 写法与主页处理 registerMessage 那处一致：展示完立刻清掉状态，否则下次进来还会冒出来。
+    LaunchedEffect(state.settingsMessage) {
+        state.settingsMessage?.let {
+            toast(it)
+            viewModel.clearSettingsMessage()
+        }
     }
 
     Scaffold(
@@ -552,9 +872,16 @@ fun SettingsScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = {
-                            viewModel.updateServerUrl(serverUrlInput)
                             focusManager.clearFocus()
-                            toast("服务器地址已保存")
+                            // 只在校验通过、真的存进去之后才说「已保存」。
+                            // 原来不看结果一律弹成功，地址敲错也照样报「已保存」。
+                            toast(
+                                if (viewModel.updateServerUrl(serverUrlInput)) {
+                                    "服务器地址已保存"
+                                } else {
+                                    "地址格式不合法，未保存"
+                                }
+                            )
                         },
                         modifier = Modifier.weight(1f),
                         enabled = serverUrlInput.isNotBlank()
@@ -566,13 +893,18 @@ fun SettingsScreen(
                             viewModel.testConnection(serverUrlInput)
                         },
                         modifier = Modifier.weight(1f),
-                        enabled = serverUrlInput.isNotBlank()
-                    ) { Text("测试连接") }
+                        // 探测进行中禁用：连点会起出多个并发探测，谁先回来谁把状态置为结束
+                        enabled = serverUrlInput.isNotBlank() && !state.isTestingConnection
+                    ) {
+                        // 进行中状态就长在按钮自己身上，不另起一行 —— 另起一行会把它下面的
+                        // 「配置二维码」按钮顶来顶去。写法同下面「注册中… / 重新注册」那处。
+                        if (state.isTestingConnection) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(if (state.isTestingConnection) "测试中…" else "测试连接")
+                    }
                 }
-                state.testResult?.let {
-                    Text(text = it, fontSize = 13.sp, color = Color.Gray)
-                }
-
                 OutlinedButton(
                     onClick = onOpenQrConfig,
                     modifier = Modifier.fillMaxWidth()
@@ -1146,27 +1478,73 @@ private fun openAppDetailsSettings(context: Context) {
 /** 后端以 90 秒为判离线阈值，这里跟着它走。 */
 private const val HEARTBEAT_STALE_MS = 90_000L
 
-private data class ServerStatus(val text: String, val problem: Boolean)
-
 /**
- * 服务器连接状态，**由实时证据推导**。
+ * 主界面顶部那句话的判定。
  *
- * 早先它是 DashboardState 里一个存储字段，只在注册请求里被写过、也不持久化，
- * 结果每次冷启动都退回「未连接」——哪怕设备已注册、服务在跑、心跳正常，
- * 而它下面一行的「最后心跳」是实时的，两行自相矛盾。
- *
- * 真正能说明连接状况的是：有没有注册、服务在不在跑、最近一次心跳距今多久。
+ * 分支顺序就是「谁更该被先说」：被禁用 > 未注册 > 没在跑 > 心跳有问题 > 正常。
+ * 前四种都意味着「现在收不到验证码」，只是原因不同 ——
+ * 标题给结论，副标题给原因，颜色给严重程度。现场不需要逐行读表格就能判断。
  */
-private fun serverStatus(state: DashboardState, now: Long): ServerStatus = when {
-    state.isDisabled -> ServerStatus("已被禁用", true)
-    !state.isRegistered -> ServerStatus("未注册", false)
-    !state.isRunning -> ServerStatus("未运行", false)
-    state.lastHeartbeatAt == null -> ServerStatus("等待首次心跳", false)
-    now - state.lastHeartbeatAt <= HEARTBEAT_STALE_MS -> ServerStatus("已连接", false)
-    else -> ServerStatus("连接中断", true)
+private fun heroStatus(state: DashboardState, now: Long): HeroStatus = when {
+    state.isDisabled -> HeroStatus(
+        title = "已被管理员禁用",
+        subtitle = "心跳仍在跑，管理员恢复后会自动接上",
+        accent = Color(0xFF5E35B1),
+        background = Color(0xFFEDE7F6),
+        icon = Icons.Default.Block
+    )
+
+    !state.isRegistered -> HeroStatus(
+        title = "未注册",
+        subtitle = "先注册设备，否则一条短信也传不上去",
+        accent = Color(0xFF1565C0),
+        background = Color(0xFFE3F2FD),
+        icon = Icons.Default.AppRegistration
+    )
+
+    !state.isRunning -> HeroStatus(
+        title = "网关已停止",
+        subtitle = "短信会留在本地，不会上报",
+        accent = Color(0xFFC62828),
+        background = Color(0xFFFFEBEE),
+        icon = Icons.Default.Cancel
+    )
+
+    state.lastHeartbeatAt == null -> HeroStatus(
+        title = "已启动，等待心跳",
+        subtitle = "服务刚起来，正在连服务器",
+        accent = Color(0xFFEF6C00),
+        background = Color(0xFFFFF3E0),
+        icon = Icons.Default.Sync
+    )
+
+    // 阈值与后端判离线的那条对齐（90 秒），否则会出现这边显示正常、
+    // 管理后台已标红的两套说法
+    now - state.lastHeartbeatAt > HEARTBEAT_STALE_MS -> HeroStatus(
+        title = "连接中断",
+        subtitle = "最后心跳 ${formatRelative(state.lastHeartbeatAt, now)}",
+        accent = Color(0xFFE65100),
+        background = Color(0xFFFFF3E0),
+        icon = Icons.Default.Warning
+    )
+
+    else -> HeroStatus(
+        title = "网关运行中",
+        subtitle = "已连接 · ${formatRelative(state.lastHeartbeatAt, now)}",
+        accent = Color(0xFF2E7D32),
+        background = Color(0xFFE8F5E9),
+        icon = Icons.Default.CheckCircle
+    )
 }
 
-/** 状态卡片一行放不下 36 字符的 UUID，显示前 8 位即可辨认；完整值在设置页。 */
+private data class HeroStatus(
+    val title: String,
+    val subtitle: String,
+    val accent: Color,
+    val background: Color,
+    val icon: ImageVector
+)
+
 private fun String.abbreviateId(): String =
     if (isBlank()) "未设置" else if (length <= 12) this else "${take(8)}…"
 

@@ -4,9 +4,11 @@ import android.content.Context
 import android.util.Log
 import androidx.work.*
 import com.smsgateway.app.database.AppDatabase
+import com.smsgateway.app.database.SmsQueueDao
 import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.SmsUploadRequest
 import com.smsgateway.app.network.RetrofitClient
+import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
 import kotlinx.coroutines.CancellationException
@@ -26,6 +28,12 @@ class SmsUploadWorker(
     companion object {
         private const val TAG = "SmsUploadWorker"
         private const val WORK_NAME = "sms_upload"
+
+        /** 单轮工作的最大尝试次数，超过就收手，不让 WorkManager 无限重试下去。 */
+        private const val MAX_ATTEMPTS = 5
+
+        /** 已上传的行在本地保留多久。到期由 [pruneOldUploads] 清掉。 */
+        private const val UPLOADED_RETENTION_DAYS = 7L
 
         fun enqueue(context: Context) {
             val constraints = Constraints.Builder()
@@ -56,6 +64,32 @@ class SmsUploadWorker(
      * 都当成失败会让设备对着不可能成功的条件无限重试，都当成成功又会丢数据。
      */
     private enum class Outcome { SUCCESS, DISABLED, UNAUTHORIZED, INVALID, TRANSIENT }
+
+    /**
+     * 清掉早就传完的历史行。
+     *
+     * 原先的 `deleteOldRecords` 只有定义、全项目没有一个调用点（设置页那句注释里说的
+     * 「终于接上了」接的其实是 `deleteAllUploaded`，那个只在用户手动点「清理」时才跑）。
+     * 于是已上传的行会一直堆在库里，而每一行都存着短信全文与提取出的验证码明文 ——
+     * 应用数据体积、云备份体积、以及数据暴露面都随时间只增不减。
+     *
+     * 放在这里是因为上传工作是唯一会定期跑起来的路径。清库失败不该影响上报，
+     * 所以整段吞掉异常只记日志。
+     */
+    private suspend fun pruneOldUploads(dao: SmsQueueDao) {
+        try {
+            val cutoff = System.currentTimeMillis() -
+                TimeUnit.DAYS.toMillis(UPLOADED_RETENTION_DAYS)
+            val removed = dao.deleteOldRecords(cutoff)
+            if (removed > 0) {
+                Log.i(TAG, "Pruned $removed uploaded rows older than $UPLOADED_RETENTION_DAYS days")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Prune uploaded rows failed", e)
+        }
+    }
 
     override suspend fun doWork(): Result {
         return withContext(Dispatchers.IO) {
@@ -103,7 +137,12 @@ class SmsUploadWorker(
 
                         Outcome.UNAUTHORIZED -> {
                             // 令牌失效但设备标识还在。不重试，等重新注册拿回新令牌。
+                            //
+                            // 同时清掉本地令牌并置一个一次性事件：只打日志的话，
+                            // isRegistered 仍是 true、界面一直显示「已注册」，
+                            // 而设备其实静默地什么都传不上去。提示由界面消费该事件后发出。
                             Log.w(TAG, "Token rejected, parking queue until re-register")
+                            AuthState.markTokenRejected(context)
                             return@withContext Result.success()
                         }
 
@@ -129,7 +168,28 @@ class SmsUploadWorker(
                     }
                 }
 
-                if (allSuccess) Result.success() else Result.retry()
+                pruneOldUploads(dao)
+
+                when {
+                    allSuccess -> Result.success()
+
+                    // 退避封顶到 WorkManager 的 5 小时之后会一直重试下去，永不停止 ——
+                    // 一条服务端必然拒绝的短信（例如撞上唯一约束返回 500）会让设备此后
+                    // 每隔 5 小时被唤醒一次，永远，纯烧电。
+                    //
+                    // 放弃的是**这一轮**，不是这条数据：失败的行写回的是 pending，
+                    // 仍留在队列里，下次有新短信进来重新 enqueue 时会再带上它。
+                    runAttemptCount >= MAX_ATTEMPTS -> {
+                        Log.w(
+                            TAG,
+                            "Reached max attempts ($runAttemptCount), stopping this run; " +
+                                "unsent rows stay pending for the next trigger"
+                        )
+                        Result.success()
+                    }
+
+                    else -> Result.retry()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
