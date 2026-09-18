@@ -69,7 +69,7 @@ sms-gateway/
 │   │   ├── interceptor/  三套鉴权拦截器
 │   │   ├── service/      业务逻辑，CollectRuleEngine 是规则引擎
 │   │   └── model/        entity / dto / enums
-│   └── sql/schema.sql    建表 + 种子规则（v2 最终态）
+│   └── sql/schema.sql    建库 / 升级单文件（幂等，全新库与老库都适用）
 ├── management/       管理后台（Vue 3 + TypeScript + Element Plus + Pinia）
 │   └── src/views/        仪表盘 / 设备 / 短信 / 规则 / API 密钥 / 接口文档
 └── docker/           docker-compose.yml（MySQL + Redis + Backend）
@@ -99,8 +99,14 @@ docker compose up -d mysql redis
 `docker-compose.yml` 会自动挂载 `backend/sql/schema.sql` 完成建库建表和种子规则写入。若使用已有的 MySQL 实例，手工执行：
 
 ```bash
-mysql -u root -p < backend/sql/schema.sql
+mysql --default-character-set=utf8mb4 -u root -p sms_gateway < backend/sql/schema.sql
 ```
+
+`--default-character-set=utf8mb4` 不能省：中文 Windows 版 MySQL 的 client 字符集默认是
+gbk，读 UTF-8 的脚本会报 `Data too long for column 'rule_name'` 这种看似毫不相干的错。
+
+脚本是**幂等**的，且**不切库**（没有 `USE`）—— 所以命令里必须指定目标库，跑错库会直接报
+`No database selected`，而不是静默写到别处去。全新库、老库升级、重复执行都用这一条命令。
 
 ### 2. 启动后端
 
@@ -422,7 +428,7 @@ cd android && gradle test
 - **Android release 不开混淆。** Gson 靠反射读字段名、Room 同理，被 R8 改名后会静默失败（表现为「接口通了但字段全是 null」）。要开启需先补全 keep 规则并回归测试。
 - **Android 离线队列。** 短信先写入 Room，再由 WorkManager 重试上报，弱网或息屏时不丢数据。
 - **前台服务 + 电池优化白名单。** MIUI 等 ROM 会在息屏后杀掉前台服务且无任何提示，因此引导用户加白名单，部分 ROM 拒绝该 Intent 时退回应用详情页。
-- **数据库不提供增量升级脚本。** `sql/schema.sql` 是 v2 最终态建库脚本，适用于全新库；老库升级需比对该文件手工补列。
+- **数据库升级就是重跑一遍 `sql/schema.sql`。** 它是幂等的单文件：建表用 `IF NOT EXISTS`，补列补索引先查 `information_schema` 再动手（MySQL 8.0 没有 `ADD COLUMN IF NOT EXISTS`，只能这么写），种子数据只在表为空时插入。全新库与老库升级共用这一条命令。
 
 ---
 
