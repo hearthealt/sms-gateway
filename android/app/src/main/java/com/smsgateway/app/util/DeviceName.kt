@@ -25,11 +25,37 @@ object DeviceName {
     private const val KEY_BLUETOOTH_NAME = "bluetooth_name"
     private const val KEY_DEVICE_NAME = "device_name"
 
+    /** 机型名与设备标识之间的分隔符。改这里会同时改变后台里已有的名字。 */
+    private const val SUFFIX_SEPARATOR = " · "
+
+    /** 标识取前几位。8 位十六进制足够区分一个车队，又不至于把名字撑长。 */
+    private const val SUFFIX_LENGTH = 8
+
     fun read(context: Context): String {
-        readSetting(context, secure = true, KEY_BLUETOOTH_NAME)?.let { return it }
-        readSetting(context, secure = false, KEY_DEVICE_NAME)?.let { return it }
-        return "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+        val base = readSetting(context, secure = true, KEY_BLUETOOTH_NAME)
+            ?: readSetting(context, secure = false, KEY_DEVICE_NAME)
+            ?: "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+        val suffix = idSuffix(context)
+        return if (suffix.isEmpty()) base else base + SUFFIX_SEPARATOR + suffix
     }
+
+    /**
+     * 设备标识里能区分的那一段，接在机型名后面。
+     *
+     * **必须带这一段**：系统里能读到的只有机型名（`device_name`，见上面的说明），
+     * 于是两台小米 17 上报的名字完全一样，管理后台根本分不出哪台是哪台 ——
+     * 同型号的车队里这是必然发生的，不是概率问题。
+     *
+     * 取值与管控台设备列表「设备ID」列显示的是同一段（那边剥掉 `android-` 前缀后取前 8 位），
+     * 所以现场两台手机摆一起，能一眼对上后台哪一行是哪台。
+     *
+     * 注册之前设备标识还是空的，那时只有机型名；注册后第一次心跳（≤30 秒）就会补上。
+     */
+    private fun idSuffix(context: Context): String =
+        DevicePrefs.deviceId(context)
+            .removePrefix("android-")
+            .take(SUFFIX_LENGTH)
 
     /**
      * 取值失败一律当没有：某些 ROM 会在这里抛 SecurityException，
