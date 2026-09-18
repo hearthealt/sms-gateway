@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { getValidToken } from '../utils/auth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -75,7 +76,8 @@ const router = createRouter({
 })
 
 router.beforeEach((to, _from, next) => {
-  const token = localStorage.getItem('token')
+  // 判「有没有」不够：服务端 TTL 一到，界面一切正常但点什么都失败
+  const token = getValidToken()
   if (to.meta.requiresAuth !== false && !token) {
     next('/login')
   } else if (to.path === '/login' && token) {

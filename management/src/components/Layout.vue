@@ -82,6 +82,7 @@ import { defineComponent, computed, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Expand, Fold, ArrowDown } from '@element-plus/icons-vue'
 import { logout } from '../api/auth'
+import { clearSession, getUsername } from '../utils/auth'
 
 export default defineComponent({
   name: 'AppLayout',
@@ -91,7 +92,7 @@ export default defineComponent({
     const route = useRoute()
     const isCollapsed = ref(false)
 
-    const username = computed(() => localStorage.getItem('username') || 'admin')
+    const username = computed(() => getUsername() || 'admin')
     const sidebarBg = '#1d2b3a'
     const sidebarText = '#bfcbd9'
     const sidebarActive = '#409eff'
@@ -125,8 +126,7 @@ export default defineComponent({
         // 通知后端作废该 token；失败也照常清理本地状态并跳转，
         // 否则用户会卡在退不出去的界面上。
         logout().catch(() => {}).finally(() => {
-          localStorage.removeItem('token')
-          localStorage.removeItem('username')
+          clearSession()
           router.push('/login')
         })
       }

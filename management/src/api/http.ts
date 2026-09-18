@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { clearSession, getValidToken } from '../utils/auth'
 import type { AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '../router'
@@ -16,7 +17,7 @@ const http = axios.create({
 })
 
 http.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
+  const token = getValidToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -43,8 +44,7 @@ http.interceptors.response.use(
     const status = error.response?.status
 
     if (status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('username')
+      clearSession()
       if (router.currentRoute.value.path !== '/login') {
         ElMessage.error('登录已过期，请重新登录')
         router.push('/login')

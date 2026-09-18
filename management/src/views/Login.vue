@@ -93,6 +93,7 @@ import { ElMessage } from 'element-plus'
 import { User, Lock, CircleCheck } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { login } from '../api/auth'
+import { saveSession } from '../utils/auth'
 
 const router = useRouter()
 const formRef = ref<FormInstance>()
@@ -128,8 +129,7 @@ async function handleLogin() {
   loading.value = true
   try {
     const result = await login(form.username, form.password)
-    localStorage.setItem('token', result.token)
-    localStorage.setItem('username', result.displayName || result.username)
+    saveSession(result.token, result.displayName || result.username, result.expiresIn)
     ElMessage.success('登录成功')
     router.push('/dashboard')
   } catch {

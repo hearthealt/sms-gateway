@@ -88,6 +88,8 @@ export interface LoginResult {
   token: string
   username: string
   displayName: string | null
+  /** 令牌有效期（秒），服务端下发。前端据此自己判断过期，不必等一次失败请求。 */
+  expiresIn: number
 }
 
 export interface PaginatedResponse<T> {
