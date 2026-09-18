@@ -1,7 +1,7 @@
 <template>
   <div class="apikey-management">
-    <!-- Header Actions -->
-    <el-card shadow="never" class="action-card">
+    <el-card shadow="never">
+      <!-- Header Actions -->
       <div class="action-bar">
         <div class="action-left">
           <span class="action-title">API 密钥</span>
@@ -11,13 +11,19 @@
           <el-icon><Plus /></el-icon> 签发密钥
         </el-button>
       </div>
-    </el-card>
 
-    <!-- Key Table -->
-    <el-card shadow="never" class="table-card">
-      <el-table :data="keys" stripe style="width: 100%" v-loading="loading" empty-text="暂无密钥，点击上方按钮签发">
-        <el-table-column prop="name" label="用途备注" min-width="150" show-overflow-tooltip />
-        <el-table-column label="密钥" min-width="365">
+      <!--
+        列宽合计 1025px，1366 窗口可用宽约 1042px，刚好不横向滚动。
+        改前合计 1085px（密钥列留了 365px、用途备注 150px），在 1366 下会横向滚动。
+      -->
+      <el-table :data="keys" stripe style="width: 100%" v-loading="loading">
+        <el-table-column prop="name" label="用途备注" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="cell-primary">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <!-- 展开后是 35 字符的 sk- 密钥，340px 是保证它不被截断的宽度 -->
+        <el-table-column label="密钥" min-width="340">
           <template #default="{ row }">
             <div class="key-cell">
               <span class="key-text">{{ revealed[row.id] ? row.apiKey : maskKey(row.apiKey) }}</span>
@@ -30,7 +36,8 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="80" align="center">
+        <!-- 表头用「启用」而不是「状态」：这格放的是开关，标的是它的作用，和规则管理页一致 -->
+        <el-table-column label="启用" width="80" align="center">
           <template #default="{ row }">
             <el-switch
               :model-value="row.enabled"
@@ -40,7 +47,7 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="过期时间" width="205">
+        <el-table-column label="过期时间" width="200">
           <template #default="{ row }">
             <span v-if="!row.expiresAt" class="no-code">永久</span>
             <template v-else-if="isExpired(row.expiresAt)">
@@ -50,13 +57,13 @@
             <span v-else class="time-text">{{ formatTime(row.expiresAt) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="最后使用" width="175">
+        <el-table-column label="最后使用" width="165">
           <template #default="{ row }">
             <span v-if="row.lastUsedAt" class="time-text">{{ formatTime(row.lastUsedAt) }}</span>
             <span v-else class="no-code">从未使用</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="110" fixed="right">
+        <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
             <el-popconfirm
               title="删除后使用该密钥的调用方会立即 401，确定删除吗？"
@@ -70,6 +77,9 @@
             </el-popconfirm>
           </template>
         </el-table-column>
+        <template #empty>
+          <el-empty description="暂无密钥，点击右上角「签发密钥」添加" :image-size="80" />
+        </template>
       </el-table>
     </el-card>
 
@@ -235,15 +245,18 @@ onMounted(loadKeys)
 </script>
 
 <style scoped>
-.action-card {
-  margin-bottom: 16px;
-  border-radius: var(--border-radius-base);
-  border: 1px solid var(--color-border-light);
-}
+/*
+ * 标题行和表格同处一张卡，中间用一条细分隔线分区
+ * （与 DeviceList / SmsList / RuleManagement 一致）。
+ * 圆角与边框由 App.vue 的 .el-card 全局规则给，这里不重复声明。
+ */
 .action-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding-bottom: 20px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 .action-left {
   display: flex;
@@ -256,16 +269,7 @@ onMounted(loadKeys)
   color: var(--color-text-primary);
 }
 
-.table-card {
-  border-radius: var(--border-radius-base);
-  border: 1px solid var(--color-border-light);
-}
-
-:deep(.el-table th.el-table__cell) {
-  background: var(--color-bg) !important;
-  color: var(--color-text-regular);
-  font-weight: 600;
-}
+/* 表头配色、行高、斑马纹统一在 App.vue 的 .el-table 里定义，此处不再覆盖 */
 
 /*
  * 行高统一：数据单元格一律不换行，超出部分截断。
@@ -276,6 +280,12 @@ onMounted(loadKeys)
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 主标识列：用途备注是人认密钥的入口，比相邻列重一点 */
+.cell-primary {
+  font-weight: 500;
+  color: var(--color-text-primary);
 }
 
 /* 密钥用等宽字体，展开时才好逐位核对 */

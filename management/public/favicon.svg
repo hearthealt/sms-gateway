@@ -1,0 +1,28 @@
+<!--
+  管理后台的标签页图标：与应用内 logo 同一个标记（圆角方块 + 蓝绿渐变 + 对勾）。
+  放在 public/ 下，Vite 原样拷到产物根目录，index.html 用 /favicon.svg 引用。
+
+  这里是独立文件，渐变两端写的是字面色值 —— 它不在 CSS 令牌体系里，
+  改主色时记得一并看这里。
+
+  gradientUnits 必须是 userSpaceOnUse：默认的 objectBoundingBox 会把
+  x2="32" 解释成「32 个包围盒宽」，而矩形只占 0~1，于是渐变只露出 1/32、
+  渲染出来几乎就是纯 #409eff。应用内那几处 logo 原先正是这个问题，已一并修正。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="32" y2="32">
+      <stop stop-color="#409eff" />
+      <stop offset="1" stop-color="#36d399" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#g)" />
+  <path
+    d="M8 16L14 22L24 10"
+    fill="none"
+    stroke="#fff"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

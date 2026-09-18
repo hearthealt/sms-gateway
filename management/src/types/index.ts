@@ -31,7 +31,10 @@ export interface SmsRecord {
   /** 采集状态：RECEIVED / DUPLICATE / PROCESSED / IGNORED（命中 ignore 规则）。 */
   status: string | null
   receiveTime: string
-  isRead: boolean
+  /** 这段内容后来又收到过几次。0 = 只收到过一次。 */
+  duplicateCount: number
+  /** 最后一次收到这条内容的时刻（重复到达会把它顶上去）。 */
+  updatedAt: string
 }
 
 export interface CollectRule {

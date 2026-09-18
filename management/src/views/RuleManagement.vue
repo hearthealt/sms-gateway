@@ -1,7 +1,7 @@
 <template>
   <div class="rule-management">
-    <!-- Header Actions -->
-    <el-card shadow="never" class="action-card">
+    <el-card shadow="never">
+      <!-- Header Actions -->
       <div class="action-bar">
         <div class="action-left">
           <span class="action-title">采集规则</span>
@@ -11,31 +11,32 @@
           <el-icon><Plus /></el-icon> 新增规则
         </el-button>
       </div>
-    </el-card>
 
-    <!-- Rule Table -->
-    <el-card shadow="never" class="table-card">
-      <el-table :data="rules" stripe style="width: 100%" v-loading="loading" empty-text="暂无规则，点击上方按钮添加">
-        <el-table-column prop="ruleName" label="规则名称" min-width="140" />
-        <el-table-column prop="senderPattern" label="发送方匹配" min-width="160" />
-        <el-table-column prop="keywordPattern" label="关键词匹配" min-width="160" />
+      <el-table :data="rules" stripe style="width: 100%" v-loading="loading">
+        <el-table-column prop="ruleName" label="规则名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="cell-primary">{{ row.ruleName }}</span>
+          </template>
+        </el-table-column>
+        <!-- 两个匹配模式长度不可控（支持 LIKE 与正则），一律配 tooltip 截断显示 -->
+        <el-table-column prop="senderPattern" label="发送方匹配" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="keywordPattern" label="关键词匹配" min-width="150" show-overflow-tooltip />
         <el-table-column label="动作" width="90">
           <template #default="{ row }">
             <status-badge :status="row.action" />
           </template>
         </el-table-column>
-        <el-table-column prop="priority" label="优先级" width="90">
+        <!--
+          优先级改回纯数字。原先按 >=70 红、>=40 橙、其余灰上三色标签，
+          可优先级只是个排序权重，不是状态 —— 标红会被读成「这条规则有问题」，
+          而默认值就是 50，等于满屏橙色。
+        -->
+        <el-table-column prop="priority" label="优先级" width="80" align="center">
           <template #default="{ row }">
-            <el-tag
-              :type="priorityType(row.priority)"
-              size="small"
-              effect="plain"
-            >
-              {{ row.priority }}
-            </el-tag>
+            <span class="cell-num">{{ row.priority }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="启用" width="80" align="center">
+        <el-table-column label="启用" width="76" align="center">
           <template #default="{ row }">
             <el-switch
               :model-value="row.enabled"
@@ -45,8 +46,8 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="描述" min-width="160" show-overflow-tooltip prop="description" />
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="描述" min-width="150" show-overflow-tooltip prop="description" />
+        <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="showEditDialog(row)">编辑</el-button>
             <el-popconfirm
@@ -60,6 +61,9 @@
             </el-popconfirm>
           </template>
         </el-table-column>
+        <template #empty>
+          <el-empty description="暂无规则，点击右上角「新增规则」添加" :image-size="80" />
+        </template>
       </el-table>
     </el-card>
 
@@ -171,12 +175,6 @@ const formRules: FormRules = {
   action: [{ required: true, message: '请选择动作', trigger: 'change' }],
 }
 
-function priorityType(p: number): string {
-  if (p >= 70) return 'danger'
-  if (p >= 40) return 'warning'
-  return 'info'
-}
-
 async function loadRules() {
   loading.value = true
   try {
@@ -260,15 +258,17 @@ onMounted(loadRules)
 </script>
 
 <style scoped>
-.action-card {
-  margin-bottom: 16px;
-  border-radius: var(--border-radius-base);
-  border: 1px solid var(--color-border-light);
-}
+/*
+ * 标题行和表格同处一张卡，中间用一条细分隔线分区（与 DeviceList / SmsList 一致）。
+ * 圆角与边框由 App.vue 的 .el-card 全局规则给，这里不重复声明。
+ */
 .action-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding-bottom: 20px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 .action-left {
   display: flex;
@@ -281,15 +281,29 @@ onMounted(loadRules)
   color: var(--color-text-primary);
 }
 
-.table-card {
-  border-radius: var(--border-radius-base);
-  border: 1px solid var(--color-border-light);
+/* 表头配色、行高、斑马纹统一在 App.vue 的 .el-table 里定义，此处不再覆盖 */
+
+/*
+ * 行高统一：数据单元格一律不换行，超出部分截断成省略号。
+ * 与 DeviceList / SmsList / ApiKeyManagement 同一策略 —— 本页原先漏了这条，
+ * 而两个匹配模式的值长度不可控（支持 LIKE 与正则），长值折行会把个别行撑成两行。
+ * 需要看全的列都配了 show-overflow-tooltip。
+ */
+:deep(.el-table__body td.el-table__cell > .cell) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-:deep(.el-table th.el-table__cell) {
-  background: var(--color-bg) !important;
+/* 主标识列：比相邻的次要列重一点，扫描时眼睛先落在这里 */
+.cell-primary {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+/* 数值列：等宽数字，多位数时右对齐不会歪 */
+.cell-num {
+  font-variant-numeric: tabular-nums;
   color: var(--color-text-regular);
-  font-weight: 600;
 }
 
 .form-tip {

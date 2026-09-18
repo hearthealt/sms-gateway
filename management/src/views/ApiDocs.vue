@@ -1,5 +1,5 @@
 <template>
-  <div class="api-docs-layout">
+  <div class="api-docs-layout" ref="layoutRef">
     <!-- Left Navigation -->
     <aside class="docs-nav">
       <div class="nav-header">
@@ -7,7 +7,7 @@
           <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
             <rect width="32" height="32" rx="8" fill="url(#lg)" />
             <path d="M8 16L14 22L24 10" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-            <defs><linearGradient id="lg" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
+            <defs><linearGradient id="lg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
           </svg>
         </div>
         <div class="nav-title">
@@ -33,7 +33,7 @@
     </aside>
 
     <!-- Right Content -->
-    <main class="docs-content" ref="contentRef" @scroll="onScroll">
+    <main class="docs-content">
       <!-- Page Header -->
       <div class="page-header">
         <h1>SMS Gateway <span class="fw-light">短信 API</span></h1>
@@ -77,7 +77,7 @@
             <div class="ep-right">
               <div class="ep-subtitle">📦 示例</div>
               <pre class="code-block"><code>{{ authHeaderExample }}</code></pre>
-              <div class="ep-subtitle" style="color: #f56c6c; margin-top: 16px;">❌ 401 Unauthorized</div>
+              <div class="ep-subtitle mt-lg" style="color: var(--color-danger)">❌ 401 Unauthorized</div>
               <pre class="code-block"><code>{{ unauthorizedExample }}</code></pre>
             </div>
           </div>
@@ -137,7 +137,7 @@
               </el-table>
             </div>
             <div class="ep-right">
-              <div class="ep-subtitle" style="color: #67c23a">✅ 200 OK</div>
+              <div class="ep-subtitle" style="color: var(--color-success)">✅ 200 OK</div>
               <pre class="code-block"><code>{{ listResExample }}</code></pre>
             </div>
           </div>
@@ -151,13 +151,13 @@
               <code>+8613800138000</code>。号码里的 <code>+86</code>、空格、横线都会先被归一化。
             </span>
           </div>
-          <div class="ep-note" style="margin-top: 10px">
+          <div class="ep-note">
             <el-icon><WarningFilled /></el-icon>
             <span>
               默认<strong>不含</strong>被采集规则判定为「忽略」的营销类短信，与管理后台列表口径一致。
             </span>
           </div>
-          <div class="ep-note" style="margin-top: 10px">
+          <div class="ep-note">
             <el-icon><WarningFilled /></el-icon>
             <span>
               时间统一用 ISO-8601（<code>2026-09-17T15:29:21</code>）：入参
@@ -207,18 +207,18 @@
 
           <div class="ep-body">
             <div class="ep-left">
-              <div class="ep-subtitle" style="color: #67c23a">✅ 200 OK（等到了短信）</div>
+              <div class="ep-subtitle" style="color: var(--color-success)">✅ 200 OK（等到了短信）</div>
               <pre class="code-block"><code>{{ waitResExample }}</code></pre>
             </div>
             <div class="ep-right">
-              <div class="ep-subtitle" style="color: #67c23a">✅ 200 OK（验证码已在服务器上）</div>
+              <div class="ep-subtitle" style="color: var(--color-success)">✅ 200 OK（验证码已在服务器上）</div>
               <pre class="code-block"><code>{{ waitResCachedExample }}</code></pre>
             </div>
           </div>
 
           <div class="ep-body">
             <div class="ep-left">
-              <div class="ep-subtitle" style="color: #e6a23c">⚠️ 408 Request Timeout</div>
+              <div class="ep-subtitle" style="color: var(--color-warning)">⚠️ 408 Request Timeout</div>
               <pre class="code-block"><code>{{ waitTimeoutExample }}</code></pre>
             </div>
             <div class="ep-right">
@@ -240,7 +240,7 @@
               缓存里只存了验证码本身。调用方不要把这些字段当非空值用。
             </span>
           </div>
-          <div class="ep-note warn" style="margin-top: 10px">
+          <div class="ep-note warn">
             <el-icon><WarningFilled /></el-icon>
             <span>
               同一号码<strong>只应有一个等待方</strong>。并发发起多个等待会互相干扰
@@ -287,7 +287,7 @@
             <el-table-column label="code" prop="code" width="90" />
             <el-table-column label="说明" prop="desc" min-width="400" />
           </el-table>
-          <div class="ep-body" style="margin-top: 20px">
+          <div class="ep-body mt-lg">
             <div class="ep-left">
               <div class="ep-subtitle">通用响应格式</div>
               <pre class="code-block"><code>{{ commonResExample }}</code></pre>
@@ -348,7 +348,7 @@
               </div>
             </div>
           </div>
-          <div class="ep-note" style="margin-top: 20px">
+          <div class="ep-note mt-lg">
             <el-icon><WarningFilled /></el-icon>
             <span>
               两种取法各有适用场景：<strong>自己控制节奏、要历史数据</strong>用
@@ -364,7 +364,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ArrowRight, WarningFilled } from '@element-plus/icons-vue'
 
 // ── Navigation ──
@@ -394,41 +394,89 @@ const navGroups: NavGroup[] = [
   ]},
 ]
 
-const contentRef = ref<HTMLElement | null>(null)
+const layoutRef = ref<HTMLElement | null>(null)
 const activeSection = ref('auth')
 const exampleTab = ref('curl')
 
 function scrollTo(id: string) {
-  activeSection.value = id
+  // 这里不再抢着写 activeSection：留着它就会和 measure() 在平滑滚动途中互相覆盖。
+  // 让高亮自己扫过去即可，落点仍是点的那一节。
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-function onScroll() {
-  const c = contentRef.value
-  if (!c) return
-  const viewTop = 72
-  const items: { id: string; el: HTMLElement }[] = []
+/*
+ * 滚动高亮。
+ *
+ * 原先把 @scroll 绑在 .docs-content 上，但那元素 overflow-y:auto 却没有高度约束 ——
+ * 作为被拉伸的 flex item 它永远等于自身内容高度，于是从不滚动、回调也从不触发，
+ * 左侧高亮一直停在第一节。真正的滚动者是外层的 .app-main。
+ * 所以这里改成主动去找那个滚动容器，而不是假设它就是 .docs-content。
+ */
+const sections: { id: string; el: HTMLElement }[] = []
+let scrollerEl: HTMLElement | null = null
+let scrollTarget: EventTarget = window
+let ticking = false
+
+function collectSections() {
+  sections.length = 0
   for (const g of navGroups) {
     for (const item of g.children) {
       const el = document.getElementById(item.id)
-      if (el) items.push({ id: item.id, el })
+      if (el) sections.push({ id: item.id, el })
     }
   }
-  // Find the first item whose top is below viewTop → highlight its predecessor
-  let found = items[0]?.id ?? activeSection.value
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].el.getBoundingClientRect().top >= viewTop) {
-      found = i > 0 ? items[i - 1].id : items[i].id
-      break
-    }
-  }
-  // If even the last item is still above viewTop → highlight the last
-  const last = items[items.length - 1]
-  if (last && last.el.getBoundingClientRect().top < viewTop) {
-    found = last.id
-  }
-  activeSection.value = found
 }
+
+function measure() {
+  ticking = false
+  if (!sections.length) return
+
+  // 判定线取滚动容器可视区上沿往下三分之一处，不再写死像素 ——
+  // 原先的 viewTop = 72 是按「.docs-content 在滚」量的，容器一换就失准。
+  const rootTop = scrollerEl ? scrollerEl.getBoundingClientRect().top : 0
+  const rootHeight = scrollerEl ? scrollerEl.clientHeight : window.innerHeight
+  const line = rootTop + rootHeight / 3
+
+  // 取最后一个已经越过判定线的小节
+  let current = sections[0].id
+  for (const s of sections) {
+    if (s.el.getBoundingClientRect().top <= line) current = s.id
+    else break
+  }
+
+  // 滚到底时最后一节可能永远越不过判定线（它下面没有内容撑了），直接判给它
+  const atBottom = scrollerEl
+    ? scrollerEl.scrollTop + scrollerEl.clientHeight >= scrollerEl.scrollHeight - 2
+    : window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2
+  if (atBottom) current = sections[sections.length - 1].id
+
+  activeSection.value = current
+}
+
+function requestMeasure() {
+  if (ticking) return
+  ticking = true
+  requestAnimationFrame(measure)
+}
+
+onMounted(() => {
+  collectSections()
+  /*
+   * 认 Layout.vue 打在 .app-main 上的 data-scroll-root 契约，而不是猜。
+   * 找不到就退回视口 —— ≤900px 时文档区是纵向布局、页面级滚动，那时滚动者确实是外层。
+   */
+  scrollerEl = (layoutRef.value?.closest('[data-scroll-root]') as HTMLElement | null) ?? null
+  scrollTarget = scrollerEl ?? window
+  // passive：滚动回调里不 preventDefault，别拖慢滚动
+  scrollTarget.addEventListener('scroll', requestMeasure, { passive: true })
+  window.addEventListener('resize', requestMeasure)
+  measure()
+})
+
+onBeforeUnmount(() => {
+  scrollTarget.removeEventListener('scroll', requestMeasure)
+  window.removeEventListener('resize', requestMeasure)
+})
 
 // ── Response sample strings ──
 const authHeaderExample = `Authorization: Bearer sk-3f2a1b4c5d6e7f809a1b2c3d4e5f6071`
@@ -553,16 +601,21 @@ const errorCodes = [
 .api-docs-layout {
   display: flex;
   gap: 0;
-  min-height: calc(100vh - 100px);
+  /* 高度跟着 --main-padding-* 走，窄屏该变量变小、这里自动适配，不必第二处同步 */
+  min-height: calc(100vh - var(--header-height) - 2 * var(--main-padding-y));
+  /* 显式声明底色，不再靠 .app-main 的 background 透上来 */
+  background: var(--color-bg);
 }
 
 /* ═══════════ Navigation ═══════════ */
 .docs-nav {
-  width: 220px;
+  /* 200px 够放「等待验证码」加一个 GET 徽标；比 220px 多让 20px 给正文的表格 */
+  width: 200px;
   flex-shrink: 0;
+  /* 粘在全站唯一滚动容器 .app-main 的顶部（见 Layout.vue 的 data-scroll-root） */
   position: sticky;
   top: 0;
-  height: calc(100vh - 100px);
+  height: calc(100vh - var(--header-height) - 2 * var(--main-padding-y));
   overflow-y: auto;
   border-right: 1px solid var(--color-border-light);
   padding: 0 0 24px;
@@ -571,7 +624,8 @@ const errorCodes = [
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 20px 16px 16px;
+  /* 上内边距 0：让 logo 与右侧正文的页面标题顶端对齐 */
+  padding: 0 16px 16px;
   border-bottom: 1px solid var(--color-border-light);
   margin-bottom: 8px;
 }
@@ -617,23 +671,29 @@ const errorCodes = [
   font-size: 10px;
   font-weight: 700;
   font-family: monospace;
-  color: #fff;
+  color: var(--color-white);
   line-height: 1.6;
   flex-shrink: 0;
 }
-.nav-method.post { background: #409eff; }
-.nav-method.get { background: #67c23a; }
+.nav-method.post { background: var(--color-primary); }
+.nav-method.get { background: var(--color-success); }
 
 /* ═══════════ Content ═══════════ */
+/*
+ * 这里刻意不声明 overflow-y / scroll-behavior：
+ * 本元素没有高度约束，作为被拉伸的 flex item 永远等于自身内容高度，写了也从不滚动 ——
+ * 滚动者是外层 .app-main（理由见 script 里 onMounted 上方的注释）。
+ * 平滑滚动交给 scrollIntoView({ behavior: 'smooth' })，不需要 scroll-behavior。
+ */
 .docs-content {
   flex: 1;
-  overflow-y: auto;
   padding: 0 0 48px 28px;
-  scroll-behavior: smooth;
 }
 
 .page-header {
-  padding: 28px 0 24px;
+  /* 上内边距为 0：.app-main 已经有 --main-padding-y 的留白，
+     再加一层会让标题离顶栏空出一大块，也和左导航的 logo 对不齐 */
+  padding: 0 0 24px;
   border-bottom: 1px solid var(--color-border-light);
   margin-bottom: 32px;
 }
@@ -654,11 +714,11 @@ const errorCodes = [
   max-width: 820px;
 }
 .page-desc code,
-.page-scope code { background: var(--color-bg); padding: 1px 6px; border-radius: 3px; font-size: 12px; color: var(--color-primary); }
+.page-scope code { background: var(--color-bg); padding: 1px 6px; border-radius: var(--border-radius-small); font-size: 12px; color: var(--color-primary); }
 .page-badges { display: flex; gap: 8px; }
-.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-.badge-blue { background: #ecf5ff; color: #409eff; }
-.badge-green { background: #f0f9eb; color: #67c23a; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: var(--border-radius-pill); font-size: 11px; font-weight: 600; }
+.badge-blue { background: var(--color-primary-bg); color: var(--color-primary); }
+.badge-green { background: var(--color-success-bg); color: var(--color-success); }
 
 /* ═══════════ API Section ═══════════ */
 /* id 挂在本元素上，滚动定位的留白得补在这里 */
@@ -676,12 +736,12 @@ const errorCodes = [
 .endpoint-card {
   background: var(--color-white);
   border: 1px solid var(--color-border-light);
-  border-radius: 12px;
+  border-radius: var(--border-radius-base);
   padding: 24px;
-  margin-bottom: 20px;
+  margin-bottom: var(--section-gap);
   scroll-margin-top: 24px;
 }
-.endpoint-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.04); }
+/* 卡片不响应悬停阴影：它是文档容器，点了也没反应，给悬停反馈反而像可点 */
 
 .ep-head {
   display: flex;
@@ -692,14 +752,15 @@ const errorCodes = [
 .ep-method {
   display: inline-block;
   padding: 3px 10px;
-  border-radius: 5px;
+  border-radius: var(--border-radius-small);
   font-size: 12px;
   font-weight: 700;
   font-family: monospace;
-  color: #fff;
+  color: var(--color-white);
   letter-spacing: .3px;
   flex-shrink: 0;
 }
+/* 两站渐变是刻意的厚度效果，用的是比主色/成功色深一档的色值，不属调色板引用，保留字面量 */
 .ep-method.post { background: linear-gradient(135deg,#409eff,#337ecc); }
 .ep-method.get { background: linear-gradient(135deg,#67c23a,#529b2e); }
 .ep-path {
@@ -713,7 +774,7 @@ const errorCodes = [
   color: var(--color-text-placeholder);
   background: var(--color-bg);
   padding: 1px 8px;
-  border-radius: 4px;
+  border-radius: var(--border-radius-small);
 }
 .ep-desc {
   font-size: 13px;
@@ -724,7 +785,7 @@ const errorCodes = [
 .ep-desc code {
   background: var(--color-bg);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--border-radius-small);
   font-size: 12px;
 }
 
@@ -745,8 +806,8 @@ const errorCodes = [
 
 /* ═══════════ Table ═══════════ */
 .ep-table { width: 100%; }
+/* 表头底色交给 App.vue 的 .el-table；这里只保留参考表刻意的紧凑（12px + 6px 行距） */
 :deep(.ep-table th.el-table__cell) {
-  background: var(--color-bg) !important;
   font-weight: 600;
   color: var(--color-text-regular);
   font-size: 12px;
@@ -759,15 +820,15 @@ const errorCodes = [
 
 /* ═══════════ Code Block ═══════════ */
 .code-block {
-  background: #1e2a3a;
-  border-radius: 8px;
+  background: var(--color-code-bg);
+  border-radius: var(--border-radius-base);
   padding: 14px 16px;
   margin: 0;
   overflow-x: auto;
   font-family: 'JetBrains Mono','Fira Code',monospace;
   font-size: 12px;
   line-height: 1.7;
-  color: #e6e9ef;
+  color: var(--color-code-text);
 }
 .code-block code { background: none; padding: 0; color: inherit; }
 .code-block.no-bg {
@@ -786,27 +847,33 @@ const errorCodes = [
   align-items: flex-start;
   gap: 6px;
   padding: 10px 14px;
-  background: #ecf5ff;
-  border-radius: 8px;
+  background: var(--color-primary-bg);
+  border-radius: var(--border-radius-base);
   font-size: 12px;
-  color: #2c3e50;
+  color: var(--color-text-primary);
   line-height: 1.5;
 }
-.ep-note .el-icon { color: #409eff; font-size: 14px; margin-top: 1px; flex-shrink: 0; }
+/* 连着两条提示之间留一道缝，省得每处都写行内 margin-top */
+.ep-note + .ep-note { margin-top: 10px; }
+.ep-note .el-icon { color: var(--color-primary); font-size: 14px; margin-top: 1px; flex-shrink: 0; }
 .ep-note code {
   background: rgba(64,158,255,.1);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--border-radius-small);
   font-size: 11px;
-  color: #409eff;
+  color: var(--color-primary);
 }
 /* 提醒类：字段可能为 null、并发等待等容易踩的坑 */
-.ep-note.warn { background: #fdf6ec; }
-.ep-note.warn .el-icon { color: #e6a23c; }
+.ep-note.warn { background: var(--color-warning-bg); }
+.ep-note.warn .el-icon { color: var(--color-warning); }
 .ep-note.warn code {
   background: rgba(230,162,60,.12);
+  /* 不复用 --color-warning：那个橙在琥珀底色上对比度不够，这里要更暗一档才读得清 */
   color: #b88230;
 }
+
+/* 与下个模块拉开一档间距 */
+.mt-lg { margin-top: 20px; }
 
 /* ═══════════ Guide Flow ═══════════ */
 .guide-flow { display: flex; align-items: flex-start; gap: 0; flex-wrap: nowrap; overflow-x: auto; padding: 8px 0; }
@@ -816,7 +883,7 @@ const errorCodes = [
   gap: 10px;
   background: var(--color-bg);
   border: 1px solid var(--color-border-light);
-  border-radius: 10px;
+  border-radius: var(--border-radius-base);
   padding: 14px 18px;
   flex: 1;
   min-width: 140px;
@@ -825,7 +892,7 @@ const errorCodes = [
   width: 26px; height: 26px;
   border-radius: 50%;
   background: var(--color-primary);
-  color: #fff;
+  color: var(--color-white);
   font-weight: 700;
   font-size: 12px;
   display: flex;
@@ -843,10 +910,28 @@ const errorCodes = [
 }
 
 /* ═══════════ Scrollbar ═══════════ */
-.docs-nav::-webkit-scrollbar, .docs-content::-webkit-scrollbar { width: 4px; }
-.docs-nav::-webkit-scrollbar-thumb, .docs-content::-webkit-scrollbar-thumb { background: var(--color-text-placeholder); border-radius: 2px; }
+.docs-nav::-webkit-scrollbar { width: 4px; }
+.docs-nav::-webkit-scrollbar-thumb { background: var(--color-text-placeholder); border-radius: 2px; }
 
 /* ═══════════ Responsive ═══════════ */
+
+/*
+ * ≤1550：右侧内容同时被侧边栏和文档左导航挤占，放不下两栏。
+ *
+ * 这个数是算出来的，不是估的。两栏里最宽的一张表（「响应字段」）列宽合计 490px，
+ * 两栏加 20px 间距需要 1000px 内容宽；而内容宽 =
+ *   窗口 − 220(侧边栏) − 56(主区左右留白) − 200(左导航) − 28(正文左内边距)
+ *   = 窗口 − 504
+ * 反推窗口需 ≥1504px，留一点余量取 1550。
+ *
+ * 原先这里写的是 1280，少了约 270px —— 1280~1504 这段（含 1440 / 1536 这类常见分辨率）
+ * 两栏都不够宽，表会各自横向滚。放在 900px 那条之前，≤900 时仍由后者接管。
+ */
+@media (max-width: 1550px) and (min-width: 901px) {
+  .docs-nav { width: 180px; }
+  .ep-body { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 900px) {
   .api-docs-layout { flex-direction: column; }
   .docs-nav { width: 100%; position: static; height: auto; border-right: none; border-bottom: 1px solid var(--color-border-light); margin-bottom: 20px; }

@@ -1,4 +1,4 @@
-import { get, post, put } from './http'
+import { del, get, post, put } from './http'
 import type { Device, RecoveryCode, Stats, PaginatedResponse } from '../types'
 
 export function getDeviceList(params: {
@@ -23,6 +23,16 @@ export function toggleDeviceStatus(deviceId: string, enabled: boolean): Promise<
   return put(`/admin/device/${encodeURIComponent(deviceId)}/enabled`, undefined, {
     params: { enabled },
   })
+}
+
+/**
+ * 删除设备。**连同它的短信记录一起删**（理由见后端 AdminDeviceService.delete），
+ * 返回被一并删掉的短信条数 —— 调用方据此在提示里说清「删掉了什么」。
+ *
+ * 不可撤销，调用方必须先二次确认。
+ */
+export function deleteDevice(deviceId: string): Promise<number> {
+  return del(`/admin/device/${encodeURIComponent(deviceId)}`)
 }
 
 /**

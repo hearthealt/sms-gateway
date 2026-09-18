@@ -12,7 +12,7 @@
           <svg viewBox="0 0 32 32" width="44" height="44" fill="none">
             <rect width="32" height="32" rx="8" fill="url(#logoGradient)" />
             <path d="M8 16L14 22L24 10" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-            <defs><linearGradient id="logoGradient" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
+            <defs><linearGradient id="logoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
           </svg>
         </div>
         <h1>SMS Gateway</h1>
@@ -33,7 +33,7 @@
         <svg viewBox="0 0 32 32" width="34" height="34" fill="none">
           <rect width="32" height="32" rx="8" fill="url(#logoGradientSm)" />
           <path d="M8 16L14 22L24 10" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-          <defs><linearGradient id="logoGradientSm" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
+          <defs><linearGradient id="logoGradientSm" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#409eff"/><stop offset="1" stop-color="#36d399"/></linearGradient></defs>
         </svg>
         <div class="panel-brand-text">
           <strong>SMS Gateway</strong>
@@ -187,7 +187,8 @@ async function handleLogin() {
 .bg-orb-2 {
   width: 400px;
   height: 400px;
-  background: linear-gradient(135deg, #36d399, #409eff);
+  /* 品牌绿 → 主色，就是 logo 渐变那一对 */
+  background: linear-gradient(135deg, var(--color-accent), var(--color-primary));
   bottom: -100px;
   left: -100px;
   animation-delay: -4s;
@@ -195,7 +196,7 @@ async function handleLogin() {
 .bg-orb-3 {
   width: 300px;
   height: 300px;
-  background: linear-gradient(135deg, #f56c6c, #e6a23c);
+  background: linear-gradient(135deg, var(--color-danger), var(--color-warning));
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -212,7 +213,7 @@ async function handleLogin() {
   position: relative;
   z-index: 1;
   max-width: 360px;
-  color: #fff;
+  color: var(--color-white);
 }
 .brand-logo {
   margin-bottom: 20px;
@@ -244,7 +245,7 @@ async function handleLogin() {
 }
 .brand-features .el-icon {
   font-size: 16px;
-  color: #36d399;
+  color: var(--color-accent);
   flex-shrink: 0;
 }
 
@@ -292,7 +293,7 @@ async function handleLogin() {
   width: 100%;
   height: 44px;
   font-size: 16px;
-  border-radius: 8px;
+  border-radius: var(--border-radius-base);
   transition: var(--transition-base);
   letter-spacing: 4px;
 }
@@ -309,7 +310,7 @@ async function handleLogin() {
   margin-bottom: 22px;
 }
 :deep(.el-input__wrapper) {
-  border-radius: 8px;
+  border-radius: var(--border-radius-base);
   box-shadow: 0 0 0 1px var(--color-border) inset;
   transition: var(--transition-fast);
 }

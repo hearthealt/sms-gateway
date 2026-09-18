@@ -3,7 +3,8 @@
     <template v-if="device">
       <!-- Breadcrumb -->
       <div class="breadcrumb">
-        <el-link type="primary" :underline="false" @click="$router.push('/devices')">设备管理</el-link>
+        <!-- underline 用字符串取值：布尔形式在 Element Plus 3.0 已弃用，控制台会刷警告 -->
+        <el-link type="primary" underline="never" @click="$router.push('/devices')">设备管理</el-link>
         <el-icon><ArrowRight /></el-icon>
         <span class="current-page">{{ device.deviceId }}</span>
       </div>
@@ -20,7 +21,8 @@
               </el-tag>
             </div>
             <div class="header-actions">
-              <el-button size="default" plain :loading="issuingRecovery" @click="handleIssueRecoveryCode">
+              <!-- 签发期间的等待由弹窗自己显示（先弹窗再签发），按钮不再需要 loading -->
+              <el-button size="default" plain @click="handleIssueRecoveryCode">
                 生成恢复码
               </el-button>
               <el-button
@@ -35,7 +37,8 @@
             </div>
           </div>
         </template>
-        <el-descriptions :column="2" border>
+        <!-- el-descriptions 是按列数渲染表格的，CSS 改不动，只能把列数算出来 -->
+        <el-descriptions :column="isMobile ? 1 : 2" border>
           <el-descriptions-item label="设备ID" min-width="140">{{ device.deviceId }}</el-descriptions-item>
           <el-descriptions-item label="设备名称">{{ device.deviceName || '-' }}</el-descriptions-item>
           <el-descriptions-item label="手机号">{{ device.phone || '-' }}</el-descriptions-item>
@@ -70,7 +73,7 @@
         </template>
         <el-table :data="smsRecords" stripe style="width: 100%" v-loading="smsLoading" empty-text="暂无短信记录">
           <el-table-column type="index" label="#" width="50" />
-          <el-table-column prop="sender" label="发送号码" width="150" />
+          <el-table-column prop="sender" label="发送号码" width="160" />
           <el-table-column prop="content" label="内容" min-width="300" show-overflow-tooltip />
           <el-table-column label="验证码" width="110">
             <template #default="{ row }">
@@ -86,16 +89,19 @@
               <span v-else class="no-code">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="时间" width="160">
+          <!-- 重复到达只累加在同一行上，不单开一行；计数单独一列，
+               与短信记录页的口径一致（那边在「采集」列） -->
+          <el-table-column label="重复" width="90" align="center">
             <template #default="{ row }">
-              <span class="time-text">{{ formatTime(row.receiveTime) }}</span>
+              <el-tag v-if="row.duplicateCount > 0" type="warning" size="small" effect="plain">
+                {{ row.duplicateCount }} 次
+              </el-tag>
+              <span v-else class="no-code">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="已读" width="70" align="center">
+          <el-table-column label="更新时间" width="160">
             <template #default="{ row }">
-              <el-tag :type="row.isRead ? 'success' : 'info'" size="small" effect="plain">
-                {{ row.isRead ? '是' : '否' }}
-              </el-tag>
+              <span class="time-text">{{ formatTime(row.updatedAt) }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -104,7 +110,7 @@
             v-model:current-page="smsPage"
             :page-size="smsPageSize"
             :total="totalSms"
-            small
+            size="small"
             layout="total, prev, pager, next"
             @current-change="loadSms"
           />
@@ -125,48 +131,8 @@
       </template>
     </el-result>
 
-    <!--
-      恢复码。两个场景会用到：设备重装后本地密钥随应用数据一起没了；
-      以及本次变更之前注册的老设备（它们本来就没有密钥，不签一张就永远无法重新注册）。
-
-      二维码里带的是**设备身份**，所以这里要显眼地把设备 ID 摆出来让人核对，
-      并明确说清「采用之后这台设备会以该身份上报」。
-    -->
-    <el-dialog
-      v-model="recoveryVisible"
-      title="设备恢复码"
-      width="460px"
-      :close-on-click-modal="false"
-      @closed="clearRecovery"
-    >
-      <el-alert
-        type="warning"
-        :closable="false"
-        show-icon
-        title="明文密钥只显示这一次"
-        description="关闭后就取不回来了（服务端只保存它的哈希）。没记下就重新生成一张，旧密钥随之作废。"
-      />
-      <div v-if="recoveryQr" class="recovery-qr">
-        <img :src="recoveryQr" alt="设备恢复码" />
-      </div>
-      <div v-else class="recovery-qr recovery-qr--loading">
-        <el-icon class="is-loading"><Loading /></el-icon>
-      </div>
-
-      <el-descriptions :column="1" border size="small" class="recovery-detail">
-        <el-descriptions-item label="设备 ID">
-          <span class="mono">{{ recovery?.deviceId }}</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="重注册密钥">
-          <span class="mono">{{ recovery?.enrollSecret }}</span>
-        </el-descriptions-item>
-      </el-descriptions>
-
-      <template #footer>
-        <el-button @click="handleCopySecret">复制密钥</el-button>
-        <el-button type="primary" @click="recoveryVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
+    <!-- 恢复码弹窗与设备列表页共用一份实现（含「明文只显示这一次」的处理） -->
+    <RecoveryCodeDialog ref="recoveryDialog" />
   </div>
 </template>
 
@@ -175,14 +141,16 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
-import QRCode from 'qrcode'
 import StatusBadge from '../components/StatusBadge.vue'
-import { deviceServerUrl, getDeviceDetail, issueRecoveryCode, toggleDeviceStatus } from '../api/device'
+import RecoveryCodeDialog from '../components/RecoveryCodeDialog.vue'
+import { getDeviceDetail, toggleDeviceStatus } from '../api/device'
 import { getDeviceSms } from '../api/sms'
 import { copyText } from '../utils/clipboard'
-import type { Device, RecoveryCode, SmsRecord } from '../types'
+import { useIsMobile } from '../composables/useMediaQuery'
+import type { Device, SmsRecord } from '../types'
 
 const route = useRoute()
+const isMobile = useIsMobile()
 const device = ref<Device | null>(null)
 // 加载态与错误态各自独立：原先以「device 为空」兼任加载态，请求失败时 device 永远是 null，
 // 全屏 loading 就一直转，页面上又什么都没有
@@ -215,60 +183,21 @@ async function copyCode(code: string) {
 
 // ---------- 恢复码 ----------
 
-const recoveryVisible = ref(false)
-const recovery = ref<RecoveryCode | null>(null)
-const recoveryQr = ref('')
-const issuingRecovery = ref(false)
+// 恢复码的签发与明文处理都在 RecoveryCodeDialog 里，这里只负责打开它 ——
+// 那套逻辑（先要地址再签发、关闭即清明文、只显示一次）在设备列表页也要用，
+// 抄一份迟早会分叉。
+const recoveryDialog = ref<InstanceType<typeof RecoveryCodeDialog>>()
 
-async function handleIssueRecoveryCode() {
-  // 先要地址再签发。顺序很重要：不能先把服务端的密钥轮换了、再发现二维码没地址可写 ——
-  // 那样这台设备的旧密钥已经被作废，而现场什么都没拿到。
-  const serverUrl = deviceServerUrl()
-  if (!serverUrl) {
-    ElMessage.error(
-      '未配置 VITE_DEVICE_SERVER_URL，无法生成恢复码：二维码里要写设备能访问的服务器地址，' +
-        '这个值没配时猜不出来（开发时控制台的 origin 是 localhost，对手机没有意义）。'
-    )
+function handleIssueRecoveryCode() {
+  const id = device.value?.deviceId
+  if (!id) return
+
+  // 同设备列表页：不静默吞掉 ref 未挂载的情况（表现是「点了没反应」）
+  if (!recoveryDialog.value) {
+    ElMessage.error('恢复码弹窗未挂载（模板里缺少 <RecoveryCodeDialog ref="recoveryDialog" />）')
     return
   }
-
-  issuingRecovery.value = true
-  try {
-    const code = await issueRecoveryCode(route.params.deviceId as string)
-    recovery.value = code
-
-    // 二维码字段名必须与 Android 端 QrConfig 一致（url / deviceId / enrollSecret / deviceName）
-    recoveryQr.value = await QRCode.toDataURL(
-      JSON.stringify({
-        url: serverUrl,
-        deviceId: code.deviceId,
-        enrollSecret: code.enrollSecret,
-        deviceName: device.value?.deviceName ?? undefined,
-      }),
-      { width: 320, margin: 1, errorCorrectionLevel: 'M' }
-    )
-    recoveryVisible.value = true
-  } catch {
-    // 拦截器已经统一弹过错误提示，这里不再重复
-  } finally {
-    issuingRecovery.value = false
-  }
-}
-
-/** 关闭时清掉明文：它只该存在于这一次弹窗的生命周期里。 */
-function clearRecovery() {
-  recovery.value = null
-  recoveryQr.value = ''
-}
-
-async function handleCopySecret() {
-  const secret = recovery.value?.enrollSecret
-  if (!secret) return
-  if (await copyText(secret)) {
-    ElMessage.success('密钥已复制')
-  } else {
-    ElMessage.error('复制失败')
-  }
+  recoveryDialog.value.open(id)
 }
 
 async function loadDevice() {
@@ -346,10 +275,9 @@ onMounted(loadDevice)
   font-weight: 500;
 }
 
+/* 圆角与边框由 App.vue 的 .el-card 全局规则给，这里只留页面级间距 */
 .detail-card {
-  margin-bottom: 16px;
-  border-radius: var(--border-radius-base);
-  border: 1px solid var(--color-border-light);
+  margin-bottom: var(--section-gap);
 }
 .card-header {
   display: flex;
@@ -387,7 +315,7 @@ onMounted(loadDevice)
 }
 
 .pagination-wrap {
-  margin-top: 16px;
+  margin-top: var(--section-gap);
   display: flex;
   justify-content: flex-end;
 }
@@ -399,27 +327,4 @@ onMounted(loadDevice)
 .battery-mid { color: var(--color-warning); font-weight: 500; }
 .battery-low { color: var(--color-danger); font-weight: 500; }
 
-.recovery-qr {
-  display: flex;
-  justify-content: center;
-  padding: 12px 0;
-}
-.recovery-qr img {
-  width: 260px;
-  height: 260px;
-}
-.recovery-qr--loading {
-  height: 260px;
-  align-items: center;
-  font-size: 24px;
-  color: var(--el-text-color-placeholder);
-}
-.recovery-detail {
-  margin-top: 8px;
-}
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
 </style>
