@@ -76,6 +76,17 @@ public class SmsDevice {
     @Column(name = "last_heartbeat_at")
     private LocalDateTime lastHeartbeatAt;
 
+    /**
+     * 设备主动报告「网关已停止」的时刻。
+     *
+     * <p>与 lastHeartbeatAt 一起判定在线：心跳在 90 秒内 **且** 晚于这个时刻才算在线。
+     * 没有它，用户点了「停止网关」之后管理后台还要再显示 90 秒在线。
+     *
+     * <p>可为空 = 从没报告过（老版本 App、或进程被杀没来得及报）。
+     */
+    @Column(name = "reported_offline_at")
+    private LocalDateTime reportedOfflineAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

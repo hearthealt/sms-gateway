@@ -19,7 +19,15 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
 
     Optional<SmsMessage> findByDeviceIdAndLocalMessageId(Long deviceId, String localMessageId);
 
-    Optional<SmsMessage> findBySourceHash(String sourceHash);
+    /**
+     * 按「同一台设备 + 同一段内容」找那条正本。
+     *
+     * <p><b>去重是按设备做的，不是全局。</b>每台手机是一条独立的线路，各自的验证码要各自
+     * 记一条：两台不同手机收到同一段内容（同一家的营销短信、或同一个码发给两台测试机）
+     * 如果被判成重复，第二台那条就没有自己的记录了 —— 而那恰恰是「这台机器的码到没到」
+     * 的答案。对应 uk_device_source_hash(device_id, source_hash)。
+     */
+    Optional<SmsMessage> findByDeviceIdAndSourceHash(Long deviceId, String sourceHash);
 
     /**
      * 短信分页查询，所有条件均可为 null（表示不过滤）。
@@ -109,4 +117,14 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
             nativeQuery = true)
     int deleteBatchByReceiveTimeBefore(@Param("before") LocalDateTime before,
                                        @Param("batchSize") int batchSize);
+
+    /**
+     * 删除某台设备的全部短信。管理端删设备时一并调用（见 AdminDeviceService.delete）。
+     *
+     * <p>用批量 delete 而不是派生方法：派生方法会先把所有行加载进内存再逐条删，
+     * 一台设备积下几万条时那是几万次 DELETE。返回受影响行数，便于日志里交代删了多少。
+     */
+    @Modifying
+    @Query("delete from SmsMessage m where m.deviceId = :deviceId")
+    int deleteByDeviceId(@Param("deviceId") Long deviceId);
 }

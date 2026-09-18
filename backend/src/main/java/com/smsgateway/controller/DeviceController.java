@@ -48,6 +48,22 @@ public class DeviceController {
     }
 
     /**
+     * 设备主动报告「网关已停止」。
+     *
+     * <p>心跳是「我还活着」的单向信号 —— 用户把网关停了之后心跳就断了，服务端要等 90 秒
+     * 超时才判离线，那 90 秒管理后台一直显示在线。设备在停止时补这一条，后台立刻变灰。
+     *
+     * <p>尽力而为：进程被系统杀掉时发不出这个请求，那种情况仍由心跳超时兜底。
+     * 身份同样取自拦截器的认证结果，不接受请求体里自报的设备号。
+     */
+    @PostMapping("/offline")
+    public ResponseEntity<ApiResult<Void>> offline(HttpServletRequest httpRequest) {
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
+        deviceService.markOffline(deviceId);
+        return ResponseEntity.ok(ApiResult.success(null));
+    }
+
+    /**
      * 本设备在服务端的短信记录。
      *
      * 挂在 /api/device/** 下，因此自动受 DeviceAuthInterceptor 保护。设备身份取自

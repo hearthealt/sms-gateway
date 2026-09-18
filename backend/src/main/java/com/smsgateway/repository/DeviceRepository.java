@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
+import java.util.Set;
 
 @Repository
 public interface DeviceRepository extends JpaRepository<SmsDevice, Long> {
@@ -32,13 +33,27 @@ public interface DeviceRepository extends JpaRepository<SmsDevice, Long> {
                            @Param("phone") String phone,
                            Pageable pageable);
 
-    /** 在线设备数：未被禁用且最后心跳在给定时间之后。 */
+    /**
+     * 在线设备数：未被禁用、最后心跳在给定时间之后、**且晚于设备主动上报的停止时刻**。
+     *
+     * <p>最后那半句不能少：设备点了「停止网关」会主动报一次（见 DeviceService.markOffline），
+     * 统计口径必须与 DeviceService.isOnline 完全一致，否则仪表盘说 3 台在线、
+     * 设备列表里 2 台是灰的 —— 两套说法比都不准更糟。
+     */
     @Query("select count(d) from SmsDevice d "
-            + "where d.status <> 'DISABLED' and d.lastHeartbeatAt is not null and d.lastHeartbeatAt > :since")
+            + "where d.status <> 'DISABLED' and d.lastHeartbeatAt is not null and d.lastHeartbeatAt > :since "
+            + "and (d.reportedOfflineAt is null or d.lastHeartbeatAt > d.reportedOfflineAt)")
     long countOnlineSince(@Param("since") LocalDateTime since);
 
-    /** 离线设备数：未被禁用，且从未心跳或最后心跳已过期。 */
+    /** 离线设备数。判据与 countOnlineSince 严格互补（未被禁用的整体减去在线）。 */
     @Query("select count(d) from SmsDevice d "
-            + "where d.status <> 'DISABLED' and (d.lastHeartbeatAt is null or d.lastHeartbeatAt <= :since)")
+            + "where d.status <> 'DISABLED' and (d.lastHeartbeatAt is null or d.lastHeartbeatAt <= :since "
+            + "or (d.reportedOfflineAt is not null and d.lastHeartbeatAt <= d.reportedOfflineAt))")
     long countOfflineSince(@Param("since") LocalDateTime since);
+
+    /** 当前在线的设备主键集合。给 DevicePresenceWatcher 判断「集合变了没有」。 */
+    @Query("select d.id from SmsDevice d "
+            + "where d.status <> 'DISABLED' and d.lastHeartbeatAt is not null and d.lastHeartbeatAt > :since "
+            + "and (d.reportedOfflineAt is null or d.lastHeartbeatAt > d.reportedOfflineAt)")
+    Set<Long> findOnlineIds(@Param("since") LocalDateTime since);
 }

@@ -1,6 +1,5 @@
 package com.smsgateway.model.dto;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
@@ -26,10 +25,14 @@ public class SmsView {
     private String status;
     private LocalDateTime receiveTime;
 
+    /** 这段内容后来又收到过几次。0 = 只收到过一次。 */
+    private int duplicateCount;
+
     /**
-     * 显式指定 JSON 名。Lombok 为 boolean isRead 生成的是 isRead()，
-     * Jackson 默认会推导出属性名 "read"，与前端约定的 isRead 不符。
+     * 最后一次收到这条内容的时刻。
+     *
+     * 与 receiveTime 不同：receiveTime 是**首次**收到的时间（由设备上报），
+     * 重复到达会把这个顶上去 —— 列表上「重复 3 次 · 最后 15:20:11」里的那个时间就是它。
      */
-    @JsonProperty("isRead")
-    private boolean isRead;
+    private LocalDateTime updatedAt;
 }

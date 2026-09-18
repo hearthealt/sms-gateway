@@ -19,6 +19,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +38,9 @@ public class DeviceService {
      * 必须让失败的那次写入彻底回滚后，再另起一次查询。
      */
     private final TransactionTemplate transactionTemplate;
+
+    /** 设备上线/掉线时推一条，让管理后台的设备列表自己刷新。 */
+    private final AdminEventBroadcaster adminEvents;
 
     @Value("${app.secret.key}")
     private String secretKey;
@@ -173,6 +177,10 @@ public class DeviceService {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new RuntimeException("Device not found: " + deviceId));
 
+        // 更新之前先算一次上次的在线状态：只在这一下「掉线又回来」时推事件。
+        // 每 30 秒的心跳都推，管理后台就变成每 30 秒刷一次，与轮询没有区别。
+        boolean wasOnline = isOnline(device);
+
         device.setLastHeartbeatAt(LocalDateTime.now());
         if (request.getDeviceName() != null) {
             device.setDeviceName(request.getDeviceName());
@@ -197,6 +205,10 @@ public class DeviceService {
         // Update Redis online status
         String redisKey = DEVICE_ONLINE_KEY_PREFIX + deviceId + DEVICE_ONLINE_SUFFIX;
         redisTemplate.opsForValue().set(redisKey, LocalDateTime.now().toString(), HEARTBEAT_TTL_SECONDS, TimeUnit.SECONDS);
+
+        if (!wasOnline) {
+            adminEvents.broadcast(AdminEventBroadcaster.EVENT_DEVICES, Map.of("deviceId", deviceId));
+        }
 
         log.debug("Heartbeat received from device: {}", deviceId);
         return device.getStatus();
@@ -238,8 +250,38 @@ public class DeviceService {
      * 但用时间戳判断可以避免统计时对每台设备各做一次 Redis 往返。
      */
     public boolean isOnline(SmsDevice device) {
-        return device.getLastHeartbeatAt() != null
-                && device.getLastHeartbeatAt().isAfter(LocalDateTime.now().minusSeconds(HEARTBEAT_TTL_SECONDS));
+        if (device.getLastHeartbeatAt() == null
+                || !device.getLastHeartbeatAt().isAfter(LocalDateTime.now().minusSeconds(HEARTBEAT_TTL_SECONDS))) {
+            return false;
+        }
+
+        // 设备主动报告过「网关已停止」时，只有比那次报告更晚的心跳才算重新上线。
+        // 少了这一条，点了停止之后管理后台还要再挂 90 秒才变灰。
+        return device.getReportedOfflineAt() == null
+                || device.getLastHeartbeatAt().isAfter(device.getReportedOfflineAt());
+    }
+
+    /**
+     * 设备主动报告「网关已停止」。
+     *
+     * <p>没有这条通道时，停了也要等 90 秒心跳超时才判离线，那 90 秒里管理后台一直显示在线，
+     * 现场看到的是「我明明停了，它还绿着」。
+     *
+     * <p>只是尽力而为：进程被杀时设备发不出这个请求，那种情况仍旧由心跳超时兜底 ——
+     * 所以 isOnline 是「超时」与「主动停」两个条件一起判的，缺一不可。
+     */
+    public void markOffline(String authenticatedDeviceId) {
+        SmsDevice device = deviceRepository.findByDeviceId(authenticatedDeviceId).orElse(null);
+        if (device == null) {
+            return;
+        }
+
+        device.setReportedOfflineAt(LocalDateTime.now());
+        deviceRepository.save(device);
+
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_DEVICES,
+                Map.of("deviceId", authenticatedDeviceId));
+        log.info("Device reported gateway stopped: {}", authenticatedDeviceId);
     }
 
     /** 在线判定所用的时间窗起点，供仓储层统计查询复用。 */

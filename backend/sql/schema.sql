@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS sms_device (
     pending_count INT DEFAULT NULL COMMENT 'Pending upload count reported by device',
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE, INACTIVE, DISABLED',
     last_heartbeat_at DATETIME DEFAULT NULL COMMENT 'Last heartbeat timestamp',
+    -- 设备主动上报「网关已停止」的时刻。与 last_heartbeat_at 一起判在线：
+    -- 心跳在 90 秒内 **且** 晚于这个时刻才算在线。没有它，用户点了停止之后
+    -- 管理后台还要再显示 90 秒在线。为空 = 从没报过（老版本 App、或进程被杀没来得及报）。
+    reported_offline_at DATETIME DEFAULT NULL COMMENT 'Device reported gateway stopped at',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_status (status),
@@ -89,15 +93,16 @@ CREATE TABLE IF NOT EXISTS sms_message (
     code VARCHAR(20) DEFAULT NULL COMMENT 'Extracted verification code',
     status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED' COMMENT 'RECEIVED, DUPLICATE, PROCESSED',
     source_hash VARCHAR(64) NOT NULL COMMENT 'SHA-256 hash of content for dedup',
+    duplicate_count INT NOT NULL DEFAULT 0 COMMENT '这段内容后来又收到几次；只有正本行会累加',
     receive_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Time SMS was received on device',
-    is_read TINYINT NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_device_message (device_id, local_message_id),
-    -- source_hash 是**唯一**的：一段内容一行。代码侧的 findBySourceHash 返回 Optional、
-    -- 建表侧唯一，两边一直是这个约定 —— 曾经有一处重复短信的插入路径违反它，
-    -- 导致那条 INSERT 必然撞约束、被兜成 500，设备端于是无限重试。
-    UNIQUE KEY uk_source_hash (source_hash),
+    -- 去重按**设备**做：同一台设备收到同一段内容才算重复（只把计数与更新时间推到那一行上），
+    -- 不同设备各自的记录互不影响 —— 「这台机器的码到没到」的答案必须是它自己那一行。
+    -- 原先这里是全局唯一的 uk_source_hash(一段内容一行)，两台手机收到同一段内容时，
+    -- 第二台会被算成第一台的重复而没有自己的记录。
+    UNIQUE KEY uk_device_source_hash (device_id, source_hash),
     INDEX idx_device_id (device_id),
     INDEX idx_sender (sender),
     INDEX idx_status (status),

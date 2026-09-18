@@ -60,4 +60,18 @@ public class AdminDeviceController {
         log.warn("Admin issued a recovery code for device {}", deviceId);
         return ResponseEntity.ok(ApiResult.success(adminDeviceService.issueRecoveryCode(deviceId)));
     }
+
+    /**
+     * 删除设备。
+     *
+     * <p>连同该设备的短信记录一起删（理由见 AdminDeviceService.delete）。返回被一并删掉的
+     * 短信条数，控制台据此在提示里说清楚「删了什么」，而不是只回一个「成功」。
+     *
+     * <p>设备那边不需要做任何事：它手里的令牌从此查不到设备，下一次心跳就会 401，
+     * App 会提示「令牌失效，请重新注册」—— 这正是期望的行为。
+     */
+    @DeleteMapping("/{deviceId}")
+    public ResponseEntity<ApiResult<Integer>> delete(@PathVariable String deviceId) {
+        return ResponseEntity.ok(ApiResult.success(adminDeviceService.delete(deviceId)));
+    }
 }

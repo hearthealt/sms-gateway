@@ -19,6 +19,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +38,9 @@ public class SmsService {
      * 而 {@code @Transactional} 一旦被标记 rollback-only，同一事务里后续查询会直接失败。
      */
     private final TransactionTemplate transactionTemplate;
+
+    /** 有新短信（或重复计数变化）时推一条，让管理后台自己去拉最新数据。 */
+    private final AdminEventBroadcaster adminEvents;
 
     private static final String SMS_CODE_KEY_PREFIX = "sms:code:";
     /** 验证码的写入时刻（epoch 毫秒）。与验证码同 TTL，见写缓存处。 */
@@ -76,16 +80,23 @@ public class SmsService {
         try {
             return transactionTemplate.execute(status -> doReceiveSms(authenticatedDeviceId, request));
         } catch (DataIntegrityViolationException e) {
-            // 两台设备**同时**上报内容相同的短信时，双方都会在 findBySourceHash 扑空、
-            // 都走到插入，后落地的那个撞 uk_source_hash。
+            // 同一台设备**同时**上报内容相同的短信时，双方都会在判重那一步扑空、
+            // 都走到插入，后落地的那个撞 uk_device_source_hash。
             //
             // 内容相同本来就意味着这是重复上报，所以重查一次按「重复」返回即可，
             // 不能让它变成 500 —— 设备端把 500 归为可重试，这条短信会永远传不上去、
             // 一直烧电重试。这与「重复短信分支自己撞约束」是同一个症状的两个入口。
             //
             // 必须在事务**外面**接：事务一旦被标记 rollback-only，同一个事务里再查询会直接失败。
+            //
+            // 这里要多查一次设备主键：判重已经收窄到设备内，重查也得带上设备条件，
+            // 否则并发时会把**别的设备**收到同一段内容的那条当成自己的重复返回。
             log.info("Concurrent duplicate detected, returning existing row as duplicate");
-            return smsMessageRepository.findBySourceHash(HashUtil.sha256(request.getContent()))
+            Long devicePk = deviceRepository.findByDeviceId(authenticatedDeviceId)
+                    .map(device -> device.getId())
+                    .orElse(null);
+            return smsMessageRepository.findByDeviceIdAndSourceHash(
+                            devicePk, HashUtil.sha256(request.getContent()))
                     .map(existing -> new SmsReceiveResponse(
                             existing.getId(), true, SmsStatus.DUPLICATE.name(), null))
                     .orElseThrow(() -> e);
@@ -117,29 +128,32 @@ public class SmsService {
         // 2. Compute source hash for dedup: SHA-256(content)
         String sourceHash = HashUtil.sha256(request.getContent());
 
-        // 3. Check dedup by source_hash
+        // 3. Check dedup by (device, source_hash) —— 去重按设备做，见仓储层的说明
         //
         // 这里原本还有一句 Redis setIfAbsent 做「最近见过同样的内容」，但它的返回值
-        // 赋值后从未被读过 —— 也就是说那个守卫从来没生效过，纯属误导。
-        // 已删：真正的去重由 unique key uk_source_hash 保证，并发下的撞约束由
-        // receiveSms 的 catch 兜住，两者合起来比一个带 TTL 的 Redis 标记可靠。
-        Optional<SmsMessage> existingByHash = smsMessageRepository.findBySourceHash(sourceHash);
+        // 赋值后从未被读过 —— 也就是说那个守卫从来没生效过，纯属误导。已删。
+        Optional<SmsMessage> existingByHash =
+                smsMessageRepository.findByDeviceIdAndSourceHash(devicePk, sourceHash);
         if (existingByHash.isPresent()) {
-            SmsMessage msg = existingByHash.get();
+            SmsMessage existing = existingByHash.get();
 
-            // 只回报重复，**不再另插一行**。
+            // 重复到达**照样留痕**，但仍然只有一行 —— 就在这一行上记：
+            //   duplicate_count 加一（列表上显示「重复 3 次」），
+            //   保存实体顺带把 updated_at 顶上去（那列是 ON UPDATE CURRENT_TIMESTAMP），
+            //   于是「最后又是什么时候收到的」也查得到。
             //
-            // 原先这里新建一条 status=DUPLICATE 的记录，但把 source_hash 设成了与已存在行
-            // 完全相同的值 —— 而那一列上有唯一索引 uk_source_hash。这条 INSERT 100% 撞约束、
-            // 抛 DataIntegrityViolationException、被兜成 500；设备端又把 500 归为可重试，
-            // 于是这条短信永远传不上去，还一直烧电重试。
-            //
-            // 「一段内容一行」并不是新加的约定：查询侧 findBySourceHash 返回 Optional、
-            // 建表侧 uk_source_hash 唯一，两边一直是这么写的，只有这段插入跑偏了。
-            // 代价是管理后台不会再出现 status=DUPLICATE 的行 —— 但它本来也从没成功出现过。
-            // 响应结构保持不变，设备端的「内容重复」提示照常工作。
-            log.info("Duplicate SMS detected for sourceHash={}, original msgId={}", sourceHash, msg.getId());
-            return new SmsReceiveResponse(msg.getId(), true, SmsStatus.DUPLICATE.name(), null);
+            // 原先这里什么都不做，只回一个 DUPLICATE：现场于是完全看不出同一个码
+            // 又来过几次 —— 而那恰恰是判断「是不是被重放 / 是不是双卡各收了一遍」
+            // 的唯一线索。
+            existing.setDuplicateCount(existing.getDuplicateCount() + 1);
+            smsMessageRepository.save(existing);
+
+            log.info("Duplicate SMS counted for device={}, msgId={}, count={}",
+                    authenticatedDeviceId, existing.getId(), existing.getDuplicateCount());
+
+            // 这一行的「重复 N 次 · 最后 xx」变了，列表上得跟着动
+            adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS, Map.of("id", existing.getId()));
+            return new SmsReceiveResponse(existing.getId(), true, SmsStatus.DUPLICATE.name(), null);
         }
 
         // 4. Apply collect rules (priority desc, first match wins; no match => collect)
@@ -168,6 +182,10 @@ public class SmsService {
                     decision.matchedRule(), authenticatedDeviceId, request.getPhone(), request.getSender());
             return new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null);
         }
+
+        // 列表上多了一条，推给管理后台。
+        // 放在这里而不是方法末尾：被规则忽略的那些不进默认列表，不必惊动前端。
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS, Map.of("id", message.getId()));
 
         String code = resolveCode(request.getCode(), request.getContent());
         // 外部调用方按号码取短信、不关心发送方，所以归一化后的号码是唯一的匹配维度。

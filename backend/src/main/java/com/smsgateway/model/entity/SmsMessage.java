@@ -46,8 +46,15 @@ public class SmsMessage {
     @Column(name = "receive_time", nullable = false)
     private LocalDateTime receiveTime;
 
-    @Column(name = "is_read", nullable = false)
-    private boolean isRead = false;
+    /**
+     * 这段内容又收到过几次。**只有正本行（首次那条）会累加**，重复行恒为 0。
+     *
+     * 重复到达本身也各存一行（status=DUPLICATE，见 SmsService），这个计数是为了让列表上
+     * 一眼看到「重复 3 次 · 最后 15:20」—— 否则要按 source_hash 去 count 一遍，
+     * 列表每行都查一次。
+     */
+    @Column(name = "duplicate_count", nullable = false)
+    private int duplicateCount = 0;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

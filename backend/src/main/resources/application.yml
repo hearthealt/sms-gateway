@@ -60,4 +60,4 @@ app:
     # 重置成它，用完把变量撤掉即可。留空则完全不做任何事。
     reset-password: ${APP_ADMIN_RESET_PASSWORD:}
     # 管理后台登录 token 在 Redis 中的有效期（秒）
-    token-ttl-seconds: 7200
+    token-ttl-seconds: 72000

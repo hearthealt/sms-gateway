@@ -98,6 +98,27 @@ public class AdminDeviceService {
         return new StatsView(online, offline, online + offline, todaySms, todayCodes);
     }
 
+    /**
+     * 删除一台设备，连同它的全部短信记录。
+     *
+     * <p><b>删短信是有意的，不是顺手。</b>{@code sms_message.device_id} 指向设备，
+     * 只删设备会留下一堆查不到设备的孤儿行 —— 列表每条都要去关联设备名，那些行会显示成空，
+     * 看着像数据坏了。短信是诊断数据、不是资产，设备既然移出车队，它的历史一并清掉才是预期。
+     *
+     * <p>不可撤销，控制台那边有二次确认，并且会把「会一起删掉多少条短信」写在确认框里。
+     */
+    @Transactional
+    public int delete(String deviceId) {
+        SmsDevice device = deviceRepository.findByDeviceId(deviceId)
+                .orElseThrow(() -> new IllegalArgumentException("设备不存在: " + deviceId));
+
+        int removedSms = smsMessageRepository.deleteByDeviceId(device.getId());
+        deviceRepository.delete(device);
+
+        log.warn("Admin deleted device {}, together with {} sms rows", deviceId, removedSms);
+        return removedSms;
+    }
+
     @Transactional
     public DeviceView setEnabled(String deviceId, boolean enabled) {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)

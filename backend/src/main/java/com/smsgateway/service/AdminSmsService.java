@@ -120,7 +120,8 @@ public class AdminSmsService {
             view.setCode(msg.getCode());
             view.setStatus(msg.getStatus() != null ? msg.getStatus().name() : null);
             view.setReceiveTime(msg.getReceiveTime());
-            view.setRead(msg.isRead());
+            view.setDuplicateCount(msg.getDuplicateCount());
+            view.setUpdatedAt(msg.getUpdatedAt());
             return view;
         }).collect(Collectors.toList());
     }
