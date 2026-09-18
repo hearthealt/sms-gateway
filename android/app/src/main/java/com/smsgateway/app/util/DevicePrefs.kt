@@ -37,10 +37,17 @@ object DevicePrefs {
      */
     const val KEY_PHONE_SUB_ID = "phone_sub_id"
     const val KEY_SERVER_URL = "server_url"
-    const val KEY_DEVICE_NAME = "device_name"
 
     /** 服务端把本设备置为 DISABLED 后缓存在本地，供 Worker/服务在无网时也能立刻停手。 */
     const val KEY_DEVICE_DISABLED = "device_disabled"
+
+    /**
+     * 网关（前台服务）是否在运行。
+     *
+     * 落盘而不是只放进程内静态量：Worker 与短信广播接收器都可能在**进程刚被拉起**时
+     * 判断这件事，那时内存里什么都还没有。见 [GatewayState]。
+     */
+    const val KEY_GATEWAY_RUNNING = "gateway_running"
 
     /** 一次性修复标记：早期版本把上传失败的行错标成 failed，需要扫回 pending 一次。 */
     const val KEY_STRANDED_SWEPT = "stranded_rows_swept"
@@ -77,12 +84,9 @@ object DevicePrefs {
             .apply()
     }
 
-    /** 用户自定义的设备名。空串表示未设置，此时回落为「厂商 + 机型」。 */
-    fun deviceName(context: Context): String =
-        get(context).getString(KEY_DEVICE_NAME, "").orEmpty()
-
-    fun setDeviceName(context: Context, name: String) =
-        get(context).edit().putString(KEY_DEVICE_NAME, name.trim()).apply()
+    // 设备名称不在这里存：它跟随手机本身，见 [DeviceName]。
+    // 曾经在这里存过一份（设置页可手填），结果是扫码能把别人机器的名字写进来，
+    // 两台手机在管理后台同名。
 
     fun isDisabled(context: Context): Boolean =
         get(context).getBoolean(KEY_DEVICE_DISABLED, false)
@@ -94,6 +98,16 @@ object DevicePrefs {
     fun setDisabled(context: Context, disabled: Boolean) {
         if (isDisabled(context) == disabled) return
         get(context).edit().putBoolean(KEY_DEVICE_DISABLED, disabled).apply()
+    }
+
+    /** 网关是否在运行。未设置时按「没在跑」处理 —— 不确定就不上报，宁可让用户点一次启动。 */
+    fun isGatewayRunning(context: Context): Boolean =
+        get(context).getBoolean(KEY_GATEWAY_RUNNING, false)
+
+    /** 写网关运行态。值没变就不落盘，理由同 [setDisabled]。 */
+    fun setGatewayRunning(context: Context, running: Boolean) {
+        if (isGatewayRunning(context) == running) return
+        get(context).edit().putBoolean(KEY_GATEWAY_RUNNING, running).apply()
     }
 
     /**

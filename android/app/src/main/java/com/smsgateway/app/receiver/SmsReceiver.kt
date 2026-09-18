@@ -11,6 +11,7 @@ import com.smsgateway.app.parser.SmsFilter
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -77,10 +78,18 @@ class SmsReceiver : BroadcastReceiver() {
                     android.util.Log.e("SmsReceiver", "Failed to save SMS to database", e)
                 }
 
-                // 5. Trigger upload worker —— 未注册或被禁用时只入库不发送：这两种情况下
-                // 上传必然失败，唤醒 worker 也是白跑一趟。恢复时（注册成功 / 心跳看到已启用）
-                // 会重新排一次，那时这些行仍是 pending，会被一起补传。
-                if (DevicePrefs.isRegistered(context) && !DeviceStatus.isDisabled(context)) {
+                // 5. Trigger upload worker —— 未注册、被禁用、**或网关已停止**时只入库不发送。
+                //
+                // 前两种是「传了也白传」；第三种是产品承诺：界面上停止网关时写着
+                // 「短信会留在本地，不会上报」，而 WorkManager 会把进程拉起来照跑 worker ——
+                // 不在这里挡住，停止按钮就等于没生效（现场已经踩过）。
+                //
+                // 恢复时（注册成功 / 心跳看到已启用 / 网关重新启动）会重新排一次，
+                // 那时这些行仍是 pending，会被一起补传。
+                if (DevicePrefs.isRegistered(context) &&
+                    !DeviceStatus.isDisabled(context) &&
+                    GatewayState.isRunning(context)
+                ) {
                     SmsUploadWorker.enqueue(context)
                 }
             } finally {

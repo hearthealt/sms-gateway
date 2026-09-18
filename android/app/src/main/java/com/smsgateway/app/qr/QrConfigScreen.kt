@@ -41,6 +41,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
+import com.smsgateway.app.ui.AppCard
+import com.smsgateway.app.ui.AppColor
+import com.smsgateway.app.ui.AppScreen
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 
@@ -66,9 +69,9 @@ fun QrConfigScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var pasteInput by remember { mutableStateOf("") }
 
-    // 导出内容跟随当前配置；设备名留空就不写进载荷
-    val payload = remember(state.serverUrl, state.deviceName) {
-        QrConfigCodec.encode(state.serverUrl, state.deviceName)
+    // 导出内容跟随当前配置；只有服务器地址，不含设备名（见 QrConfigCodec.encode）
+    val payload = remember(state.serverUrl) {
+        QrConfigCodec.encode(state.serverUrl)
     }
     // 生成放到 IO 线程，不要用 remember { } 在组合期算。
     //
@@ -107,21 +110,9 @@ fun QrConfigScreen(
         scope.launch { snackbarHostState.showSnackbar(message) }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("配置二维码", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
-        },
+    AppScreen(
+        title = "配置二维码",
+        onBack = onBack,
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
@@ -259,10 +250,6 @@ fun QrConfigScreen(
                             fontWeight = FontWeight.Medium
                         )
                     }
-                    config.deviceName?.let {
-                        Text("设备名称：$it", fontSize = 13.sp)
-                    }
-
                     // 带身份时这一段是整个流程里唯一能拦住「冒充」的地方：
                     // 采用之后，本机上报的短信会记在**那台**设备名下。
                     // 所以既要显眼，也要把设备号原样摆出来让人核对。
@@ -304,9 +291,8 @@ fun QrConfigScreen(
                     } else {
                         viewModel.importServerUrl(url)
                     }
-                    if (imported) {
-                        config.deviceName?.let { viewModel.updateDeviceName(it) }
-                    }
+                    // 刻意不导入设备名：它跟随手机本身，不该由一张二维码改写
+                    // （旧行为会把二维码里那台机器的名字写到本机，造成两台同名）。
                     pendingConfig = null
                     toast(
                         when {
@@ -326,14 +312,9 @@ fun QrConfigScreen(
 
 @Composable
 private fun QrCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(text = title, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            content()
-        }
+    AppCard {
+        Text(text = title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColor.Ink)
+        content()
     }
 }
 

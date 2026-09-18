@@ -6,6 +6,7 @@ import com.smsgateway.app.database.AppDatabase
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,9 @@ class SmsGatewayApp : Application() {
         // 必须在这里按已保存的配置把网络客户端与设备状态装配好。
         RetrofitClient.ensureConfigured(this)
         DeviceStatus.ensureLoaded(this)
+        // 同上：Worker / 短信接收器会在进程刚起来时判断「网关在不在跑」，
+        // 而那时没有任何界面组件被创建过。
+        GatewayState.ensureLoaded(this)
 
         sweepStrandedRowsOnce()
     }

@@ -18,15 +18,19 @@ import com.smsgateway.app.network.ProbeResult
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.service.GatewayForegroundService
 import com.smsgateway.app.util.AuthState
+import com.smsgateway.app.util.DeviceName
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
+import com.smsgateway.app.util.UploadEvents
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -39,8 +43,14 @@ data class DashboardState(
     val deviceId: String = "",
     val deviceToken: String = "",
     val phone: String = "",
-    /** 用户自定义的设备名；空串表示未设置，注册时回落为「厂商 + 机型」。 */
-    val deviceName: String = "",
+    /**
+     * 注意这里**没有** deviceName。
+     *
+     * 设备名称跟随手机本身（见 [DeviceName]），是**系统状态**而不是应用状态：
+     * 用户随时可能在「设置→关于手机→设备名称」里改，应用也拦不住。
+     * 放进这个 state 就等于存了一份会过期的副本 —— 设置页那个可编辑输入框当初
+     * 正是这么来的，还顺带让二维码能把别人机器的名字写进来。展示处直接读系统值。
+     */
     val serverUrl: String = DevicePrefs.DEFAULT_SERVER_URL,
     /**
      * 注意这里**没有** serverStatus 字段。
@@ -147,23 +157,42 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         tryAutoFillPhone()
         startMonitoring()
         observeService()
+        observeUploads()
+    }
+
+    /**
+     * 上传成功是**本地事件**：立刻重算「待上传」并拉一次服务端统计，不等轮询。
+     *
+     * 上传其实很快（实测从收到短信到入库 7~19 秒），而轮询是 5 秒看一次本地队列、
+     * 30 秒拉一次服务端统计。于是现场看到的是「验证码到了，待上传还是 0，
+     * 直到下一次心跳今日短信才 +1」—— 中间那段完全看不出这条码进没进来。
+     */
+    private fun observeUploads() {
+        viewModelScope.launch {
+            UploadEvents.successCount.collect { count ->
+                // 订阅时会先收到当前值，那不是「刚刚发生」的事件
+                if (count == 0L) return@collect
+                refreshPendingCount()
+                refreshServerStats()
+            }
+        }
     }
 
     /** 服务运行态、心跳时间、禁用状态都由服务/发送器产生，这里只订阅它们用于展示。 */
     private fun observeService() {
         viewModelScope.launch {
-            GatewayForegroundService.isRunning.collect { running ->
-                _state.value = _state.value.copy(isRunning = running)
+            GatewayState.running.collect { running ->
+                _state.update { it.copy(isRunning = running) }
             }
         }
         viewModelScope.launch {
             HeartbeatSender.lastSuccessAt.collect { at ->
-                _state.value = _state.value.copy(lastHeartbeatAt = at)
+                _state.update { it.copy(lastHeartbeatAt = at) }
             }
         }
         viewModelScope.launch {
             DeviceStatus.disabled.collect { disabled ->
-                _state.value = _state.value.copy(isDisabled = disabled)
+                _state.update { it.copy(isDisabled = disabled) }
             }
         }
 
@@ -173,11 +202,13 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             AuthState.tokenRejected.collect { rejected ->
                 if (!rejected) return@collect
-                _state.value = _state.value.copy(
-                    deviceId = DevicePrefs.deviceId(getApplication()),
-                    deviceToken = "",
-                    registerMessage = "服务端已不认这台设备（令牌失效），请重新注册"
-                )
+                _state.update {
+                    it.copy(
+                        deviceId = DevicePrefs.deviceId(getApplication()),
+                        deviceToken = "",
+                        registerMessage = "服务端已不认这台设备（令牌失效），请重新注册"
+                    )
+                }
                 AuthState.consume()
             }
         }
@@ -185,14 +216,18 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun loadSavedState() {
         val app = getApplication<Application>()
-        _state.value = _state.value.copy(
-            deviceId = DevicePrefs.deviceId(app),
-            deviceToken = DevicePrefs.deviceToken(app),
-            phone = DevicePrefs.phone(app),
-            deviceName = DevicePrefs.deviceName(app),
-            serverUrl = DevicePrefs.serverUrl(app),
-            isDisabled = DevicePrefs.isDisabled(app)
-        )
+        // 网关运行态的真源在 prefs 里（见 GatewayState），这里先水合再订阅，
+        // 否则订阅到的是内存初值 false，界面会先闪一下「已停止」。
+        GatewayState.ensureLoaded(app)
+        _state.update {
+            it.copy(
+                deviceId = DevicePrefs.deviceId(app),
+                deviceToken = DevicePrefs.deviceToken(app),
+                phone = DevicePrefs.phone(app),
+                serverUrl = DevicePrefs.serverUrl(app),
+                isDisabled = DevicePrefs.isDisabled(app)
+            )
+        }
     }
 
     /**
@@ -232,11 +267,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
         RetrofitClient.ensureConfigured(context)
 
-        _state.value = _state.value.copy(
-            serverUrl = normalized,
-            deviceToken = if (changed) "" else _state.value.deviceToken,
-            registerMessage = if (changed) "服务器地址已变更，请重新注册设备" else _state.value.registerMessage
-        )
+        _state.update {
+            it.copy(
+                serverUrl = normalized,
+                deviceToken = if (changed) "" else it.deviceToken,
+                registerMessage = if (changed) {
+                    "服务器地址已变更，请重新注册设备"
+                } else {
+                    it.registerMessage
+                }
+            )
+        }
     }
 
     /** 供二维码导入使用：由界面确认后调用这里写入。@return 同 [updateServerUrl]。 */
@@ -259,10 +300,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         DevicePrefs.adoptEnrollIdentity(app, deviceId, enrollSecret)
         applyServerUrl(app, normalized)
 
-        _state.value = _state.value.copy(
-            deviceId = DevicePrefs.deviceId(app),
-            registerMessage = "已采用恢复码中的设备身份，请重新注册设备"
-        )
+        _state.update {
+            it.copy(
+                deviceId = DevicePrefs.deviceId(app),
+                registerMessage = "已采用恢复码中的设备身份，请重新注册设备"
+            )
+        }
         return true
     }
 
@@ -274,19 +317,13 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             var ticks = 0
             while (isActive) {
-                try {
-                    // 「待上传」是本地队列的真实积压量，必须读本地库 —— 服务端不知道
-                    // 这台设备还有多少条没传上去
-                    val dao = AppDatabase.getInstance(getApplication()).smsQueueDao()
-                    _state.value = _state.value.copy(pendingCount = dao.getOutstandingCountSync())
-                } catch (e: Exception) {
-                    Log.e(TAG, "Monitoring error", e)
-                }
+                refreshPendingCount()
 
                 // 今日统计则必须来自服务端：设备端的记录页展示的就是服务端数据，
                 // 本地库会因为「清理本地记录」、清除应用数据而与它不一致，
                 // 之前正是这样出现了「数字显示 0、点进去却有内容」。
-                // 每 6 个 tick（约 30 秒）拉一次即可，不必跟着 5 秒的本地轮询。
+                // 每 6 个 tick（约 30 秒）拉一次即可，不必跟着 5 秒的本地轮询 ——
+                // 真正需要「立刻」的那种变化（刚传上去一条）走 UploadEvents，不靠这里。
                 if (ticks % 6 == 0) {
                     refreshServerStats()
                 }
@@ -294,6 +331,33 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
                 delay(5_000L)
             }
+        }
+    }
+
+    /**
+     * 重算「待上传」。这是本地队列的真实积压量，只能读本地库 ——
+     * 服务端不知道这台设备还有多少条没传上去。
+     *
+     * 必须用 update{} 而不是 `_state.value = _state.value.copy(...)`。
+     *
+     * getOutstandingCountSync() 是 suspend 的，会挂起并让出主线程；而
+     * `_state.value = _state.value.copy(pendingCount = count)` 这种写法里，
+     * 接收者 `_state.value` 是在**挂起之前**就被求值的，恢复之后写回去的
+     * 是挂起那一刻的旧快照 —— 挂起期间别的收集器写进去的字段会被原样抹掉。
+     *
+     * 现场表现（杀进程后重开 app 时必现）：ViewModel 刚建好时服务尚未重启，
+     * 快照里 isRunning=false；查询挂起期间系统的 START_STICKY 把服务拉了起来、
+     * 收集器把 isRunning 写成 true；查询一恢复，这行就把 true 覆盖回 false。
+     * 此后 isRunning 不再变化，界面永远停在「网关已停止」，而服务其实在跑 ——
+     * 点「启动网关」只会给一个已在运行的服务补发一次 start，
+     * onStartCommand 不改变运行态，界面因此毫无反应。
+     */
+    private suspend fun refreshPendingCount() {
+        try {
+            val count = database.smsQueueDao().getOutstandingCountSync()
+            _state.update { it.copy(pendingCount = count) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Load pending count failed", e)
         }
     }
 
@@ -309,10 +373,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
         try {
             val stats = RetrofitClient.getApiService().mySmsStats().body()?.data ?: return
-            _state.value = _state.value.copy(
-                todaySmsCount = stats.todaySms.toInt(),
-                todayCodeCount = stats.todayCodes.toInt()
-            )
+            _state.update {
+                it.copy(
+                    todaySmsCount = stats.todaySms.toInt(),
+                    todayCodeCount = stats.todayCodes.toInt()
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -321,9 +387,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearRegisterMessage() {
-        if (_state.value.registerMessage != null) {
-            _state.value = _state.value.copy(registerMessage = null)
-        }
+        _state.update { if (it.registerMessage == null) it else it.copy(registerMessage = null) }
     }
 
     /**
@@ -340,14 +404,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         val slot = DevicePhone.primarySlot(app)
         if (slot?.number != null) {
             DevicePrefs.setPhone(app, slot.number, slot.subscriptionId)
-            _state.value = _state.value.copy(phone = slot.number)
+            _state.update { it.copy(phone = slot.number) }
             return
         }
 
         // 列不出卡时退回默认读取，此时无从得知号码属于哪张卡
         val number = DevicePhone.read(app) ?: return
         DevicePrefs.setPhone(app, number, -1)
-        _state.value = _state.value.copy(phone = number)
+        _state.update { it.copy(phone = number) }
     }
 
     /**
@@ -366,27 +430,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             if (normalized == DevicePrefs.phone(app)) DevicePrefs.phoneSubId(app) else subId
 
         DevicePrefs.setPhone(app, normalized, effectiveSubId)
-        _state.value = _state.value.copy(phone = normalized)
+        _state.update { it.copy(phone = normalized) }
     }
 
-    /** 自定义设备名。清空则回落为「厂商 + 机型」。 */
-    fun updateDeviceName(raw: String) {
-        val normalized = raw.trim()
-        DevicePrefs.setDeviceName(getApplication(), normalized)
-        _state.value = _state.value.copy(deviceName = normalized)
-    }
-
-    /** 界面上展示用的设备名：用户没自定义时用机型兜底。 */
-    private fun effectiveDeviceName(): String =
-        DevicePrefs.deviceName(getApplication()).ifBlank {
-            "${Build.MANUFACTURER} ${Build.MODEL}".trim()
-        }
+    /** 注册时上报的设备名：跟随手机本身，读不到由 [DeviceName] 兜底。 */
+    private fun effectiveDeviceName(): String = DeviceName.read(getApplication())
 
     fun registerDevice() {
         // 连点两下曾会发出两个并发请求、各生成一个随机设备号，服务端于是多出一台「新设备」。
         if (!registerInFlight.compareAndSet(false, true)) return
 
-        _state.value = _state.value.copy(isRegistering = true, registerMessage = null)
+        _state.update { it.copy(isRegistering = true, registerMessage = null) }
 
         viewModelScope.launch {
             try {
@@ -395,7 +449,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 // 先落盘再发请求。UUID 一旦生成就是持久的，即使这次请求失败或进程中途被杀，
                 // 重试复用的也是同一个标识，不会再注册出第二台设备。
                 val deviceId = DevicePrefs.getOrCreateDeviceId(app)
-                _state.value = _state.value.copy(deviceId = deviceId)
+                _state.update { it.copy(deviceId = deviceId) }
 
                 val phone = DevicePrefs.phone(app).ifBlank { null }
 
@@ -432,13 +486,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                         Log.w(TAG, "Backfill queue identity failed", e)
                     }
 
-                    _state.value = _state.value.copy(
-                        deviceToken = token,
-                        phone = phone.orEmpty(),
-                        // 成功也要说一声。原先这里置 null，于是点了「重新注册」之后
-                        // 界面上什么都不变 —— 现场无从判断到底成没成，只能靠猜。
-                        registerMessage = "注册成功"
-                    )
+                    _state.update {
+                        it.copy(
+                            deviceToken = token,
+                            phone = phone.orEmpty(),
+                            // 成功也要说一声。原先这里置 null，于是点了「重新注册」之后
+                            // 界面上什么都不变 —— 现场无从判断到底成没成，只能靠猜。
+                            registerMessage = "注册成功"
+                        )
+                    }
 
                     SmsUploadWorker.enqueue(app)
                     refreshServerStats()
@@ -447,26 +503,28 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                     // 这里原本读 body()?.message —— 但 Retrofit 在非 2xx 时 body() 恒为 null，
                     // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
                     val detail = parseErrorMessage(response.errorBody()?.string())
-                    _state.value = _state.value.copy(
-                        registerMessage = "注册失败（HTTP ${response.code()}）" +
-                            (detail?.let { "：$it" } ?: "")
-                    )
+                    _state.update {
+                        it.copy(
+                            registerMessage = "注册失败（HTTP ${response.code()}）" +
+                                (detail?.let { "：$it" } ?: "")
+                        )
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: IOException) {
                 Log.e(TAG, "Registration failed: server unreachable", e)
-                _state.value = _state.value.copy(
-                    registerMessage = "连不上服务器，请到设置里检查服务器地址"
-                )
+                _state.update {
+                    it.copy(registerMessage = "连不上服务器，请到设置里检查服务器地址")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Registration failed", e)
-                _state.value = _state.value.copy(
-                    registerMessage = "注册失败：${e.message ?: e.javaClass.simpleName}"
-                )
+                _state.update {
+                    it.copy(registerMessage = "注册失败：${e.message ?: e.javaClass.simpleName}")
+                }
             } finally {
                 registerInFlight.set(false)
-                _state.value = _state.value.copy(isRegistering = false)
+                _state.update { it.copy(isRegistering = false) }
             }
         }
     }
@@ -486,27 +544,25 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         if (!testInFlight.compareAndSet(false, true)) return
 
         val url = rawUrl.trim().ifBlank { DevicePrefs.DEFAULT_SERVER_URL }
-        _state.value = _state.value.copy(isTestingConnection = true)
+        _state.update { it.copy(isTestingConnection = true) }
 
         viewModelScope.launch {
             try {
                 // probe 不再抛异常，连不上也是 ProbeResult 的一种，所以无需再包 try/catch
                 val (_, message) = describeProbe(RetrofitClient.probe(url))
-                _state.value = _state.value.copy(settingsMessage = message)
+                _state.update { it.copy(settingsMessage = message) }
             } finally {
                 // 放在 finally：协程被取消时也要把闸门和「测试中」状态放掉，
                 // 否则按钮会永远停在禁用态，用户只能杀掉应用。
                 testInFlight.set(false)
-                _state.value = _state.value.copy(isTestingConnection = false)
+                _state.update { it.copy(isTestingConnection = false) }
             }
         }
     }
 
     /** 设置页展示完提示后调用，避免下次进设置页又冒出来。 */
     fun clearSettingsMessage() {
-        if (_state.value.settingsMessage != null) {
-            _state.value = _state.value.copy(settingsMessage = null)
-        }
+        _state.update { if (it.settingsMessage == null) it else it.copy(settingsMessage = null) }
     }
 
     /**
@@ -536,13 +592,13 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refreshQueue() {
         viewModelScope.launch {
-            _state.value = _state.value.copy(queueLoading = true)
+            _state.update { it.copy(queueLoading = true) }
             try {
                 val rows = database.smsQueueDao().getOutstanding()
-                _state.value = _state.value.copy(queue = rows, queueLoading = false)
+                _state.update { it.copy(queue = rows, queueLoading = false) }
             } catch (e: Exception) {
                 Log.e(TAG, "Load queue failed", e)
-                _state.value = _state.value.copy(queueLoading = false)
+                _state.update { it.copy(queueLoading = false) }
             }
         }
     }
@@ -577,14 +633,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val removed = database.smsQueueDao().deleteAllUploaded()
                 Log.i(TAG, "Cleared $removed uploaded rows")
-                _state.value = _state.value.copy(settingsMessage = "已清理 $removed 条已上传记录")
+                _state.update { it.copy(settingsMessage = "已清理 $removed 条已上传记录") }
             } catch (e: Exception) {
                 // 以前这里只写日志：清理失败时界面毫无反应，用户会以为按钮没生效，
                 // 然后一直点。失败也必须说出来。
                 Log.e(TAG, "Clear uploaded failed", e)
-                _state.value = _state.value.copy(
-                    settingsMessage = "清理失败：${e.message ?: e.javaClass.simpleName}"
-                )
+                _state.update {
+                    it.copy(settingsMessage = "清理失败：${e.message ?: e.javaClass.simpleName}")
+                }
             }
         }
     }
@@ -593,35 +649,42 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun loadServerSms(page: Int = 1) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(smsLoading = true, smsError = null)
+            _state.update { it.copy(smsLoading = true, smsError = null) }
             try {
                 val response = RetrofitClient.getApiService()
                     .mySms(page = page, pageSize = SMS_PAGE_SIZE, includeIgnored = true)
 
                 val body = response.body()
                 if (response.isSuccessful && body?.data != null) {
-                    _state.value = _state.value.copy(
-                        smsRecords = body.data.records,
-                        smsTotal = body.data.total,
-                        smsLoading = false
-                    )
+                    _state.update {
+                        it.copy(
+                            smsRecords = body.data.records,
+                            smsTotal = body.data.total,
+                            smsLoading = false
+                        )
+                    }
                     // 列表刷新时同步刷新计数，保证两者永远一致
                     refreshServerStats()
                 } else {
-                    _state.value = _state.value.copy(
-                        smsLoading = false,
-                        smsError = "读取失败（HTTP ${response.code()}）" +
-                            (parseErrorMessage(response.errorBody()?.string())?.let { "：$it" } ?: "")
-                    )
+                    _state.update {
+                        it.copy(
+                            smsLoading = false,
+                            smsError = "读取失败（HTTP ${response.code()}）" +
+                                (parseErrorMessage(response.errorBody()?.string())?.let { m -> "：$m" }
+                                    ?: "")
+                        )
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Load server SMS failed", e)
-                _state.value = _state.value.copy(
-                    smsLoading = false,
-                    smsError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
-                )
+                _state.update {
+                    it.copy(
+                        smsLoading = false,
+                        smsError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
+                    )
+                }
             }
         }
     }
@@ -634,7 +697,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun runSelfTest() {
         if (_state.value.selfTestRunning) return
-        _state.value = _state.value.copy(selfTestRunning = true, selfTest = emptyList())
+        _state.update { it.copy(selfTestRunning = true, selfTest = emptyList()) }
 
         viewModelScope.launch {
             val app = getApplication<Application>()
@@ -642,7 +705,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
             fun add(label: String, ok: Boolean, detail: String) {
                 results += SelfTestItem(label, ok, detail)
-                _state.value = _state.value.copy(selfTest = results.toList())
+                _state.update { it.copy(selfTest = results.toList()) }
             }
 
             add(
@@ -688,7 +751,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
 
-            _state.value = _state.value.copy(selfTestRunning = false)
+            _state.update { it.copy(selfTestRunning = false) }
         }
     }
 
@@ -700,15 +763,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun checkStatusNow() {
         viewModelScope.launch {
-            _state.value = _state.value.copy(testResult = "检查中…")
+            _state.update { it.copy(testResult = "检查中…") }
             val ok = HeartbeatSender.send(getApplication())
-            _state.value = _state.value.copy(
-                testResult = when {
-                    !ok -> "检查失败：心跳未成功，请确认服务已启动且网络可达"
-                    DeviceStatus.isDisabled(getApplication()) -> "仍处于禁用状态"
-                    else -> "已恢复"
-                }
-            )
+            _state.update {
+                it.copy(
+                    testResult = when {
+                        !ok -> "检查失败：心跳未成功，请确认服务已启动且网络可达"
+                        DeviceStatus.isDisabled(getApplication()) -> "仍处于禁用状态"
+                        else -> "已恢复"
+                    }
+                )
+            }
         }
     }
 
@@ -723,10 +788,39 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     // ---------- 服务开关 ----------
 
     fun toggleService() {
-        if (_state.value.isRunning) {
+        // 读持久化的那份而不是界面状态：它没有推送延迟，也不会被别的写入覆盖。
+        // 服务其实没起来时（例如刚被系统杀掉），这里读到 false 会去把它拉起来，
+        // 而不是对着一个不存在的服务调 stopService 后界面毫无反应。
+        if (GatewayState.isRunning(getApplication())) {
             GatewayForegroundService.stop(getApplication())
+            reportOfflineToServer()
         } else {
             startService()
+        }
+    }
+
+    /**
+     * 告诉服务端「本机网关已停止」。
+     *
+     * 不这么做的话，停止之后管理后台还要继续显示在线 90 秒（判离线靠心跳超时），
+     * 现场看到的是「我明明停了，它还绿着」。
+     *
+     * 发不出去也无所谓：服务端同样有心跳超时兜底，这里只是让状态**立刻**对上。
+     * 因此失败只记日志，不提示用户 —— 网关确实已经停了，拿一个网络问题去打扰他没有意义。
+     */
+    private fun reportOfflineToServer() {
+        val app = getApplication<Application>()
+        if (!DevicePrefs.isRegistered(app)) return
+
+        viewModelScope.launch {
+            try {
+                RetrofitClient.ensureConfigured(app)
+                RetrofitClient.getApiService().reportOffline()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Report offline failed", e)
+            }
         }
     }
 

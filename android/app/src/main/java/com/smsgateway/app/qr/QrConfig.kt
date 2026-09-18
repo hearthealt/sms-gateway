@@ -7,14 +7,13 @@ import java.net.URI
 data class QrConfig(
     /** 字段可空是为了兼容 Gson：缺字段时它不会报错，而是给 null。 */
     val url: String? = null,
-    val deviceName: String? = null,
 
     /**
      * 设备恢复码：管理员在控制台为某台设备签发，扫码的设备会**采用**这个身份
      * （覆盖本机的设备标识与重注册密钥）。
      *
-     * 这两个字段**不该由手机自己生成**。本应用里的「配置二维码」只产出
-     * url + deviceName；如果身份也能由任意一台手机写进二维码，那么给你看一张码
+     * 这两个字段**不该由手机自己生成**。本应用里的「配置二维码」只产出 url；
+     * 如果身份也能由任意一台手机写进二维码，那么给你看一张码
      * 就能让你的手机"变成"攻击者的设备，此后你的短信全部记在他名下、
      * 而他有后台权限能读走。所以恢复码必须出自管理后台。
      */
@@ -43,13 +42,15 @@ object QrConfigCodec {
 
     private val gson = Gson()
 
-    fun encode(url: String, deviceName: String?): String =
-        gson.toJson(
-            QrConfig(
-                url = url.trim().trimEnd('/'),
-                deviceName = deviceName?.trim()?.takeIf { it.isNotBlank() }
-            )
-        )
+    /**
+     * 只编码服务器地址。
+     *
+     * **不携带设备名**：名字跟随手机本身（见 DeviceName），放进二维码就等于给了一条
+     * 「用别人的码把本机改名」的路 —— 现场已经踩过：两台手机顶着同一个名字出现在
+     * 管理后台，谁也分不出哪台是哪台。
+     */
+    fun encode(url: String): String =
+        gson.toJson(QrConfig(url = url.trim().trimEnd('/')))
 
     fun parse(raw: String): QrParseResult {
         val text = raw.trim()
@@ -73,7 +74,6 @@ object QrConfigCodec {
         return QrParseResult.Ok(
             QrConfig(
                 url = url.trimEnd('/'),
-                deviceName = config.deviceName?.trim()?.takeIf { it.isNotBlank() },
                 // 合法性不在这里判定 —— 由服务端在注册时比对密钥哈希，那才是权威。
                 deviceId = config.deviceId?.trim()?.takeIf { it.isNotBlank() },
                 enrollSecret = config.enrollSecret?.trim()?.takeIf { it.isNotBlank() }

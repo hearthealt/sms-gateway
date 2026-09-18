@@ -13,11 +13,10 @@ import androidx.core.app.NotificationCompat
 import com.smsgateway.app.MainActivity
 import com.smsgateway.app.R
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
+import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,12 +33,16 @@ class GatewayForegroundService : Service() {
         private const val DISABLED_HEARTBEAT_INTERVAL_MS = 60_000L
 
         /**
-         * 服务的真实运行态，供界面展示。
-         * 此前界面用的是启动时乐观置位的值且不持久化，旋转屏或进程重启后
-         * 会显示「已停止」而服务其实在跑。
+         * 当前活着的服务实例，用来把运行态绑定到**实例**而不是某个回调。
+         *
+         * 只有销毁的正是这个实例时才允许把运行态清成 false：否则一个迟到的
+         * onDestroy（旧实例）会把已经在跑的新实例一起抹成「已停止」，
+         * 于是服务在跑、界面却显示停止，而「启动网关」按钮此后永远点不动 ——
+         * 服务本来就活着，点它只会补发一次 start，onCreate 不会再执行。
+         *
+         * 服务回调都在主线程，无需同步。
          */
-        private val _isRunning = MutableStateFlow(false)
-        val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+        private var liveInstance: GatewayForegroundService? = null
 
         fun start(context: Context) {
             val intent = Intent(context, GatewayForegroundService::class.java)
@@ -51,6 +54,12 @@ class GatewayForegroundService : Service() {
         }
 
         fun stop(context: Context) {
+            // 立刻落盘「已停止」，不等 onDestroy：服务本来就没起来时 onDestroy 根本不会
+            // 触发，那样用户点了停止、运行态还是 true，界面会卡在「停止网关」切不回来，
+            // 而采集侧也会继续按「网关在跑」放行上传。落盘之后 onDestroy 里的
+            // set(false) 只是幂等重复。
+            GatewayState.set(context, false)
+
             val intent = Intent(context, GatewayForegroundService::class.java)
             context.stopService(intent)
         }
@@ -65,13 +74,46 @@ class GatewayForegroundService : Service() {
         super.onCreate()
         createNotificationChannel()
         serviceAlive = true
-        _isRunning.value = true
+        liveInstance = this
+        GatewayState.set(this, true)
+
+        // 被「停止网关」拦在本地的那批短信，现在该重新排队了 —— 界面承诺的是
+        // 「短信会留在本地，不会上报」，恢复上报的时机就是网关重新跑起来。
+        SmsUploadWorker.enqueue(this)
+
+        // 通知与心跳都在这里就开始，而不是只放在 onStartCommand 里。
+        //
+        // 系统重建服务时，onCreate 与 onStartCommand 之间并不保证是连续的：实测
+        // MIUI 的「上滑清理」杀掉进程后重建的那次，onCreate 跑了而 onStartCommand
+        // **再也没来**（ServiceRecord 里 startRequested/callStart 都是 true，系统认为
+        // 已经交付过，不会重发）。结果是服务对象活着、运行态是 true、通知还挂在被杀
+        // 之前那条，但没有任何人在发心跳 —— 后端把这台设备判为离线，而界面显示
+        // 「已启动，等待心跳」，点「停止/启动」都不会让它自愈。
+        //
+        // 服务实例存在就必须是前台服务并持续心跳，这是这个类的不变式，
+        // 挂在哪个回调上只是实现细节。
+        startForeground(NOTIFICATION_ID, buildNotification("已连接"))
+        if (heartbeatJob?.isActive != true) {
+            heartbeatJob = startHeartbeatLoop()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification("已连接"))
 
-        // 幂等：重复 start 时不要叠加第二个心跳循环
+        // 每次收到启动命令都重申一次运行态，而不是只在 onCreate 里置位。
+        //
+        // 走到这里的路径不止「用户点了启动」：系统的 START_STICKY 重启、
+        // 覆盖安装后的 MY_PACKAGE_REPLACED 都会走它，而 onCreate 只在实例**首次**
+        // 创建时执行一次。运行态万一被清成了 false（迟到的 onDestroy、界面状态被
+        // 旧快照覆盖），此后用户再点「启动网关」也只是给一个已在运行的服务补发
+        // start，onCreate 不会再跑 —— 没有这行重申，按钮就是永久失效的，
+        // 现场只能强行杀掉应用才能恢复。有了它，任何一次启动请求都能把状态纠正回来。
+        liveInstance = this
+        GatewayState.set(this, true)
+
+        // 幂等：重复 start 时不要叠加第二个心跳循环；onCreate 已经起过一个了，
+        // 这里只是兜底（例如服务对象被复用、或循环已因异常退出）。
         if (heartbeatJob?.isActive != true) {
             heartbeatJob = startHeartbeatLoop()
         }
@@ -135,7 +177,14 @@ class GatewayForegroundService : Service() {
 
     override fun onDestroy() {
         serviceAlive = false
-        _isRunning.value = false
+
+        // 只清自己那一次的运行态：销毁的若不是当前存活实例，说明新实例已经接上了，
+        // 这一刀下去会把新实例的运行态一并抹掉。
+        if (liveInstance === this) {
+            liveInstance = null
+            GatewayState.set(this, false)
+        }
+
         serviceScope.cancel()
         super.onDestroy()
     }

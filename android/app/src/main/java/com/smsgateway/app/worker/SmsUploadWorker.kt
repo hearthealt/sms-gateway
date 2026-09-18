@@ -11,6 +11,8 @@ import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.GatewayState
+import com.smsgateway.app.util.UploadEvents
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -112,6 +114,15 @@ class SmsUploadWorker(
                 return@withContext Result.success()
             }
 
+            // 网关停着一行都不动。界面在停止时明确承诺「短信会留在本地，不会上报」，
+            // 而 WorkManager 会在进程被拉起时照跑不误 —— 只在接收端挡是不够的：
+            // 排进队列的任务会在网关停掉之后才被执行。行保持 pending，
+            // 网关重新启动时（GatewayForegroundService.onCreate）会重新排队补传。
+            if (!GatewayState.isRunning(context)) {
+                Log.i(TAG, "Gateway stopped, parking queue")
+                return@withContext Result.success()
+            }
+
             try {
                 val dao = AppDatabase.getInstance(context).smsQueueDao()
                 val pendingSms = dao.getPendingSms(System.currentTimeMillis())
@@ -126,6 +137,10 @@ class SmsUploadWorker(
                     when (uploadSingleSms(sms)) {
                         Outcome.SUCCESS -> {
                             dao.updateStatus(sms.id, "uploaded")
+                            // 通知界面立刻重算「待上传」与「今日短信/验证码」：
+                            // 上传只要几秒，等下一个 5 秒/30 秒轮询的话，现场看到的是
+                            // 「验证码进来了，界面上什么都没发生」。
+                            UploadEvents.notifyUploaded()
                             Log.d(TAG, "Uploaded SMS: ${sms.id}")
                         }
 

@@ -52,7 +52,9 @@ object HeartbeatSender {
             timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date()),
             // 为空时 Gson 省略该字段，后端只在字段存在时才更新，不会把已存值覆盖成空。
             phone = DevicePrefs.phone(app).ifBlank { null },
-            deviceName = DevicePrefs.deviceName(app).ifBlank { null },
+            // 名字跟随手机本身，读不到也有厂商+机型兜底，不会是空值 ——
+            // 空值会被 Gson 省略掉，服务端只会保留旧名字，那是两台重名的来源之一
+            deviceName = DeviceName.read(app),
             battery = DeviceTelemetry.batteryLevel(app),
             network = DeviceTelemetry.networkType(app),
             charging = DeviceTelemetry.isCharging(app),

@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * 真源仍是 SharedPreferences（见 DevicePrefs.isDisabled）——它跨进程死亡存活，
  * 也是唯一四处组件都能读到的地方。这里的 StateFlow 只是给界面用的推送通道，
- * 写法照搬 GatewayForegroundService 的 lastHeartbeat / isRunning。
+ * 写法与 [GatewayState] 完全一致：prefs 当真源、StateFlow 当界面推送通道。
  */
 object DeviceStatus {
 

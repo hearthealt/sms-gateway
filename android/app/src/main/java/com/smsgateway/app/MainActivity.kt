@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
@@ -57,6 +58,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.SmsRecord
 import com.smsgateway.app.qr.QrConfigScreen
+import com.smsgateway.app.ui.AppCard
+import com.smsgateway.app.ui.AppColor
+import com.smsgateway.app.ui.AppScreen
+import com.smsgateway.app.util.DeviceName
 import com.smsgateway.app.util.DevicePhone
 import kotlinx.coroutines.launch
 
@@ -224,7 +229,7 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .weight(1f),
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                color = Color(0xFFF4F6FA)
+                color = AppColor.Screen
             ) {
                 Column(
                     modifier = Modifier
@@ -626,8 +631,8 @@ private fun MetricGrid(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White)
+        shape = AppColor.CardShape,
+        colors = CardDefaults.cardColors(containerColor = AppColor.Card)
     ) {
         Row(
             modifier = Modifier
@@ -640,6 +645,9 @@ private fun MetricGrid(
                 icon = Icons.Default.CloudUpload,
                 value = state.pendingCount,
                 label = "待上传",
+                // 那行小字只在「这个数字需要解释」时才出现。数字本身已经说清的事
+                // （有 6 条就是 6 条）再补一句「点开看明细」，一行里出现两次，纯是噪音 ——
+                // 空串仍占一行，三格的对齐不受影响。
                 hint = if (state.pendingCount == 0) "全部已上传" else "正在重试",
                 // 颜色**只用来报警**，不做身份装饰。
                 // 三个数字各染一色（蓝/绿/灰）看着热闹，但橙色的"出事了"就被淹没了；
@@ -653,7 +661,7 @@ private fun MetricGrid(
                 icon = Icons.Default.Forum,
                 value = state.todaySmsCount,
                 label = "今日短信",
-                hint = if (state.todaySmsCount == 0) "今天还没有收到" else "点开看明细",
+                hint = if (state.todaySmsCount == 0) "今天还没有收到" else "",
                 alert = false,
                 onClick = onOpenServerSms
             )
@@ -664,7 +672,7 @@ private fun MetricGrid(
                 value = state.todayCodeCount,
                 label = "今日验证码",
                 hint = when {
-                    state.todayCodeCount > 0 -> "点开看明细"
+                    state.todayCodeCount > 0 -> ""
                     // 有短信却一条验证码都没提取出来，这才是真该去查规则的情况
                     state.todaySmsCount > 0 -> "有短信，未提取到"
                     else -> "今天还没有收到"
@@ -682,7 +690,7 @@ private fun MetricDivider() {
         modifier = Modifier
             .width(1.dp)
             .height(46.dp)
-            .background(Color(0xFFEEEEEE))
+            .background(AppColor.Divider)
     )
 }
 
@@ -733,9 +741,11 @@ private fun MetricCell(
         Text(
             text = hint,
             fontSize = 11.sp,
-            color = if (alert) alertColor.copy(alpha = 0.75f) else Color(0xFF9E9E9E),
+            color = if (alert) alertColor.copy(alpha = 0.75f) else AppColor.InkMuted,
             textAlign = TextAlign.Center,
             lineHeight = 13.sp,
+            // minLines：空串也要占住这一行，否则三格的数字会因高度不同而错位
+            minLines = 1,
             maxLines = 2
         )
     }
@@ -751,8 +761,8 @@ private fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
     // 有边界之后它才和上面几块读起来是一套东西。
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White)
+        shape = AppColor.CardShape,
+        colors = CardDefaults.cardColors(containerColor = AppColor.Card)
     ) {
         Column(modifier = Modifier.padding(vertical = 2.dp)) {
             IdentityLine(
@@ -764,7 +774,7 @@ private fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
             HorizontalDivider(
                 modifier = Modifier.padding(start = 44.dp, end = 14.dp),
                 thickness = 1.dp,
-                color = Color(0xFFF0F0F0)
+                color = AppColor.Divider
             )
             IdentityLine(
                 icon = Icons.Default.Phone,
@@ -821,8 +831,11 @@ fun SettingsScreen(
 
     var serverUrlInput by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
     var phoneInput by remember(state.phone) { mutableStateOf(state.phone) }
-    var deviceNameInput by remember(state.deviceName) { mutableStateOf(state.deviceName) }
     var showReregisterDialog by remember { mutableStateOf(false) }
+
+    // 设备名称跟随手机本身，不是本应用的配置项：这里只读展示，改要到手机的
+    // 「设置 → 关于手机 → 设备名称」。见 DeviceName。
+    val deviceName = rememberDeviceName()
 
     val sims = remember { DevicePhone.listSlots(context) }
     var showSimPicker by remember { mutableStateOf(false) }
@@ -840,21 +853,9 @@ fun SettingsScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("设置", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
-        },
+    AppScreen(
+        title = "设置",
+        onBack = onBack,
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
@@ -931,22 +932,9 @@ fun SettingsScreen(
                     }
                 }
 
-                OutlinedTextField(
-                    value = deviceNameInput,
-                    onValueChange = { deviceNameInput = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("设备名称") },
-                    placeholder = { Text("留空则用机型名") }
-                )
-                OutlinedButton(
-                    onClick = {
-                        viewModel.updateDeviceName(deviceNameInput)
-                        focusManager.clearFocus()
-                        toast("设备名称已保存")
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("保存设备名称") }
+                // 设备名称只读展示，不给改：它跟随手机本身（见 DeviceName），
+                // 摆一个输入框只会让人以为能改，改完还会与手机里的名字打架。
+                StatusRow(label = "设备名称", value = deviceName)
 
                 // 号码存在 SIM 卡上，多数运营商不写入，所以自动读取经常为空，
                 // 这里的手填值才是权威来源。
@@ -960,21 +948,29 @@ fun SettingsScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
                 )
 
-                if (sims.isNotEmpty()) {
-                    OutlinedButton(
-                        onClick = { showSimPicker = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("从 SIM 卡读取（共 ${sims.size} 张）") }
-                }
+                // 并成一行：读卡与保存是同一个字段的两个动作，各占一整行会把这张卡
+                // 撑得过长，也和上面「保存 / 测试连接」那对的排法不一致。
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (sims.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { showSimPicker = true },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.SimCard, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("读 SIM 卡（${sims.size}）", maxLines = 1)
+                        }
+                    }
 
-                OutlinedButton(
-                    onClick = {
-                        viewModel.updatePhone(phoneInput)
-                        focusManager.clearFocus()
-                        toast("手机号已保存")
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("保存手机号") }
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.updatePhone(phoneInput)
+                            focusManager.clearFocus()
+                            toast("手机号已保存")
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("保存手机号", maxLines = 1) }
+                }
 
                 StatusRow(label = "注册状态", value = if (state.isRegistered) "已注册" else "未注册")
                 if (state.isDisabled) {
@@ -1088,30 +1084,18 @@ fun QueueScreen(
 ) {
     LaunchedEffect(Unit) { viewModel.refreshQueue() }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("待上传（${state.queue.size}）", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.refreshQueue() }) {
-                        Icon(Icons.Default.Refresh, "刷新", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
+    AppScreen(
+        title = "待上传（${state.queue.size}）",
+        onBack = onBack,
+        actions = {
+            IconButton(onClick = { viewModel.refreshQueue() }) {
+                Icon(Icons.Default.Refresh, "刷新", tint = Color.White)
+            }
         }
     ) { padding ->
         if (state.queue.isEmpty()) {
             EmptyState("没有待上传的短信", Modifier.padding(padding))
-            return@Scaffold
+            return@AppScreen
         }
 
         Column(
@@ -1140,49 +1124,76 @@ private fun QueueRow(row: SmsQueueEntity, onRetry: () -> Unit, onDelete: () -> U
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (failed) Color(0xFFFFEBEE) else Color(0xFFF5F5F5)
+            // 正常行必须用白色：页面底色已是 #F4F6FA，原先的 #F5F5F5 会糊在底色里看不见边界
+            containerColor = if (failed) AppColor.DangerBg else AppColor.Card
         )
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(row.sender, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    text = row.sender,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = AppColor.Ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = if (failed) "已被服务端拒绝" else "待重试",
                     fontSize = 12.sp,
-                    color = if (failed) Color(0xFFC62828) else Color(0xFFF57C00)
+                    color = if (failed) AppColor.Danger else AppColor.Warning
                 )
             }
 
-            Text(row.content, fontSize = 13.sp, maxLines = 3)
-            row.code.takeIf { it.isNotBlank() }?.let {
-                Text("验证码：$it", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            }
-
             Text(
-                text = buildString {
-                    append("第 ${row.retryCount} 次重试")
-                    val remaining = row.nextRetryAt - System.currentTimeMillis()
-                    if (!failed && remaining > 0) {
-                        append("，")
-                        append(formatCountdown(remaining))
-                    }
-                },
-                fontSize = 12.sp,
-                color = Color.Gray
+                text = row.content,
+                fontSize = 13.sp,
+                color = AppColor.Ink,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRetry, modifier = Modifier.weight(1f)) {
-                    Text(if (failed) "重新排队" else "立即重试")
+            row.code.takeIf { it.isNotBlank() }?.let {
+                Text("验证码 $it", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColor.Ink)
+            }
+
+            // 重试信息与两个操作并成一行。原先两个按钮各占一整行，一条记录要 200dp 上下，
+            // 一屏只看得到四五条；现在信息留在左、动作收进右，同屏多看几条。
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = buildString {
+                        append("第 ${row.retryCount} 次重试")
+                        val remaining = row.nextRetryAt - System.currentTimeMillis()
+                        if (!failed && remaining > 0) {
+                            append("，")
+                            append(formatCountdown(remaining))
+                        }
+                    },
+                    fontSize = 12.sp,
+                    color = AppColor.InkMuted,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = onRetry,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(if (failed) "重新排队" else "重试", fontSize = 13.sp)
                 }
-                OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f)) {
-                    Text("删除")
+                TextButton(
+                    onClick = onDelete,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text("删除", fontSize = 13.sp, color = AppColor.InkSecondary)
                 }
             }
         }
@@ -1198,25 +1209,13 @@ fun ServerSmsScreen(
     viewModel: DashboardViewModel,
     onBack: () -> Unit
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("服务端记录", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.loadServerSms() }) {
-                        Icon(Icons.Default.Refresh, "刷新", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
+    AppScreen(
+        title = "服务端记录",
+        onBack = onBack,
+        actions = {
+            IconButton(onClick = { viewModel.loadServerSms() }) {
+                Icon(Icons.Default.Refresh, "刷新", tint = Color.White)
+            }
         }
     ) { padding ->
         when {
@@ -1255,25 +1254,47 @@ private fun ServerSmsRow(record: SmsRecord) {
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp)
+        shape = AppColor.BannerShape,
+        colors = CardDefaults.cardColors(containerColor = AppColor.Card)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(record.sender ?: "未知发送方", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    text = record.sender ?: "未知发送方",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = AppColor.Ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(statusLabel, fontSize = 12.sp, color = statusColor, fontWeight = FontWeight.Medium)
             }
-            Text(record.content ?: "", fontSize = 13.sp, maxLines = 3)
-            record.code?.takeIf { it.isNotBlank() }?.let {
-                Text("验证码：$it", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            }
-            record.receiveTime?.let {
-                Text(it.replace('T', ' ').take(19), fontSize = 12.sp, color = Color.Gray)
+            Text(
+                text = record.content ?: "",
+                fontSize = 13.sp,
+                color = AppColor.Ink,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            // 验证码与收到时间并成一行：一行记录省下一行高度
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                record.code?.takeIf { it.isNotBlank() }?.let {
+                    Text("验证码 $it", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColor.Ink)
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                record.receiveTime?.let {
+                    Text(it.replace('T', ' ').take(19), fontSize = 12.sp, color = AppColor.InkMuted)
+                }
             }
         }
     }
@@ -1288,28 +1309,16 @@ fun SelfTestScreen(
     viewModel: DashboardViewModel,
     onBack: () -> Unit
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("自检", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = { viewModel.runSelfTest() },
-                        enabled = !state.selfTestRunning
-                    ) {
-                        Icon(Icons.Default.Refresh, "重新自检", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = Color.White
-                )
-            )
+    AppScreen(
+        title = "自检",
+        onBack = onBack,
+        actions = {
+            IconButton(
+                onClick = { viewModel.runSelfTest() },
+                enabled = !state.selfTestRunning
+            ) {
+                Icon(Icons.Default.Refresh, "重新自检", tint = Color.White)
+            }
         }
     ) { padding ->
         Column(
@@ -1325,29 +1334,76 @@ fun SelfTestScreen(
                 }
             }
 
-            state.selfTest.forEach { item ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (item.ok) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
+            if (state.selfTest.isNotEmpty()) {
+                SelfTestCard(state.selfTest)
+            }
+        }
+    }
+}
+
+/**
+ * 自检结果：**一张卡 + 细分隔线**，不再是每项一张色块卡。
+ *
+ * 原先六张绿卡竖排视觉很重，而且整块铺色时反而看不出「哪一项不对劲」——
+ * 全部同色，眼睛没有落点。现在状态收在两处：卡片右上角一句总结（几项通过 / 几项未通过），
+ * 以及每一项自己的图标与说明文字 —— 有问题的才染红，正常的保持中性。
+ */
+@Composable
+private fun SelfTestCard(items: List<SelfTestItem>) {
+    val failed = items.count { !it.ok }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = AppColor.CardShape,
+        colors = CardDefaults.cardColors(containerColor = AppColor.Card)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("自检结果", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = AppColor.Ink)
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = if (failed == 0) "${items.size} 项全部通过" else "$failed 项未通过",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (failed == 0) AppColor.Success else AppColor.Danger
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = AppColor.Divider)
+
+            items.forEachIndexed { index, item ->
+                if (index > 0) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 48.dp),
+                        thickness = 1.dp,
+                        color = AppColor.Divider
                     )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (item.ok) Icons.Default.CheckCircle else Icons.Default.Cancel,
-                            contentDescription = null,
-                            tint = if (item.ok) Color(0xFF4CAF50) else Color(0xFFF44336),
-                            modifier = Modifier.size(20.dp)
+                    Icon(
+                        imageVector = if (item.ok) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                        contentDescription = null,
+                        tint = if (item.ok) AppColor.Success else AppColor.Danger,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(item.label, fontSize = 15.sp, color = AppColor.Ink)
+                        Text(
+                            text = item.detail,
+                            fontSize = 12.sp,
+                            color = if (item.ok) AppColor.InkMuted else AppColor.Danger
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(item.label, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text(item.detail, fontSize = 12.sp, color = Color.Gray)
-                        }
                     }
                 }
             }
@@ -1369,17 +1425,9 @@ private fun EmptyState(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 private fun SettingsCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(text = title, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            content()
-        }
+    AppCard {
+        Text(text = title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColor.Ink)
+        content()
     }
 }
 
@@ -1434,6 +1482,30 @@ private data class DeviceChecks(
                 as? PowerManager)?.isIgnoringBatteryOptimizations(context.packageName) ?: false
         )
     }
+}
+
+/**
+ * 设备名称同理，也是系统状态：用户在「设置 → 关于手机 → 设备名称」里改完回到本页，
+ * 要看到的是新值。所以和权限、电池白名单一样在 ON_RESUME 时重读，
+ * 而不是把它塞进 ViewModel 存一份会过期的副本。
+ */
+@Composable
+private fun rememberDeviceName(): String {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var name by remember { mutableStateOf(DeviceName.read(context)) }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                name = DeviceName.read(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    return name
 }
 
 /**
