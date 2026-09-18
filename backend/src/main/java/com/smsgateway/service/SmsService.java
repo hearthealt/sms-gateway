@@ -11,9 +11,10 @@ import com.smsgateway.util.HashUtil;
 import com.smsgateway.util.PhoneUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -31,10 +32,14 @@ public class SmsService {
     private final StringRedisTemplate redisTemplate;
     private final CollectRuleEngine collectRuleEngine;
 
+    /**
+     * 编程式事务。理由与 {@link DeviceService} 相同：需要「撞唯一约束后另起一次查询」的兜底，
+     * 而 {@code @Transactional} 一旦被标记 rollback-only，同一事务里后续查询会直接失败。
+     */
+    private final TransactionTemplate transactionTemplate;
+
     private static final String SMS_CODE_KEY_PREFIX = "sms:code:";
-    private static final String SMS_DEDUP_KEY_PREFIX = "sms:dedup:";
     private static final long CODE_TTL_SECONDS = 300; // 5 min
-    private static final long DEDUP_TTL_SECONDS = 600; // 10 min
 
     /**
      * 验证码提取模式。分两类：关键词在前（「验证码是123456」）与关键词在后
@@ -59,8 +64,33 @@ public class SmsService {
                     java.util.regex.Pattern.CASE_INSENSITIVE)
     };
 
-    @Transactional
-    public SmsReceiveResponse receiveSms(String authenticatedDeviceId, SmsReceiveRequest request, String idempotencyKey) {
+    /**
+     * 上报一条短信。
+     *
+     * <p>用编程式事务而不是 {@code @Transactional}，是为了能接住并发下的唯一约束冲突 ——
+     * 见 catch 块里的说明。写法与 {@link DeviceService#register} 一致。
+     */
+    public SmsReceiveResponse receiveSms(String authenticatedDeviceId, SmsReceiveRequest request) {
+        try {
+            return transactionTemplate.execute(status -> doReceiveSms(authenticatedDeviceId, request));
+        } catch (DataIntegrityViolationException e) {
+            // 两台设备**同时**上报内容相同的短信时，双方都会在 findBySourceHash 扑空、
+            // 都走到插入，后落地的那个撞 uk_source_hash。
+            //
+            // 内容相同本来就意味着这是重复上报，所以重查一次按「重复」返回即可，
+            // 不能让它变成 500 —— 设备端把 500 归为可重试，这条短信会永远传不上去、
+            // 一直烧电重试。这与「重复短信分支自己撞约束」是同一个症状的两个入口。
+            //
+            // 必须在事务**外面**接：事务一旦被标记 rollback-only，同一个事务里再查询会直接失败。
+            log.info("Concurrent duplicate detected, returning existing row as duplicate");
+            return smsMessageRepository.findBySourceHash(HashUtil.sha256(request.getContent()))
+                    .map(existing -> new SmsReceiveResponse(
+                            existing.getId(), true, SmsStatus.DUPLICATE.name(), null))
+                    .orElseThrow(() -> e);
+        }
+    }
+
+    private SmsReceiveResponse doReceiveSms(String authenticatedDeviceId, SmsReceiveRequest request) {
         // 身份由调用方从拦截器的认证结果传入，**刻意不从请求体读**。
         // 做成显式参数而不是让 service 自己去 request 里取，是为了让「拿错身份」这件事
         // 在编译期就不可能发生 —— 将来多一个调用方也没法传错。
@@ -86,9 +116,11 @@ public class SmsService {
         String sourceHash = HashUtil.sha256(request.getContent());
 
         // 3. Check dedup by source_hash
-        String dedupRedisKey = SMS_DEDUP_KEY_PREFIX + sourceHash;
-        Boolean isNewDedup = redisTemplate.opsForValue().setIfAbsent(dedupRedisKey, "1", DEDUP_TTL_SECONDS, TimeUnit.SECONDS);
-
+        //
+        // 这里原本还有一句 Redis setIfAbsent 做「最近见过同样的内容」，但它的返回值
+        // 赋值后从未被读过 —— 也就是说那个守卫从来没生效过，纯属误导。
+        // 已删：真正的去重由 unique key uk_source_hash 保证，并发下的撞约束由
+        // receiveSms 的 catch 兜住，两者合起来比一个带 TTL 的 Redis 标记可靠。
         Optional<SmsMessage> existingByHash = smsMessageRepository.findBySourceHash(sourceHash);
         if (existingByHash.isPresent()) {
             SmsMessage msg = existingByHash.get();

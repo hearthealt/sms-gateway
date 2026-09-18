@@ -25,6 +25,17 @@ spring:
       timeout: 3000
 
 app:
+  sms:
+    # 短信历史的保留天数。**默认 0 = 不清理。**
+    #
+    # 这是一条删数据的策略，保留多久取决于合规与业务要求，所以默认不动手。
+    # 但要知道不启用意味着 sms_message 只增不减，而每行都存着短信全文与验证码 ——
+    # 表体积、备份体积、数据暴露面都随时间上涨。
+    # 设成大于 0 即启用，每天 03:30 按批删除早于该天数的记录。
+    retention-days: ${APP_SMS_RETENTION_DAYS:0}
+    cleanup-batch-size: 1000
+    cleanup-cron: "0 30 3 * * *"
+
   secret:
     # 设备令牌 = HMAC-SHA256(deviceId, 这个 key)。它是确定性的：知道 key 的人
     # 可以对**任意** deviceId 直接算出合法令牌，冒充任何设备上报与读取短信。

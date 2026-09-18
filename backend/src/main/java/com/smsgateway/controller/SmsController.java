@@ -38,10 +38,19 @@ public class SmsController {
     private final WaitingService waitingService;
     private final ClientSmsService clientSmsService;
 
+    /**
+     * 设备上报短信。
+     *
+     * <p>幂等键是 <b>(deviceId, localMessageId)</b>，由 uk_device_message 唯一索引保证，
+     * 与请求体里的字段同源。
+     *
+     * <p>客户端还会带一个 {@code Idempotency-Key} 头（内容是 {@code deviceId:localMessageId}），
+     * 但它与上面那个键完全等价，服务端不读它。头保留在文档里只是为了让老客户端照常发送 ——
+     * 原实现声明了这个参数却从不使用，这里去掉声明，免得再给人「有额外幂等语义」的错觉。
+     */
     @PostMapping("/receive")
     public ResponseEntity<ApiResult<SmsReceiveResponse>> receive(
             @Valid @RequestBody SmsReceiveRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             HttpServletRequest httpRequest) {
 
         // 身份一律取拦截器认证出来的那个，**不用请求体里的 deviceId**。
@@ -54,7 +63,7 @@ public class SmsController {
         log.info("SMS receive request: deviceId={}, localMessageId={}, sender={}",
                 deviceId, request.getLocalMessageId(), request.getSender());
 
-        SmsReceiveResponse response = smsService.receiveSms(deviceId, request, idempotencyKey);
+        SmsReceiveResponse response = smsService.receiveSms(deviceId, request);
 
         if (response.isDuplicate()) {
             return ResponseEntity.ok(ApiResult.success("duplicate", response));

@@ -18,6 +18,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import java.util.Optional;
@@ -59,6 +61,9 @@ class SmsServiceTest {
     private StringRedisTemplate redisTemplate;
 
     @Mock
+    private TransactionTemplate transactionTemplate;
+
+    @Mock
     private ValueOperations<String, String> valueOps;
 
     @Mock
@@ -77,6 +82,11 @@ class SmsServiceTest {
         when(smsMessageRepository.findByDeviceIdAndLocalMessageId(1L, "local-1")).thenReturn(Optional.empty());
         when(smsMessageRepository.findBySourceHash(anyString())).thenReturn(Optional.empty());
         when(smsMessageRepository.save(any(SmsMessage.class))).thenAnswer(inv -> inv.getArgument(0));
+        // 让编程式事务直接执行回调，不真的开事务
+        when(transactionTemplate.execute(any())).thenAnswer(inv -> {
+            TransactionCallback<?> callback = inv.getArgument(0);
+            return callback.doInTransaction(null);
+        });
         when(redisTemplate.opsForValue()).thenReturn(valueOps);
         when(valueOps.setIfAbsent(anyString(), anyString(), anyLong(), any(TimeUnit.class))).thenReturn(true);
         when(collectRuleEngine.decide(anyString(), anyString()))
@@ -102,7 +112,7 @@ class SmsServiceTest {
     @DisplayName("设备上报带 +86 的号码时缓存 key 归一化成纯号，外部调用方才能按号等到")
     void normalizesPhoneInCacheKey() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("+8613800138000", "您的验证码是123456，5分钟内有效", null), null);
+                request("+8613800138000", "您的验证码是123456，5分钟内有效", null));
 
         assertThat(response.getSmsCode()).isEqualTo("123456");
         verify(valueOps).set(eq(CODE_KEY), eq("123456"), eq(300L), eq(TimeUnit.SECONDS));
@@ -112,7 +122,7 @@ class SmsServiceTest {
     @DisplayName("解析出验证码时写入 Redis 缓存并推送 pub/sub")
     void extractsCodeAndCaches() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("您的验证码是123456，5分钟内有效", null), null);
+                request("您的验证码是123456，5分钟内有效", null));
 
         assertThat(response.getSmsCode()).isEqualTo("123456");
         verify(valueOps).set(eq(CODE_KEY), eq("123456"), eq(300L), eq(TimeUnit.SECONDS));
@@ -123,7 +133,7 @@ class SmsServiceTest {
     @DisplayName("验证码在关键词之前也能提取（此前完全漏掉）")
     void extractsCodeBeforeKeyword() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("【抖音】123456 是您的验证码，请勿泄露", null), null);
+                request("【抖音】123456 是您的验证码，请勿泄露", null));
 
         assertThat(response.getSmsCode()).isEqualTo("123456");
     }
@@ -132,7 +142,7 @@ class SmsServiceTest {
     @DisplayName("无验证码时不写 Redis：空串会覆盖上一条真实验证码，导致等待方超时")
     void doesNotOverwriteCachedCodeWithEmpty() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("您的订单已发货，请留意签收", null), null);
+                request("您的订单已发货，请留意签收", null));
 
         assertThat(response.getSmsCode()).isEmpty();
         verify(valueOps, never()).set(anyString(), anyString(), anyLong(), any(TimeUnit.class));
@@ -143,7 +153,7 @@ class SmsServiceTest {
     @DisplayName("裸 6 位数字（订单号/快递单号）不再被误判为验证码")
     void plainSixDigitNumberIsNotACode() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("您的订单号 123456 已发货", null), null);
+                request("您的订单号 123456 已发货", null));
 
         assertThat(response.getSmsCode()).isEmpty();
         verify(valueOps, never()).set(anyString(), anyString(), anyLong(), any(TimeUnit.class));
@@ -153,7 +163,7 @@ class SmsServiceTest {
     @DisplayName("客户端已解析出验证码时优先采用客户端结果")
     void clientProvidedCodeWins() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("随便什么内容", "999999"), null);
+                request("随便什么内容", "999999"));
 
         assertThat(response.getSmsCode()).isEqualTo("999999");
         verify(valueOps).set(eq(CODE_KEY), eq("999999"), eq(300L), eq(TimeUnit.SECONDS));
@@ -163,7 +173,7 @@ class SmsServiceTest {
     @DisplayName("客户端传空串时回退到后端解析（空串不等于 null，不能直接采用）")
     void blankClientCodeFallsBackToParsing() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("您的验证码是123456", ""), null);
+                request("您的验证码是123456", ""));
 
         assertThat(response.getSmsCode()).isEqualTo("123456");
         verify(valueOps).set(eq(CODE_KEY), eq("123456"), eq(300L), eq(TimeUnit.SECONDS));
@@ -176,7 +186,7 @@ class SmsServiceTest {
                 .thenReturn(new CollectRuleEngine.Decision(true, "营销类忽略"));
 
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("验证码123456，退订回T", null), null);
+                request("验证码123456，退订回T", null));
 
         ArgumentCaptor<SmsMessage> saved = ArgumentCaptor.forClass(SmsMessage.class);
         verify(smsMessageRepository).save(saved.capture());
@@ -191,7 +201,7 @@ class SmsServiceTest {
     @Test
     @DisplayName("未命中任何规则时入库为 RECEIVED（默认采集）")
     void defaultCollectStoresAsReceived() {
-        smsService.receiveSms(DEVICE_ID, request("您的验证码是123456", null), null);
+        smsService.receiveSms(DEVICE_ID, request("您的验证码是123456", null));
 
         ArgumentCaptor<SmsMessage> saved = ArgumentCaptor.forClass(SmsMessage.class);
         verify(smsMessageRepository).save(saved.capture());
@@ -204,7 +214,7 @@ class SmsServiceTest {
         SmsReceiveRequest req = request("您的验证码是123456", null);
         req.setDeviceId("someone-else");     // 拿自己的令牌冒充他人设备
 
-        smsService.receiveSms(DEVICE_ID, req, null);
+        smsService.receiveSms(DEVICE_ID, req);
 
         ArgumentCaptor<SmsMessage> saved = ArgumentCaptor.forClass(SmsMessage.class);
         verify(smsMessageRepository).save(saved.capture());
@@ -225,7 +235,7 @@ class SmsServiceTest {
         when(smsMessageRepository.findBySourceHash(anyString())).thenReturn(Optional.of(original));
 
         SmsReceiveResponse response = smsService.receiveSms(
-                DEVICE_ID, request("您的验证码是123456", null), null);
+                DEVICE_ID, request("您的验证码是123456", null));
 
         assertThat(response.isDuplicate()).isTrue();
         assertThat(response.getMessageId()).isEqualTo(99L);

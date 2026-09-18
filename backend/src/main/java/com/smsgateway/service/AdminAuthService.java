@@ -54,7 +54,8 @@ public class AdminAuthService {
         adminUserRepository.save(user);
 
         log.info("Admin login success: username={}", user.getUsername());
-        return new LoginResponse(token, user.getUsername(), user.getDisplayName());
+        // 把 TTL 一并回给前端，它才能自己判断令牌是不是过期了
+        return new LoginResponse(token, user.getUsername(), user.getDisplayName(), tokenTtlSeconds);
     }
 
     public void logout(String token) {

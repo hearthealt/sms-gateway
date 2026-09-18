@@ -5,6 +5,7 @@ import com.smsgateway.model.enums.SmsStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -93,4 +94,19 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
             + "order by function('date', m.receiveTime)")
     List<Object[]> countDailySince(@Param("from") LocalDateTime from,
                                    @Param("ignoredStatus") SmsStatus ignoredStatus);
+
+    /**
+     * 删除一批早于给定时刻的记录，返回实际删除行数。
+     *
+     * <p><b>用原生 SQL 是因为要带 LIMIT</b> —— JPQL 的 delete 不支持它。
+     * 必须分批：一次删几百万行会形成单个巨型事务，长时间持有锁、把 undo log 撑爆，
+     * 期间同库的短信写入都会被拖住。
+     *
+     * <p>调用方见 {@code SmsRetentionJob}，它循环调用直到返回 0。
+     */
+    @Modifying
+    @Query(value = "delete from sms_message where receive_time < :before limit :batchSize",
+            nativeQuery = true)
+    int deleteBatchByReceiveTimeBefore(@Param("before") LocalDateTime before,
+                                       @Param("batchSize") int batchSize);
 }

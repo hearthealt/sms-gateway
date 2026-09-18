@@ -40,7 +40,23 @@ public class HealthController {
     /** 探库超时（秒）。不设的话库挂掉时会一直挂在连接池的 connectionTimeout 上。 */
     private static final int DB_PROBE_TIMEOUT_SECONDS = 2;
 
+    /**
+     * 探库结果的缓存时长。
+     *
+     * <p>这个端点是免鉴权的，任何人都能打。而 {@code dataSource.getConnection()} 在
+     * 连接池被占满时会一直等到 Hikari 的 connectionTimeout（默认 30 秒）——
+     * 数据库一慢，并发的探活请求就会各自挂住一条 Tomcat 线程，反而把「探活」变成
+     * 压垮服务的那根稻草。
+     *
+     * <p>加一层几秒的缓存之后，无论同时来多少请求，最多每 5 秒真正碰一次数据库。
+     * 代价是库恢复后最坏要 5 秒才反映出来，对「服务是否可用」这个问题可以接受。
+     */
+    private static final long DB_PROBE_CACHE_MS = 5_000;
+
     private final DataSource dataSource;
+
+    private volatile boolean dbUpCache = false;
+    private volatile long dbProbedAt = 0L;
 
     @GetMapping("/health")
     public ResponseEntity<ApiResult<Map<String, Object>>> health() {
@@ -62,11 +78,28 @@ public class HealthController {
      * 若降级也返回非 200，这两种故障就糊成一团了。
      */
     private boolean databaseUp() {
-        try (Connection connection = dataSource.getConnection()) {
-            return connection.isValid(DB_PROBE_TIMEOUT_SECONDS);
-        } catch (Exception e) {
-            log.warn("Health check: database unreachable", e);
-            return false;
+        if (System.currentTimeMillis() - dbProbedAt < DB_PROBE_CACHE_MS) {
+            return dbUpCache;
+        }
+
+        // 双检锁：并发探活时只放一个进去真连库，其余的拿缓存值。
+        // 探库本身很慢（最坏 30 秒），这里值得用锁而不是放任它们各连一次。
+        synchronized (this) {
+            if (System.currentTimeMillis() - dbProbedAt < DB_PROBE_CACHE_MS) {
+                return dbUpCache;
+            }
+
+            boolean up;
+            try (Connection connection = dataSource.getConnection()) {
+                up = connection.isValid(DB_PROBE_TIMEOUT_SECONDS);
+            } catch (Exception e) {
+                log.warn("Health check: database unreachable", e);
+                up = false;
+            }
+
+            dbUpCache = up;
+            dbProbedAt = System.currentTimeMillis();
+            return up;
         }
     }
 }
