@@ -69,8 +69,8 @@ sms-gateway/
 │   │   ├── interceptor/  三套鉴权拦截器
 │   │   ├── service/      业务逻辑，CollectRuleEngine 是规则引擎
 │   │   └── model/        entity / dto / enums
-│   └── sql/schema.sql    建库 / 升级单文件（幂等，全新库与老库都适用）
-├── management/       管理后台（Vue 3 + TypeScript + Element Plus + Pinia）
+│   └── sql/              schema.sql（建库）+ migrations/（已建库的增量升级）
+├── management/       管理后台（Vue 3 + TypeScript + Element Plus）
 │   └── src/views/        仪表盘 / 设备 / 短信 / 规则 / API 密钥 / 接口文档
 └── docker/           docker-compose.yml（MySQL + Redis + Backend）
 ```
@@ -104,6 +104,11 @@ mysql --default-character-set=utf8mb4 -u root -p sms_gateway < backend/sql/schem
 
 `--default-character-set=utf8mb4` 不能省：中文 Windows 版 MySQL 的 client 字符集默认是
 gbk，读 UTF-8 的脚本会报 `Data too long for column 'rule_name'` 这种看似毫不相干的错。
+
+**已有库升级不要重跑 `schema.sql`。** 它通篇是 `CREATE TABLE IF NOT EXISTS`，
+对已存在的表**什么都不做** —— 新加的列、换掉的索引都不会生效，而后端已经在用它们了，
+启动后第一次查询就会报 `Unknown column`。升级走 `backend/sql/migrations/` 下对应日期的脚本：
+那些是增量的、**非幂等**（MySQL 8 不支持 `ADD COLUMN IF NOT EXISTS`），逐条确认后执行。
 
 脚本是**幂等**的，且**不切库**（没有 `USE`）—— 所以命令里必须指定目标库，跑错库会直接报
 `No database selected`，而不是静默写到别处去。全新库、老库升级、重复执行都用这一条命令。
