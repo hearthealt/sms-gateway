@@ -7,6 +7,7 @@ import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DevicePrefs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -14,6 +15,9 @@ import okhttp3.Request
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 object RetrofitClient {
@@ -208,6 +212,37 @@ object RetrofitClient {
      * 因为「连不上」和「连上了但不是本服务」对调用方是同一层级的正常结果。
      */
     suspend fun probe(url: String): ProbeResult = withContext(Dispatchers.IO) {
+        // 失败重试一次，隔 1.5 秒。
+        //
+        // 针对的是「WiFi 刚断开重连」那一两秒：系统还没把默认网络切回来，
+        // 第一次连接可能落在旧网络或蜂窝数据上，于是当场报「连不上」，
+        // 过后同一个地址一点就通 —— 现场会以为地址填错了。
+        //
+        // 只对 Unreachable 重试：NotOurService（有响应但不是本服务）是确定答案，
+        // 地址就是错的，再试一次只是白等。
+        var lastFailure: ProbeResult.Unreachable? = null
+        var delayMs = PROBE_RETRY_DELAY_MS
+
+        repeat(PROBE_ATTEMPTS) { attempt ->
+            val startedAt = System.currentTimeMillis()
+            val result = probeOnce(url)
+            val elapsed = System.currentTimeMillis() - startedAt
+
+            if (result !is ProbeResult.Unreachable) return@withContext result
+            lastFailure = result
+
+            // 只在「秒回的失败」上重试。见 PROBE_FAST_FAILURE_MS 的说明：
+            // 快失败是本机没路由（网络刚切换），等一下就通；慢失败是对面没响应，重试无意义。
+            if (attempt >= PROBE_ATTEMPTS - 1 || elapsed > PROBE_FAST_FAILURE_MS) {
+                return@withContext result
+            }
+            delay(delayMs)
+            delayMs *= 2
+        }
+        lastFailure!!
+    }
+
+    private suspend fun probeOnce(url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
             // 构造 Request 必须在 try 之内。url() 会解析地址，用户在设置页里敲进一个
             // 非法端口（如 :80801）时它抛 IllegalArgumentException —— 放到 try 外面，
@@ -233,7 +268,42 @@ object RetrofitClient {
         } catch (e: Exception) {
             // IllegalArgumentException（地址非法）也走这里：对现场人员来说，
             // 「端口敲错了」和「连不上」是同一件事，都该是一条提示而不是一次崩溃。
-            ProbeResult.Unreachable(e.message ?: e.javaClass.simpleName)
+            ProbeResult.Unreachable(describeConnectFailure(e))
+        }
+    }
+
+    /**
+     * 把连接失败翻成现场能据以行动的短句。
+     *
+     * 直接把异常消息抛出去只会得到 OkHttp 的
+     * `Failed to connect to /192.168.253.30:8080` —— 那句话没有任何信息量：
+     * 真正的原因藏在它的 cause 里，而三种原因的处置方式完全不同：
+     * 超时是防火墙，不可达是走错了网络，拒绝是端口上没服务。
+     */
+    private fun describeConnectFailure(e: Throwable): String {
+        // OkHttp 会把原因包一层（RouteException / ConnectException 套内层），取最里层那个
+        val root = generateSequence(e) { it.cause }.last()
+        val raw = root.message.orEmpty()
+
+        return when {
+            root is SocketTimeoutException || raw.contains("timed out", ignoreCase = true) ->
+                "连接超时：包发出去了但对面没回，检查服务端防火墙是否放行该端口"
+
+            // "unreach" 一次盖住两种：Android 对「网络不可达」抛的是
+            // `isConnected failed: ENETUNREACH`，对「主机不可达」抛的是
+            // `isConnected failed: EHOSTUNREACH (No route to host)` ——
+            // 后者不含 "unreachable" 这个词，只匹配它的话会漏掉最常见的那种。
+            raw.contains("unreach", ignoreCase = true) ||
+                raw.contains("no route to host", ignoreCase = true) ||
+                root is NoRouteToHostException ->
+                "网络不可达：本机到该地址没有路由。WiFi 刚重连、或同时开着蜂窝数据时会这样"
+
+            raw.contains("refused", ignoreCase = true) ->
+                "连接被拒绝：对面在，但那个端口上没有服务在监听"
+
+            root is UnknownHostException -> "地址解析失败：${root.message.orEmpty()}"
+
+            else -> raw.ifBlank { root.javaClass.simpleName }
         }
     }
 }
@@ -269,6 +339,22 @@ private const val PROBE_TIMEOUT_SECONDS = 8L
 
 /** 判错时带回来的响应体片段上限，够看出对面是什么就行，不必整页塞进界面。 */
 private const val SNIPPET_LENGTH = 120
+
+/** 探测最多试几次。后两次是给「WiFi 刚重连、本机暂时没有路由」那几秒用的。 */
+private const val PROBE_ATTEMPTS = 3
+
+/** 第一次重试前等多久，第二次翻倍（1.5 秒 → 3 秒，共覆盖约 4.5 秒的窗口）。 */
+private const val PROBE_RETRY_DELAY_MS = 1500L
+
+/**
+ * 一次探测多快算「秒回的失败」，值得重试。
+ *
+ * 实测 WiFi 重连后会得到 `isConnected failed: EHOSTUNREACH (No route to host)` ——
+ * 这种是立刻返回的，说明问题在本机这一侧（没有路由），换个时机就好。
+ * 而一次探测耗时逼近超时阈值，说明包发出去了对面没回（防火墙丢包、服务没起），
+ * 再试两次只会让按钮多转 16 秒，结论不会变。
+ */
+private const val PROBE_FAST_FAILURE_MS = 3_000L
 
 private data class HealthEnvelope(val code: Int, val data: HealthData?)
 
