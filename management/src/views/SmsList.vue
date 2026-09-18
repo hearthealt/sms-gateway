@@ -77,7 +77,7 @@
               v-if="row.deviceId"
               type="primary"
               :underline="false"
-              @click.stop="$router.push(`/devices/${row.deviceId}`)"
+              @click.stop="$router.push(`/devices/${encodeURIComponent(row.deviceId)}`)"
             >
               {{ row.deviceId }}
             </el-link>
@@ -124,7 +124,7 @@
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="page"
-          :page-size="pageSize"
+          v-model:page-size="pageSize"
           :total="total"
           layout="total, prev, pager, next, sizes"
           :page-sizes="[10, 15, 30, 50]"
@@ -142,6 +142,7 @@ import { useRoute } from 'vue-router'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { getSmsList } from '../api/sms'
+import { copyText } from '../utils/clipboard'
 import type { SmsRecord } from '../types'
 
 const route = useRoute()
@@ -177,15 +178,18 @@ function handleDateChange(val: [string, string] | null) {
 }
 
 async function copyCode(code: string) {
-  try {
-    await navigator.clipboard.writeText(code)
+  if (await copyText(code)) {
     ElMessage.success('验证码已复制')
-  } catch {
+  } else {
     ElMessage.error('复制失败')
   }
 }
 
+// 请求序号，作用同 DeviceList.vue：连点页码时丢弃过期响应
+let loadSeq = 0
+
 async function loadData() {
+  const seq = ++loadSeq
   loading.value = true
   try {
     const res = await getSmsList({
@@ -198,12 +202,14 @@ async function loadData() {
       endDate: searchForm.endDate,
       includeIgnored: includeIgnored.value,
     })
+    if (seq !== loadSeq) return
     records.value = res.records
     total.value = res.total
   } catch (e) {
     console.error('Failed to load SMS records', e)
   } finally {
-    loading.value = false
+    // 过期请求不能把最新请求的 loading 关掉
+    if (seq === loadSeq) loading.value = false
   }
 }
 

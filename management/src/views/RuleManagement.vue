@@ -73,14 +73,14 @@
     >
       <el-form ref="formRef" :model="form" :rules="formRules" label-width="100px" label-position="left">
         <el-form-item label="规则名称" prop="ruleName">
-          <el-input v-model="form.ruleName" placeholder="输入规则名称" />
+          <el-input v-model="form.ruleName" placeholder="输入规则名称" maxlength="100" show-word-limit />
         </el-form-item>
         <el-form-item label="发送方匹配" prop="senderPattern">
-          <el-input v-model="form.senderPattern" placeholder="发送号码模式，如 95555" />
+          <el-input v-model="form.senderPattern" placeholder="发送号码模式，如 95555" maxlength="255" show-word-limit />
           <div class="form-tip">支持精确匹配、LIKE模式 (%关键词%) 或正则表达式</div>
         </el-form-item>
         <el-form-item label="关键词匹配" prop="keywordPattern">
-          <el-input v-model="form.keywordPattern" placeholder="内容关键词，如 验证码" />
+          <el-input v-model="form.keywordPattern" placeholder="内容关键词，如 验证码" maxlength="255" show-word-limit />
         </el-form-item>
         <el-form-item label="匹配方式" prop="matchType">
           <el-select v-model="form.matchType" style="width: 100%">
@@ -103,7 +103,14 @@
           <el-switch v-model="form.enabled" />
         </el-form-item>
         <el-form-item label="描述" prop="description">
-          <el-input v-model="form.description" type="textarea" :rows="2" placeholder="规则描述（可选）" />
+          <el-input
+            v-model="form.description"
+            type="textarea"
+            :rows="2"
+            placeholder="规则描述（可选）"
+            maxlength="500"
+            show-word-limit
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -144,9 +151,23 @@ const defaultForm = {
 
 const form = reactive({ ...defaultForm })
 
+/*
+ * 长度上限与后端 @Size、数据库列宽对齐：ruleName 100、senderPattern 255、
+ * keywordPattern 255、description 500。
+ * 光靠 maxlength 不够 —— 它只挡键盘输入，编辑回填或粘贴超长值照样能提交，
+ * 由校验兜住才不会等到后端抛异常才发现。
+ */
 const formRules: FormRules = {
-  ruleName: [{ required: true, message: '请输入规则名称', trigger: 'blur' }],
-  senderPattern: [{ required: true, message: '请输入发送方匹配模式', trigger: 'blur' }],
+  ruleName: [
+    { required: true, message: '请输入规则名称', trigger: 'blur' },
+    { max: 100, message: '规则名称不能超过 100 个字符', trigger: 'blur' },
+  ],
+  senderPattern: [
+    { required: true, message: '请输入发送方匹配模式', trigger: 'blur' },
+    { max: 255, message: '发送方匹配不能超过 255 个字符', trigger: 'blur' },
+  ],
+  keywordPattern: [{ max: 255, message: '关键词匹配不能超过 255 个字符', trigger: 'blur' }],
+  description: [{ max: 500, message: '描述不能超过 500 个字符', trigger: 'blur' }],
   action: [{ required: true, message: '请选择动作', trigger: 'change' }],
 }
 
@@ -227,8 +248,9 @@ async function handleToggle(rule: CollectRule, val: boolean) {
     await toggleRule(rule.id, val)
     rule.enabled = val
     ElMessage.success(val ? '规则已启用' : '规则已禁用')
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (e) {
+    // 失败提示由 http 响应拦截器统一给出，这里不再重复弹一条
+    console.error(e)
   } finally {
     togglingId.value = null
   }

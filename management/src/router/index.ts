@@ -59,6 +59,18 @@ const router = createRouter({
         },
       ],
     },
+    /*
+     * 兜底路由：没有它，地址写错时没有任何 route 匹配，页面一片空白、
+     * 只在控制台留一条警告，管理员看不出是自己路径写错了。
+     * 不放进 Layout 的 children，是因为它不该套后台框架（侧边栏/面包屑）；
+     * requiresAuth 显式给 false —— 路径本身就不存在，先弹登录页只会把问题引到别处。
+     */
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'NotFound',
+      component: () => import('../views/NotFound.vue'),
+      meta: { requiresAuth: false },
+    },
   ],
 })
 

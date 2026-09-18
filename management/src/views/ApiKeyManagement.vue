@@ -113,6 +113,7 @@ import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { Plus, View, Hide, CopyDocument } from '@element-plus/icons-vue'
 import { getApiKeyList, createApiKey, deleteApiKey, toggleApiKey } from '../api/apikey'
+import { copyText } from '../utils/clipboard'
 import type { ApiKey } from '../types'
 import type { FormInstance, FormRules } from 'element-plus'
 
@@ -159,10 +160,9 @@ function isExpired(t: string): boolean {
 }
 
 async function copyKey(key: string) {
-  try {
-    await navigator.clipboard.writeText(key)
+  if (await copyText(key)) {
     ElMessage.success('密钥已复制')
-  } catch {
+  } else {
     ElMessage.error('复制失败')
   }
 }
@@ -223,8 +223,9 @@ async function handleToggle(row: ApiKey, val: boolean) {
     await toggleApiKey(row.id, val)
     row.enabled = val
     ElMessage.success(val ? '密钥已启用' : '密钥已禁用')
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (e) {
+    // 失败提示由 http 响应拦截器统一给出，这里不再重复弹一条
+    console.error(e)
   } finally {
     togglingId.value = null
   }

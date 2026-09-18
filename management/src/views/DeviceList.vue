@@ -79,12 +79,12 @@
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="page"
-          :page-size="pageSize"
+          v-model:page-size="pageSize"
           :total="total"
           layout="total, prev, pager, next, sizes"
           :page-sizes="[10, 20, 50]"
           @current-change="loadData"
-          @size-change="loadData"
+          @size-change="handleSizeChange"
         />
       </div>
     </el-card>
@@ -121,7 +121,16 @@ function batteryClass(b: number): string {
   return 'battery-low'
 }
 
+/*
+ * 请求序号：连点页码 2、3 时，page=2 的响应可能后到并覆盖表格，
+ * 而分页控件已经停在第 3 页 —— 表格和页码对不上。
+ * 这里用序号比较丢弃过期响应，不用 AbortController：取消请求会走到
+ * http 拦截器的错误分支，白弹一条「网络错误」。
+ */
+let loadSeq = 0
+
 async function loadData() {
+  const seq = ++loadSeq
   loading.value = true
   try {
     const res = await getDeviceList({
@@ -130,12 +139,14 @@ async function loadData() {
       deviceId: searchForm.deviceId || undefined,
       phone: searchForm.phone || undefined,
     })
+    if (seq !== loadSeq) return
     devices.value = res.records
     total.value = res.total
   } catch (e) {
     console.error('Failed to load devices', e)
   } finally {
-    loading.value = false
+    // 过期请求不能把最新请求的 loading 关掉，否则转圈提前消失
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -155,8 +166,15 @@ function handleRefresh() {
   loadData()
 }
 
+function handleSizeChange() {
+  // 每页条数变大后当前页可能已越界（比如停在第 5 页、每页改成 50 条）：
+  // 不回到第 1 页，会先请求一个空页，再由 el-pagination 自动钳位触发第二次请求
+  page.value = 1
+  loadData()
+}
+
 function goToDetail(row: Device) {
-  router.push(`/devices/${row.deviceId}`)
+  router.push(`/devices/${encodeURIComponent(row.deviceId)}`)
 }
 
 onMounted(loadData)

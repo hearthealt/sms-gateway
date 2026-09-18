@@ -117,6 +117,9 @@ const rules: FormRules = {
 }
 
 async function handleLogin() {
+  // 回车事件挂在 el-form 上，按钮的 :loading 管不到键盘 ——
+  // 没有这道闸，慢网络下连按回车会连发几次登录请求
+  if (loading.value) return
   if (!formRef.value) return
 
   const valid = await formRef.value.validate().catch(() => false)

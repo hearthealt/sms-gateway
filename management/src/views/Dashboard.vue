@@ -198,8 +198,8 @@
           <div class="dmc-top">
             <status-badge :status="device.status" />
             <span class="dmc-id">{{ device.deviceId }}</span>
-            <el-tooltip :content="device.status === 'online' ? '在线' : '离线'" placement="top">
-              <span class="dmc-dot" :class="device.status === 'online' ? 'dot-online' : 'dot-offline'"></span>
+            <el-tooltip :content="statusText(device.status)" placement="top">
+              <span class="dmc-dot" :class="statusDotClass(device.status)"></span>
             </el-tooltip>
           </div>
           <div class="dmc-info">
@@ -335,23 +335,40 @@ function batteryClass(b: number) {
   return 'battery-low'
 }
 
+/*
+ * 后端 toView 给的是三态：online / offline / DISABLED。
+ * 原先只用「是不是 online」二分，已禁用的设备在这里显示成红色「离线」，
+ * 与紧挨着的 StatusBadge 上的「已禁用」自相矛盾。
+ */
+function statusText(status: string): string {
+  if (status === 'online') return '在线'
+  if (status === 'DISABLED') return '已禁用'
+  return '离线'
+}
+
+function statusDotClass(status: string): string {
+  if (status === 'online') return 'dot-online'
+  // 已禁用是管理员主动操作的结果，不是待排查的故障，故用中性灰而非告警红
+  if (status === 'DISABLED') return 'dot-disabled'
+  return 'dot-offline'
+}
+
 function goToDetail(device: Device) {
-  router.push(`/devices/${device.deviceId}`)
+  router.push(`/devices/${encodeURIComponent(device.deviceId)}`)
 }
 
 onMounted(async () => {
-  try {
-    const [statsData, deviceData, dailyData] = await Promise.all([
-      getDeviceStats(),
-      getDeviceList({ page: 1, pageSize: 8 }),
-      getDailyStats(14),
-    ])
-    stats.value = statsData
-    recentDevices.value = deviceData.records
-    dailyStats.value = dailyData
-  } catch (e) {
-    console.error('Failed to load dashboard data', e)
-  }
+  // 三个请求互不依赖，用 allSettled：任一失败不该把另外两个的数据一起丢掉 ——
+  // 用 Promise.all 时一个接口出错，整页 KPI 全显示 0，看着像真的没有设备。
+  // 失败提示由 http 拦截器统一给出。
+  const [statsRes, devicesRes, dailyRes] = await Promise.allSettled([
+    getDeviceStats(),
+    getDeviceList({ page: 1, pageSize: 8 }),
+    getDailyStats(14),
+  ])
+  if (statsRes.status === 'fulfilled') stats.value = statsRes.value
+  if (devicesRes.status === 'fulfilled') recentDevices.value = devicesRes.value.records
+  if (dailyRes.status === 'fulfilled') dailyStats.value = dailyRes.value
 })
 </script>
 
@@ -753,6 +770,10 @@ onMounted(async () => {
 .dot-offline {
   background: #f56c6c;
   box-shadow: 0 0 0 2px rgba(245, 108, 108, 0.2);
+}
+.dot-disabled {
+  background: #909399;
+  box-shadow: 0 0 0 2px rgba(144, 147, 153, 0.2);
 }
 
 .dmc-info {

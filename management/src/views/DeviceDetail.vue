@@ -1,5 +1,5 @@
 <template>
-  <div class="device-detail" v-loading="!device">
+  <div class="device-detail" v-loading="loading">
     <template v-if="device">
       <!-- Breadcrumb -->
       <div class="breadcrumb">
@@ -20,6 +20,9 @@
               </el-tag>
             </div>
             <div class="header-actions">
+              <el-button size="default" plain :loading="issuingRecovery" @click="handleIssueRecoveryCode">
+                生成恢复码
+              </el-button>
               <el-button
                 :type="device.enabled ? 'warning' : 'success'"
                 size="default"
@@ -108,6 +111,62 @@
         </div>
       </el-card>
     </template>
+
+    <!-- 失败态：不能再用「device 为空」当加载中，否则请求失败时全屏 loading 永远停不下来 -->
+    <el-result
+      v-else-if="loadError"
+      icon="error"
+      title="设备信息加载失败"
+      sub-title="设备可能已被删除，或网络异常"
+    >
+      <template #extra>
+        <el-button type="primary" @click="loadDevice">重试</el-button>
+        <el-button @click="$router.push('/devices')">返回设备列表</el-button>
+      </template>
+    </el-result>
+
+    <!--
+      恢复码。两个场景会用到：设备重装后本地密钥随应用数据一起没了；
+      以及本次变更之前注册的老设备（它们本来就没有密钥，不签一张就永远无法重新注册）。
+
+      二维码里带的是**设备身份**，所以这里要显眼地把设备 ID 摆出来让人核对，
+      并明确说清「采用之后这台设备会以该身份上报」。
+    -->
+    <el-dialog
+      v-model="recoveryVisible"
+      title="设备恢复码"
+      width="460px"
+      :close-on-click-modal="false"
+      @closed="clearRecovery"
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="明文密钥只显示这一次"
+        description="关闭后就取不回来了（服务端只保存它的哈希）。没记下就重新生成一张，旧密钥随之作废。"
+      />
+      <div v-if="recoveryQr" class="recovery-qr">
+        <img :src="recoveryQr" alt="设备恢复码" />
+      </div>
+      <div v-else class="recovery-qr recovery-qr--loading">
+        <el-icon class="is-loading"><Loading /></el-icon>
+      </div>
+
+      <el-descriptions :column="1" border size="small" class="recovery-detail">
+        <el-descriptions-item label="设备 ID">
+          <span class="mono">{{ recovery?.deviceId }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="重注册密钥">
+          <span class="mono">{{ recovery?.enrollSecret }}</span>
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <template #footer>
+        <el-button @click="handleCopySecret">复制密钥</el-button>
+        <el-button type="primary" @click="recoveryVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -116,13 +175,19 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
+import QRCode from 'qrcode'
 import StatusBadge from '../components/StatusBadge.vue'
-import { getDeviceDetail, toggleDeviceStatus } from '../api/device'
+import { deviceServerUrl, getDeviceDetail, issueRecoveryCode, toggleDeviceStatus } from '../api/device'
 import { getDeviceSms } from '../api/sms'
-import type { Device, SmsRecord } from '../types'
+import { copyText } from '../utils/clipboard'
+import type { Device, RecoveryCode, SmsRecord } from '../types'
 
 const route = useRoute()
 const device = ref<Device | null>(null)
+// 加载态与错误态各自独立：原先以「device 为空」兼任加载态，请求失败时 device 永远是 null，
+// 全屏 loading 就一直转，页面上又什么都没有
+const loading = ref(false)
+const loadError = ref(false)
 const toggling = ref(false)
 const smsRecords = ref<SmsRecord[]>([])
 const smsLoading = ref(false)
@@ -141,20 +206,83 @@ function batteryClass(b: number): string {
 }
 
 async function copyCode(code: string) {
-  try {
-    await navigator.clipboard.writeText(code)
+  if (await copyText(code)) {
     ElMessage.success('验证码已复制')
+  } else {
+    ElMessage.error('复制失败')
+  }
+}
+
+// ---------- 恢复码 ----------
+
+const recoveryVisible = ref(false)
+const recovery = ref<RecoveryCode | null>(null)
+const recoveryQr = ref('')
+const issuingRecovery = ref(false)
+
+async function handleIssueRecoveryCode() {
+  // 先要地址再签发。顺序很重要：不能先把服务端的密钥轮换了、再发现二维码没地址可写 ——
+  // 那样这台设备的旧密钥已经被作废，而现场什么都没拿到。
+  const serverUrl = deviceServerUrl()
+  if (!serverUrl) {
+    ElMessage.error(
+      '未配置 VITE_DEVICE_SERVER_URL，无法生成恢复码：二维码里要写设备能访问的服务器地址，' +
+        '这个值没配时猜不出来（开发时控制台的 origin 是 localhost，对手机没有意义）。'
+    )
+    return
+  }
+
+  issuingRecovery.value = true
+  try {
+    const code = await issueRecoveryCode(route.params.deviceId as string)
+    recovery.value = code
+
+    // 二维码字段名必须与 Android 端 QrConfig 一致（url / deviceId / enrollSecret / deviceName）
+    recoveryQr.value = await QRCode.toDataURL(
+      JSON.stringify({
+        url: serverUrl,
+        deviceId: code.deviceId,
+        enrollSecret: code.enrollSecret,
+        deviceName: device.value?.deviceName ?? undefined,
+      }),
+      { width: 320, margin: 1, errorCorrectionLevel: 'M' }
+    )
+    recoveryVisible.value = true
   } catch {
+    // 拦截器已经统一弹过错误提示，这里不再重复
+  } finally {
+    issuingRecovery.value = false
+  }
+}
+
+/** 关闭时清掉明文：它只该存在于这一次弹窗的生命周期里。 */
+function clearRecovery() {
+  recovery.value = null
+  recoveryQr.value = ''
+}
+
+async function handleCopySecret() {
+  const secret = recovery.value?.enrollSecret
+  if (!secret) return
+  if (await copyText(secret)) {
+    ElMessage.success('密钥已复制')
+  } else {
     ElMessage.error('复制失败')
   }
 }
 
 async function loadDevice() {
+  loading.value = true
+  loadError.value = false
   try {
-    const data = await getDeviceDetail(route.params.deviceId as string)
-    device.value = data
+    device.value = await getDeviceDetail(route.params.deviceId as string)
+    // 设备拿到了再拉短信：设备不存在时这条请求注定也失败，只会多弹一条拦截器的错误提示
+    loadSms()
   } catch {
-    ElMessage.error('设备不存在')
+    // 具体原因（404 / 网络）拦截器已经弹过，这里只切到可重试的错误态，不再重复弹窗
+    loadError.value = true
+  } finally {
+    loading.value = false
   }
 }
 
@@ -195,15 +323,14 @@ async function handleToggle() {
   }
 }
 
-onMounted(() => {
-  loadDevice()
-  loadSms()
-})
+onMounted(loadDevice)
 </script>
 
 <style scoped>
 .device-detail {
   width: 100%;
+  /* 首屏内容还没渲染时容器高度为 0，会把 loading 遮罩压成一条细线 */
+  min-height: 200px;
 }
 
 .breadcrumb {
@@ -271,4 +398,28 @@ onMounted(() => {
 .battery-high { color: var(--color-success); font-weight: 500; }
 .battery-mid { color: var(--color-warning); font-weight: 500; }
 .battery-low { color: var(--color-danger); font-weight: 500; }
+
+.recovery-qr {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}
+.recovery-qr img {
+  width: 260px;
+  height: 260px;
+}
+.recovery-qr--loading {
+  height: 260px;
+  align-items: center;
+  font-size: 24px;
+  color: var(--el-text-color-placeholder);
+}
+.recovery-detail {
+  margin-top: 8px;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
 </style>

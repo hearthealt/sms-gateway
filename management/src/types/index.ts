@@ -101,3 +101,14 @@ export interface PageParam {
   page?: number
   pageSize?: number
 }
+
+/**
+ * 设备恢复码。管理员为某台设备签发，设备扫码后取回身份。
+ *
+ * `enrollSecret` 是**明文**，只在签发那一次返回 —— 服务端只留 SHA-256，
+ * 之后再也要不回来。没记下就重新签一张，旧的自然作废。
+ */
+export interface RecoveryCode {
+  deviceId: string
+  enrollSecret: string
+}
