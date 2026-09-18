@@ -5,6 +5,7 @@ import com.smsgateway.model.dto.DailyCount;
 import com.smsgateway.model.dto.PageResult;
 import com.smsgateway.model.dto.SmsView;
 import com.smsgateway.service.AdminSmsService;
+import com.smsgateway.util.PageUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -36,7 +37,7 @@ public class AdminSmsController {
             @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime endDate) {
 
         return ResponseEntity.ok(ApiResult.success(adminSmsService.list(
-                Math.max(page, 1), pageSize, phone, code, startDate, endDate, deviceId, includeIgnored)));
+                PageUtil.safePage(page), PageUtil.safePageSize(pageSize), phone, code, startDate, endDate, deviceId, includeIgnored)));
     }
 
     @GetMapping("/device/{deviceId}")
@@ -47,7 +48,7 @@ public class AdminSmsController {
             @RequestParam(defaultValue = "false") boolean includeIgnored) {
 
         return ResponseEntity.ok(ApiResult.success(
-                adminSmsService.byDevice(deviceId, Math.max(page, 1), pageSize, includeIgnored)));
+                adminSmsService.byDevice(deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize), includeIgnored)));
     }
 
     @GetMapping("/stats/daily")

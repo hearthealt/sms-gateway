@@ -1,5 +1,6 @@
 package com.smsgateway.controller;
 
+import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.ApiResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -27,6 +28,20 @@ public class GlobalExceptionHandler {
         log.warn("Business error: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiResult.error(400, e.getMessage()));
+    }
+
+    /**
+     * 重注册时没能证明设备身份。
+     *
+     * <p>用 403 而不是 400：这不是「请求写错了」，而是「你没证明你是这台设备」。
+     * 两者的区别对设备端有实际影响 —— 设备端把 400 归为终态直接放弃，
+     * 403 才能把「去控制台签一张恢复码」这条可执行的提示带到现场。
+     */
+    @ExceptionHandler(EnrollmentRequiredException.class)
+    public ResponseEntity<ApiResult<Void>> handleEnrollmentRequired(EnrollmentRequiredException e) {
+        log.warn("Enrollment required: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ApiResult.error(403, e.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -68,8 +83,9 @@ public class GlobalExceptionHandler {
      * 不单独接住就会掉进下面的兜底，把「这个接口不存在」报成 500「服务器内部错误」，
      * 排查时会往服务端故障方向找，而实际只是路径写错或接口还没部署。
      *
-     * <p>设备端「测试连接 / 自检」的探活**故意**打根路径（拿到任何 HTTP 状态码都算
-     * 网络可达，不依赖任何具体接口），所以这条会经常出现，属于预期流量，不是故障。
+     * <p>注意：设备端的探活以前打的正是根路径（那时只要拿到任何 HTTP 响应就算网络可达），
+     * 所以这条一度是预期流量。现在探活改打 /api/health 并校验服务标识，不再是常态 ——
+     * 再看到它，多半是路径真的写错了。
      */
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ApiResult<Void>> handleNoResource(NoResourceFoundException e) {

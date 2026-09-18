@@ -47,6 +47,18 @@ public class WaitingService implements MessageListener {
     private static final String SMS_CHANNEL_PATTERN = "sms:channel:*";
     private static final long POLL_INTERVAL_MS = 500;
 
+    /**
+     * 单次等待的秒数上限，同时也是对外的公开上限（控制器用它给 future.get 定界）。
+     *
+     * <p>没有上限时，一个持有合法 API Key 的调用方并发发 200 个
+     * {@code timeout=86400} 就能把 Tomcat 默认的 200 个工作线程全挂满 24 小时，
+     * 此后设备注册、心跳、上报、管理后台全部无响应 —— 整个网关瘫掉。
+     */
+    public static final long MAX_WAIT_SECONDS = 120;
+
+    /** 下限 1 秒：非正数会让下面 Redis 的 TTL 变成 0 或负数，直接报错（而不是返回 400）。 */
+    private static final long MIN_WAIT_SECONDS = 1;
+
     @PostConstruct
     public void init() {
         redisMessageListenerContainer.addMessageListener(this, new PatternTopic(SMS_CHANNEL_PATTERN));
@@ -71,6 +83,14 @@ public class WaitingService implements MessageListener {
      * @param timeoutSeconds 等待秒数
      */
     public CompletableFuture<SmsWaitResponse> waitForSms(String phone, long timeoutSeconds) {
+        // 在服务层夹紧而不是在控制器：这样任何调用方都绕不过去。
+        // 上限防的是「拿合法凭据占满 Tomcat 线程」；下限防的是非正数让 Redis 的
+        // TTL 变成 0 或负数、抛错被兜成 500（本该是一次正常的等待）。
+        long effectiveTimeout = Math.max(MIN_WAIT_SECONDS, Math.min(timeoutSeconds, MAX_WAIT_SECONDS));
+        if (effectiveTimeout != timeoutSeconds) {
+            log.info("Wait timeout {}s clamped to {}s", timeoutSeconds, effectiveTimeout);
+        }
+
         String normalizedPhone = PhoneUtil.normalize(phone);
 
         // 归一化后为空说明压根没法匹配。这里必须报参数错（400）而不是超时（408）——
@@ -94,18 +114,18 @@ public class WaitingService implements MessageListener {
 
         // Store wait marker in Redis with TTL = timeout + 10s buffer
         String waitRedisKey = SMS_WAIT_KEY_PREFIX + normalizedPhone;
-        redisTemplate.opsForValue().set(waitRedisKey, "waiting", timeoutSeconds + 10, TimeUnit.SECONDS);
+        redisTemplate.opsForValue().set(waitRedisKey, "waiting", effectiveTimeout + 10, TimeUnit.SECONDS);
 
         startPolling(normalizedPhone, waitRedisKey, future);
 
         // Schedule timeout
         scheduler.schedule(() -> {
             if (!future.isDone()) {
-                future.completeExceptionally(new TimeoutException("SMS wait timed out after " + timeoutSeconds + " seconds"));
+                future.completeExceptionally(new TimeoutException("SMS wait timed out after " + effectiveTimeout + " seconds"));
                 pendingRequests.remove(normalizedPhone);
                 redisTemplate.delete(waitRedisKey);
             }
-        }, timeoutSeconds, TimeUnit.SECONDS);
+        }, effectiveTimeout, TimeUnit.SECONDS);
 
         return future;
     }
@@ -113,7 +133,7 @@ public class WaitingService implements MessageListener {
     private void startPolling(String phone, String waitRedisKey, CompletableFuture<SmsWaitResponse> future) {
         String codeKey = SMS_CODE_KEY_PREFIX + phone;
 
-        scheduler.scheduleAtFixedRate(() -> {
+        ScheduledFuture<?> poller = scheduler.scheduleAtFixedRate(() -> {
             if (future.isDone()) {
                 return;
             }
@@ -135,6 +155,19 @@ public class WaitingService implements MessageListener {
                 }
             }
         }, 0, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        // 必须显式撤销这个周期任务。
+        //
+        // 回调里那句 `if (future.isDone()) return;` 只是让这一轮提前返回 —— 任务本身
+        // 仍留在调度队列里，每 500ms 被唤醒一次，并且一直持有 future、闭包和
+        // Redis key 字符串不放，GC 也回收不掉。原先返回的句柄没人接、全项目没有
+        // 一处 cancel，于是**每次 wait 调用都泄漏一个永久的周期任务**：
+        // 按每天一万次算，一天后单线程调度器每秒要空转两万个 runnable，把
+        // 新请求的轮询与超时回调饿死，堆也持续增长。
+        //
+        // 挂 whenComplete 而不是在每个完成分支里各写一遍：正常出码、超时、
+        // 异常三条路径都能覆盖到，以后加分支也不会漏。
+        future.whenComplete((result, error) -> poller.cancel(false));
     }
 
     @Override

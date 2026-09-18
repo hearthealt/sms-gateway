@@ -60,9 +60,12 @@ public class SmsService {
     };
 
     @Transactional
-    public SmsReceiveResponse receiveSms(SmsReceiveRequest request, String idempotencyKey) {
-        SmsDevice device = deviceRepository.findByDeviceId(request.getDeviceId())
-                .orElseThrow(() -> new RuntimeException("Device not found: " + request.getDeviceId()));
+    public SmsReceiveResponse receiveSms(String authenticatedDeviceId, SmsReceiveRequest request, String idempotencyKey) {
+        // 身份由调用方从拦截器的认证结果传入，**刻意不从请求体读**。
+        // 做成显式参数而不是让 service 自己去 request 里取，是为了让「拿错身份」这件事
+        // 在编译期就不可能发生 —— 将来多一个调用方也没法传错。
+        SmsDevice device = deviceRepository.findByDeviceId(authenticatedDeviceId)
+                .orElseThrow(() -> new RuntimeException("Device not found: " + authenticatedDeviceId));
 
         Long devicePk = device.getId();
 
@@ -75,7 +78,7 @@ public class SmsService {
                 smsMessageRepository.findByDeviceIdAndLocalMessageId(devicePk, request.getLocalMessageId());
         if (existingByIdempotency.isPresent()) {
             SmsMessage msg = existingByIdempotency.get();
-            log.info("Idempotency hit for deviceId={}, localMessageId={}", request.getDeviceId(), request.getLocalMessageId());
+            log.info("Idempotency hit for deviceId={}, localMessageId={}", authenticatedDeviceId, request.getLocalMessageId());
             return new SmsReceiveResponse(msg.getId(), true, msg.getStatus().name(), null);
         }
 
@@ -89,22 +92,20 @@ public class SmsService {
         Optional<SmsMessage> existingByHash = smsMessageRepository.findBySourceHash(sourceHash);
         if (existingByHash.isPresent()) {
             SmsMessage msg = existingByHash.get();
-            // Save as DUPLICATE record
-            SmsMessage duplicateMsg = new SmsMessage();
-            duplicateMsg.setDeviceId(devicePk);
-            duplicateMsg.setLocalMessageId(request.getLocalMessageId());
-            duplicateMsg.setPhone(phone);
-            duplicateMsg.setSender(request.getSender());
-            duplicateMsg.setContent(request.getContent());
-            duplicateMsg.setCode(request.getCode());
-            duplicateMsg.setStatus(SmsStatus.DUPLICATE);
-            duplicateMsg.setSourceHash(sourceHash);
-            if (request.getReceiveTime() != null) {
-                duplicateMsg.setReceiveTime(LocalDateTime.ofInstant(Instant.ofEpochMilli(request.getReceiveTime()), ZoneId.systemDefault()));
-            }
-            smsMessageRepository.save(duplicateMsg);
+
+            // 只回报重复，**不再另插一行**。
+            //
+            // 原先这里新建一条 status=DUPLICATE 的记录，但把 source_hash 设成了与已存在行
+            // 完全相同的值 —— 而那一列上有唯一索引 uk_source_hash。这条 INSERT 100% 撞约束、
+            // 抛 DataIntegrityViolationException、被兜成 500；设备端又把 500 归为可重试，
+            // 于是这条短信永远传不上去，还一直烧电重试。
+            //
+            // 「一段内容一行」并不是新加的约定：查询侧 findBySourceHash 返回 Optional、
+            // 建表侧 uk_source_hash 唯一，两边一直是这么写的，只有这段插入跑偏了。
+            // 代价是管理后台不会再出现 status=DUPLICATE 的行 —— 但它本来也从没成功出现过。
+            // 响应结构保持不变，设备端的「内容重复」提示照常工作。
             log.info("Duplicate SMS detected for sourceHash={}, original msgId={}", sourceHash, msg.getId());
-            return new SmsReceiveResponse(duplicateMsg.getId(), true, SmsStatus.DUPLICATE.name(), null);
+            return new SmsReceiveResponse(msg.getId(), true, SmsStatus.DUPLICATE.name(), null);
         }
 
         // 4. Apply collect rules (priority desc, first match wins; no match => collect)
@@ -130,7 +131,7 @@ public class SmsService {
         if (decision.ignored()) {
             // 只留档：不写验证码缓存、不推送，避免污染正在等待验证码的调用方
             log.info("SMS ignored by rule '{}': deviceId={}, phone={}, sender={}",
-                    decision.matchedRule(), request.getDeviceId(), request.getPhone(), request.getSender());
+                    decision.matchedRule(), authenticatedDeviceId, request.getPhone(), request.getSender());
             return new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null);
         }
 
@@ -170,8 +171,15 @@ public class SmsService {
             redisTemplate.convertAndSend(waitChannel, messageJson);
         }
 
-        log.info("SMS received and stored: deviceId={}, phone={}, sender={}, code={}",
-                request.getDeviceId(), request.getPhone(), request.getSender(), code);
+        // deviceId 用认证出的那个：请求体里的值已经不作数，照打会误导排查
+        // （而且攻击者能借此让日志显示成受害者的设备号）。
+        //
+        // 验证码本身**不打**。它就是这个系统的核心资产，日志文件的生命周期远比
+        // 5 分钟的 TTL 长，落盘等于长期留存。只记「有没有解析出来」，
+        // 排查「这条为什么没出码」够用了。
+        log.info("SMS received and stored: deviceId={}, phone={}, sender={}, hasCode={}",
+                authenticatedDeviceId, request.getPhone(), request.getSender(),
+                code != null && !code.isEmpty());
 
         return new SmsReceiveResponse(message.getId(), false, SmsStatus.RECEIVED.name(), code);
     }

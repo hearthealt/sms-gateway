@@ -4,6 +4,8 @@ import com.smsgateway.model.dto.*;
 import com.smsgateway.service.ClientSmsService;
 import com.smsgateway.service.SmsService;
 import com.smsgateway.service.WaitingService;
+import com.smsgateway.util.PageUtil;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -14,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDateTime;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
@@ -35,18 +38,23 @@ public class SmsController {
     private final WaitingService waitingService;
     private final ClientSmsService clientSmsService;
 
-    /** pageSize 上限，避免调用方一次把整库拉爆。 */
-    private static final int MAX_PAGE_SIZE = 100;
-
     @PostMapping("/receive")
     public ResponseEntity<ApiResult<SmsReceiveResponse>> receive(
             @Valid @RequestBody SmsReceiveRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            HttpServletRequest httpRequest) {
+
+        // 身份一律取拦截器认证出来的那个，**不用请求体里的 deviceId**。
+        //
+        // 否则任何持有合法设备令牌的人都能把 body 里的 deviceId 填成别人的设备：
+        // 短信被记到他人名下，而且 phone 也是可控的 —— 拿它去覆盖他人号码的
+        // 验证码缓存并广播，正在 wait 的调用方就会收到攻击者指定的验证码。
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
 
         log.info("SMS receive request: deviceId={}, localMessageId={}, sender={}",
-                request.getDeviceId(), request.getLocalMessageId(), request.getSender());
+                deviceId, request.getLocalMessageId(), request.getSender());
 
-        SmsReceiveResponse response = smsService.receiveSms(request, idempotencyKey);
+        SmsReceiveResponse response = smsService.receiveSms(deviceId, request, idempotencyKey);
 
         if (response.isDuplicate()) {
             return ResponseEntity.ok(ApiResult.success("duplicate", response));
@@ -72,8 +80,8 @@ public class SmsController {
             @RequestParam(value = "page", defaultValue = "1") int page,
             @RequestParam(value = "pageSize", defaultValue = "20") int pageSize) {
 
-        int safePage = Math.max(page, 1);
-        int safePageSize = Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE);
+        int safePage = PageUtil.safePage(page);
+        int safePageSize = PageUtil.safePageSize(pageSize);
 
         log.info("SMS list request: phone={}, startTime={}, endTime={}, page={}, pageSize={}",
                 phone, startTime, endTime, safePage, safePageSize);
@@ -98,7 +106,10 @@ public class SmsController {
         CompletableFuture<SmsWaitResponse> future = waitingService.waitForSms(phone, timeout);
 
         try {
-            SmsWaitResponse response = future.get();
+            // 显式定界。服务层已经把 timeout 夹进 MAX_WAIT_SECONDS，正常路径这里总会先由
+            // future 自己完成；定界是防异常路径 —— 比如调度器已关停、超时任务根本不会跑，
+            // 那样无参 get() 会永远挂着，把 Tomcat 工作线程一直占住不放。
+            SmsWaitResponse response = future.get(WaitingService.MAX_WAIT_SECONDS + 5, TimeUnit.SECONDS);
             return ResponseEntity.ok(ApiResult.success(response));
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
@@ -109,6 +120,11 @@ public class SmsController {
             log.error("Error waiting for SMS", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(ApiResult.error(500, "internal server error"));
+        } catch (TimeoutException e) {
+            // get() 自身的兜底超时：future 始终没完成，说明调度侧的定时任务没跑起来
+            log.error("Wait future never completed for phone={}", phone, e);
+            return ResponseEntity.status(HttpStatus.REQUEST_TIMEOUT)
+                    .body(ApiResult.error(408, "wait timeout"));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)

@@ -3,6 +3,7 @@ package com.smsgateway.controller;
 import com.smsgateway.model.dto.*;
 import com.smsgateway.service.AdminSmsService;
 import com.smsgateway.service.DeviceService;
+import com.smsgateway.util.PageUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -33,9 +34,16 @@ public class DeviceController {
      * 它是设备唯一能发现自己被恢复的通道，也让管理端能持续看到设备是否还活着。
      */
     @PostMapping("/heartbeat")
-    public ResponseEntity<ApiResult<HeartbeatResponse>> heartbeat(@Valid @RequestBody HeartbeatRequest request) {
-        log.debug("Heartbeat request: deviceId={}", request.getDeviceId());
-        String status = deviceService.heartbeat(request);
+    public ResponseEntity<ApiResult<HeartbeatResponse>> heartbeat(
+            @Valid @RequestBody HeartbeatRequest request,
+            HttpServletRequest httpRequest) {
+
+        // 同 /api/sms/receive：身份取认证结果，不用请求体里的 deviceId。
+        // 否则可拿自己的令牌覆写他人设备的 deviceName / phoneNumber / battery。
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
+
+        log.debug("Heartbeat request: deviceId={}", deviceId);
+        String status = deviceService.heartbeat(deviceId, request);
         return ResponseEntity.ok(ApiResult.success(new HeartbeatResponse(status)));
     }
 
@@ -54,7 +62,7 @@ public class DeviceController {
 
         String deviceId = (String) httpRequest.getAttribute("deviceId");
         return ResponseEntity.ok(ApiResult.success(
-                adminSmsService.byDevice(deviceId, Math.max(page, 1), pageSize, includeIgnored)));
+                adminSmsService.byDevice(deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize), includeIgnored)));
     }
 
     /**

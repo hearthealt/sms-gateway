@@ -1,6 +1,7 @@
 package com.smsgateway.model.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
@@ -17,6 +18,7 @@ import java.time.LocalDateTime;
 public class ApiKeyRequest {
 
     @NotBlank(message = "name cannot be empty")
+    @Size(max = 100, message = "用途备注超长（上限 100）")
     private String name;
 
     private LocalDateTime expiresAt;

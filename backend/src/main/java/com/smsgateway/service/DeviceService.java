@@ -1,5 +1,6 @@
 package com.smsgateway.service;
 
+import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.DeviceRegisterRequest;
 import com.smsgateway.model.dto.DeviceRegisterResponse;
 import com.smsgateway.model.dto.DeviceSmsStats;
@@ -51,30 +52,76 @@ public class DeviceService {
             // 两个相同 deviceId 的注册并发到达时，双方都会在查询时扑空，后落地的那个
             // 撞上 device_id 的唯一约束。注册本身是幂等的（token 由 deviceId 的 HMAC 推导，
             // 可重算），所以这里重查一次返回已有设备即可，不必把一个重复请求变成 500。
+            //
+            // 但**密钥校验必须在这里重做一遍**：否则「并发发两条注册、其中一条用错的密钥」
+            // 就能从这条兜底路径拿到令牌 —— 它绕过了 doRegister 里的检查，而设备行本身
+            // 看不出请求当初用的是哪个密钥。
             log.info("Concurrent registration for deviceId={}, returning existing device",
                     request.getDeviceId());
             return deviceRepository.findByDeviceId(request.getDeviceId())
-                    .map(device -> new DeviceRegisterResponse(
-                            HashUtil.hmacSha256(device.getDeviceId(), secretKey),
-                            device.getDeviceId(),
-                            device.getStatus()))
+                    .map(device -> {
+                        verifyEnrollment(device, request.getEnrollSecret());
+                        return new DeviceRegisterResponse(
+                                HashUtil.hmacSha256(device.getDeviceId(), secretKey),
+                                device.getDeviceId(),
+                                device.getStatus());
+                    })
                     .orElseThrow(() -> e);
+        }
+    }
+
+    /**
+     * 校验「这次重注册确实来自这台设备」。
+     *
+     * <p>挡的是原实现里的这个洞：注册接口必须免鉴权（设备得先能注册才拿得到令牌），
+     * 而对**已存在**的 deviceId，它在重注册分支里把令牌原样返还 —— 于是「知道设备号」
+     * 就等于「能冒充这台设备」；而设备号在管理后台列表、设备端界面、任何截图里都可见。
+     *
+     * <p>现在改为：设备首次注册时自带一个随机密钥，服务端只存 SHA-256，
+     * 之后凡是该 deviceId 已存在的注册都必须带上它。重装丢失密钥的设备由管理员
+     * 在控制台签发恢复码取回。
+     */
+    private void verifyEnrollment(SmsDevice device, String enrollSecret) {
+        if (device.getEnrollSecretHash() == null) {
+            throw new EnrollmentRequiredException(
+                    "该设备尚未启用重注册校验（本次变更之前注册的），"
+                            + "请由管理员在控制台签发一张恢复码后重新注册。");
+        }
+        // 分两种说法：没带密钥多半是 App 没升级；带了但不对才是密钥问题。
+        // 合成一句"认证失败"会让现场不知道该升级还是该去签恢复码。
+        if (enrollSecret == null || enrollSecret.isBlank()) {
+            throw new EnrollmentRequiredException(
+                    "注册请求没有携带重注册密钥。请先把 App 升级到最新版本；"
+                            + "若这台设备刚重装过（本地密钥已随应用数据丢失），"
+                            + "请由管理员在控制台签发一张恢复码。");
+        }
+        if (!device.getEnrollSecretHash().equals(HashUtil.sha256(enrollSecret))) {
+            throw new EnrollmentRequiredException(
+                    "重注册密钥不匹配。设备若重装过，请由管理员在控制台签发一张恢复码。");
         }
     }
 
     private DeviceRegisterResponse doRegister(DeviceRegisterRequest request) {
         String deviceId = request.getDeviceId();
 
+        String rawSecret = request.getEnrollSecret();
+        boolean hasSecret = rawSecret != null && !rawSecret.isBlank();
+        String secretHash = hasSecret ? HashUtil.sha256(rawSecret) : null;
+
         Optional<SmsDevice> existingDevice = deviceRepository.findByDeviceId(deviceId);
         if (existingDevice.isPresent()) {
             SmsDevice device = existingDevice.get();
+
+            // 先证明身份，再动任何字段 —— 校验失败要整体拒绝，不能留下半截修改。
+            verifyEnrollment(device, rawSecret);
+
             String deviceToken = HashUtil.hmacSha256(deviceId, secretKey);
             device.setDeviceToken(deviceToken);
             if (request.getDeviceName() != null) {
                 device.setDeviceName(request.getDeviceName());
             }
-            if (request.getPhoneNumber() != null) {
-                device.setPhoneNumber(request.getPhoneNumber());
+            if (request.getPhone() != null) {
+                device.setPhoneNumber(request.getPhone());
             }
             if (request.getPlatform() != null) {
                 device.setPlatform(request.getPlatform());
@@ -89,13 +136,23 @@ public class DeviceService {
             return new DeviceRegisterResponse(deviceToken, deviceId, device.getStatus());
         }
 
+        // 走到这里说明是台新设备。没有密钥就没法建立「这台设备是谁」的凭据，
+        // 建出来的账号以后也永远无法重新注册 —— 与其留个隐患，不如现在拒绝。
+        // 用 400 而不是 403：这是请求本身不完整，不是身份不通过。
+        if (!hasSecret) {
+            throw new IllegalArgumentException(
+                    "首次注册必须提供 enrollSecret（App 会自行生成）。旧版本 App 请先升级后再注册。");
+        }
+
         String deviceToken = HashUtil.hmacSha256(deviceId, secretKey);
 
         SmsDevice device = new SmsDevice();
         device.setDeviceId(deviceId);
         device.setDeviceToken(deviceToken);
+        // 建档时就记下密钥哈希，之后这台设备的任何重注册都要靠它自证身份。
+        device.setEnrollSecretHash(secretHash);
         device.setDeviceName(request.getDeviceName());
-        device.setPhoneNumber(request.getPhoneNumber());
+        device.setPhoneNumber(request.getPhone());
         device.setPlatform(request.getPlatform());
         device.setAppVersion(request.getAppVersion());
         device.setStatus("ACTIVE");
@@ -109,8 +166,9 @@ public class DeviceService {
      * @return 设备当前状态（ACTIVE / DISABLED），随心跳响应回传给设备。
      *         这是设备得知自己「已被禁用 / 已被恢复」的唯一通道。
      */
-    public String heartbeat(HeartbeatRequest request) {
-        String deviceId = request.getDeviceId();
+    public String heartbeat(String authenticatedDeviceId, HeartbeatRequest request) {
+        // 身份由调用方从拦截器的认证结果传入，刻意不从请求体读（同 receiveSms）。
+        String deviceId = authenticatedDeviceId;
 
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new RuntimeException("Device not found: " + deviceId));
@@ -119,8 +177,8 @@ public class DeviceService {
         if (request.getDeviceName() != null) {
             device.setDeviceName(request.getDeviceName());
         }
-        if (request.getPhoneNumber() != null) {
-            device.setPhoneNumber(request.getPhoneNumber());
+        if (request.getPhone() != null) {
+            device.setPhoneNumber(request.getPhone());
         }
         if (request.getBattery() != null) {
             device.setBattery(request.getBattery());

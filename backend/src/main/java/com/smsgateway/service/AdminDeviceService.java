@@ -2,10 +2,12 @@ package com.smsgateway.service;
 
 import com.smsgateway.model.dto.DeviceView;
 import com.smsgateway.model.dto.PageResult;
+import com.smsgateway.model.dto.RecoveryCodeView;
 import com.smsgateway.model.dto.StatsView;
 import com.smsgateway.model.entity.SmsDevice;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
+import com.smsgateway.util.HashUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -13,8 +15,10 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -28,6 +32,39 @@ public class AdminDeviceService {
     private final DeviceService deviceService;
 
     public static final String STATUS_DISABLED = "DISABLED";
+
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
+    /**
+     * 签发一张恢复码：轮换该设备的重注册密钥，并把**明文**返回一次。
+     *
+     * <p>用途有两个：设备重装后丢了本地密钥；以及本次变更之前注册的老设备，
+     * 它们本来就没有密钥，不签一张就永远无法重新注册。
+     *
+     * <p>这是全局唯一能把明文交出来的地方 —— 之后服务端只剩 SHA-256。
+     * 管理员没记下也不要紧，重新签一张即可，旧密钥随之作废。
+     *
+     * <p>只有管理员能调：设备自行生成密钥那条路走不通了才用到它，
+     * 而能调这个接口的人本来就有这套系统的完全权限。
+     */
+    public RecoveryCodeView issueRecoveryCode(String deviceId) {
+        SmsDevice device = deviceRepository.findByDeviceId(deviceId)
+                .orElseThrow(() -> new IllegalArgumentException("设备不存在: " + deviceId));
+
+        String secret = randomSecret();
+        device.setEnrollSecretHash(HashUtil.sha256(secret));
+        deviceRepository.save(device);
+
+        log.warn("已为设备 {} 签发恢复码，其重注册密钥被轮换，旧密钥立即失效", deviceId);
+        return new RecoveryCodeView(deviceId, secret);
+    }
+
+    /** 32 字节随机 → base64url（43 字符）：足够抗爆破，也便于人工转述。 */
+    private String randomSecret() {
+        byte[] bytes = new byte[32];
+        SECURE_RANDOM.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
 
     public PageResult<DeviceView> list(int page, int pageSize, String deviceId, String phone) {
         Page<SmsDevice> result = deviceRepository.search(

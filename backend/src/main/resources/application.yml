@@ -4,8 +4,10 @@ server:
 spring:
   datasource:
     url: jdbc:mysql://localhost:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
-    username: root
-    password: root
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    # 冒号后面的是本机开发的默认值。生产必须通过环境变量覆盖 ——
+    # docker-compose 那边用的是 ${VAR:?} 语法，没给就拒绝启动，不给"悄悄用默认值"的机会。
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
     driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
@@ -16,21 +18,35 @@ spring:
         format_sql: true
   data:
     redis:
-      host: localhost
-      port: 6379
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      # 本机开发通常没设密码，留空；生产必须设 —— Redis 里明文存着管理员令牌和 API Key。
+      password: ${SPRING_REDIS_PASSWORD:}
       timeout: 3000
 
 app:
   secret:
-    key: sms-gateway-secret-key-2024
+    # 设备令牌 = HMAC-SHA256(deviceId, 这个 key)。它是确定性的：知道 key 的人
+    # 可以对**任意** deviceId 直接算出合法令牌，冒充任何设备上报与读取短信。
+    #
+    # 所以这个值等于系统的主密钥，绝不能用仓库里的默认值上生产。
+    # 默认值刻意写成一眼可辨的 DEV-ONLY，启动时 SecretKeyValidator 会就此告警。
+    key: ${APP_SECRET_KEY:DEV-ONLY-smart-gateway-change-me-3f9a}
   # 外部调用方密钥不再走配置：由管理后台「API 密钥」页签发，存 api_key 表。
   api-key:
     # 密钥校验结果在 Redis 中的缓存时长（秒）。禁用/删除会主动失效，无需等它过期。
     cache-ttl-seconds: 60
   admin:
     # 首次启动且 admin_user 表为空时，用这组配置创建管理员账号（BCrypt 哈希后入库）。
-    # 生产环境请通过环境变量覆盖。
-    default-username: admin
-    default-password: zaq1,lp-
+    # 生产环境必须通过环境变量覆盖。
+    default-username: ${APP_ADMIN_DEFAULT_USERNAME:admin}
+    default-password: ${APP_ADMIN_DEFAULT_PASSWORD:DEV-ONLY-change-me}
+    # 改密码的唯一途径。
+    #
+    # 原先只有 default-password，而它仅在 admin_user 表为空时生效 —— 一旦建过账号，
+    # 改配置再重启也不会更新密码，日志里那句「请尽快修改默认密码」因此无从执行
+    # （管理接口里也没有改密码的功能）。设了下面这个变量，启动时会把该账号的密码
+    # 重置成它，用完把变量撤掉即可。留空则完全不做任何事。
+    reset-password: ${APP_ADMIN_RESET_PASSWORD:}
     # 管理后台登录 token 在 Redis 中的有效期（秒）
     token-ttl-seconds: 7200
