@@ -170,17 +170,30 @@ object RetrofitClient {
         return builder.build()
     }
 
+    /**
+     * 取（必要时构建）API 客户端。
+     *
+     * 整个方法加锁：它此前是「判空 → 构建 → 取强制非空」，而 apiService 是普通 var。
+     * 主线程在注册成功路径上调 updateToken() → resetClient() 把它置空的瞬间，
+     * IO 线程的心跳若正好走到判空与 `!!` 之间，就会抛 NPE。
+     * 窗口很窄，但这是每 30 秒都会跑一次的路径，长期运行下不值得赌。
+     * 构建只会发生一次，加锁的代价可以忽略。
+     */
+    @Synchronized
     fun getApiService(): ApiService {
-        if (apiService == null) {
-            retrofit = Retrofit.Builder()
-                .baseUrl(baseUrl)
-                .client(getHttpClient())
-                .addConverterFactory(GsonConverterFactory.create())
-                .build()
+        val existing = apiService
+        if (existing != null) return existing
 
-            apiService = retrofit!!.create(ApiService::class.java)
+        val built = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(getHttpClient())
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+        return built.create(ApiService::class.java).also {
+            retrofit = built
+            apiService = it
         }
-        return apiService!!
     }
 
     /**

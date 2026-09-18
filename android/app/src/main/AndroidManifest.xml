@@ -3,7 +3,10 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
-    <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- 不要加 READ_SMS：本应用只从 SMS_RECEIVED 广播里取消息
+         （Telephony.Sms.Intents.getMessagesFromIntent），从头到尾没读过系统短信库。
+         声明用不到的短信读取权限，除了在首次启动时多弹一次危险权限，
+         还会在应用市场上触发短信权限政策审查。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -29,9 +32,14 @@
          而本应用除了扫码之外完全不依赖相机。 -->
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- 关掉云备份。这个应用的数据没有一样适合备份：
+         sms_gateway_prefs.xml 里是设备标识与 deviceToken（可冒充该设备上报与读取短信），
+         sms_gateway.db 里是全部短信正文与验证码明文。开着的话它们会进用户的云端备份，
+         换机恢复还会把**同一台设备的身份**搬到另一台手机上。
+         代价是重装后要重新填服务器地址并重新注册 —— 二维码配网这条路本来就有。 -->
     <application
         android:name=".SmsGatewayApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"

@@ -1,6 +1,7 @@
 package com.smsgateway.app.qr
 
 import android.Manifest
+import android.graphics.Bitmap
 import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
@@ -28,6 +29,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -67,7 +70,14 @@ fun QrConfigScreen(
     val payload = remember(state.serverUrl, state.deviceName) {
         QrConfigCodec.encode(state.serverUrl, state.deviceName)
     }
-    val qrBitmap = remember(payload) { QrEncoder.encode(payload) }
+    // 生成放到 IO 线程，不要用 remember { } 在组合期算。
+    //
+    // QrEncoder.encode 会构一个 720×720 的 ZXing 矩阵，再逐像素写一张约 2MB 的 Bitmap；
+    // 放在组合期就是在主线程上做这件事，进这个页面会掉帧，低端机更明显。
+    var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(payload) {
+        qrBitmap = withContext(Dispatchers.Default) { QrEncoder.encode(payload) }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -128,13 +138,25 @@ fun QrConfigScreen(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        bitmap = qrBitmap.asImageBitmap(),
-                        contentDescription = "配置二维码",
-                        modifier = Modifier.size(240.dp),
-                        // 二维码放大后必须关掉插值，否则边缘被模糊化会扫不动
-                        filterQuality = FilterQuality.None
-                    )
+                    // 生成挪到 IO 线程后这里会先有一小段空档，用一个同尺寸的占位撑住，
+                    // 否则卡片高度会跳一下
+                    val bitmap = qrBitmap
+                    if (bitmap == null) {
+                        Box(
+                            modifier = Modifier.size(240.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+                        }
+                    } else {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "配置二维码",
+                            modifier = Modifier.size(240.dp),
+                            // 二维码放大后必须关掉插值，否则边缘被模糊化会扫不动
+                            filterQuality = FilterQuality.None
+                        )
+                    }
                 }
                 Text(
                     text = "在另一台设备上打开「设置 → 配置二维码 → 扫码导入」对准即可。",

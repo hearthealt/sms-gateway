@@ -650,11 +650,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 hasPermission(app, Manifest.permission.RECEIVE_SMS),
                 if (hasPermission(app, Manifest.permission.RECEIVE_SMS)) "已授予" else "未授予，收不到任何短信"
             )
-            add(
-                "短信读取权限",
-                hasPermission(app, Manifest.permission.READ_SMS),
-                if (hasPermission(app, Manifest.permission.READ_SMS)) "已授予" else "未授予"
-            )
+            // 这里原本还有一行「短信读取权限」（READ_SMS）。那个权限已经移除 ——
+            // 本应用只从 SMS_RECEIVED 广播取消息，从没读过系统短信库，
+            // 显示一个用不到的权限只会把人引去授权一个无关的东西。
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val ok = hasPermission(app, Manifest.permission.POST_NOTIFICATIONS)

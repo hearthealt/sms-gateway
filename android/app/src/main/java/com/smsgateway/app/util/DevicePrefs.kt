@@ -87,8 +87,14 @@ object DevicePrefs {
     fun isDisabled(context: Context): Boolean =
         get(context).getBoolean(KEY_DEVICE_DISABLED, false)
 
-    fun setDisabled(context: Context, disabled: Boolean) =
+    /**
+     * 写禁用状态。**值没变就不落盘** —— 调用方是心跳，每 30 秒一次，
+     * 无条件写的话 7×24 运行下每天有近三千次无变化的整文件写入，纯耗电。
+     */
+    fun setDisabled(context: Context, disabled: Boolean) {
+        if (isDisabled(context) == disabled) return
         get(context).edit().putBoolean(KEY_DEVICE_DISABLED, disabled).apply()
+    }
 
     /**
      * 唯一权威的「已注册」判定：设备标识与令牌都非空。

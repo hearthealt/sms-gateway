@@ -76,7 +76,11 @@ class MainActivity : ComponentActivity() {
         // 各页的 Scaffold 会自己处理内边距；首页是自己画的头部，见 HomeHeader 的 statusBarsPadding。
         enableEdgeToEdge()
 
-        requestRuntimePermissions()
+        // 只在首次创建时申请：旋转屏会重建 Activity，不加这个判断就会把权限弹窗
+        // 在刚渲染好的界面上再弹一次 —— 用户每转一次屏就被问一次。
+        if (savedInstanceState == null) {
+            requestRuntimePermissions()
+        }
 
         setContent {
             MaterialTheme(
@@ -101,7 +105,7 @@ class MainActivity : ComponentActivity() {
     private fun requestRuntimePermissions() {
         val permissions = buildList {
             add(Manifest.permission.RECEIVE_SMS)
-            add(Manifest.permission.READ_SMS)
+            // 没有 READ_SMS：本应用不读系统短信库，只从 SMS_RECEIVED 广播里取消息
             addAll(DevicePhone.requiredPermissions)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
