@@ -44,6 +44,8 @@ public class WaitingService implements MessageListener {
 
     private static final String SMS_WAIT_KEY_PREFIX = "sms:wait:";
     private static final String SMS_CODE_KEY_PREFIX = "sms:code:";
+    /** 验证码的写入时刻。由 SmsService 与验证码同时写入、同 TTL。 */
+    private static final String SMS_CODE_AT_KEY_PREFIX = "sms:code:at:";
     private static final String SMS_CHANNEL_PATTERN = "sms:channel:*";
     private static final long POLL_INTERVAL_MS = 500;
 
@@ -103,8 +105,13 @@ public class WaitingService implements MessageListener {
         String codeKey = SMS_CODE_KEY_PREFIX + normalizedPhone;
         String existingCode = redisTemplate.opsForValue().get(codeKey);
         if (existingCode != null && !existingCode.isEmpty()) {
-            // 缓存里只存了验证码本身，拿不到发送方和正文，这两个字段只能是 null
-            SmsWaitResponse response = new SmsWaitResponse(existingCode, null, null, normalizedPhone, null);
+            // 缓存里只存了验证码本身，拿不到发送方和正文，这两个字段只能是 null。
+            //
+            // 但 receiveTime 必须带上：缓存里的码可能已经存在四分钟、早被别的调用方
+            // 取走用过了，而这条路径是**立即返回**的 —— 调用方会拿着一条过期数据
+            // 去登录，失败后也不知道问题出在哪。带上写入时刻，它至少能自己判断新旧。
+            SmsWaitResponse response = new SmsWaitResponse(
+                    existingCode, null, null, normalizedPhone, codeReceivedAt(normalizedPhone));
             return CompletableFuture.completedFuture(response);
         }
 
@@ -140,7 +147,8 @@ public class WaitingService implements MessageListener {
 
             String code = redisTemplate.opsForValue().get(codeKey);
             if (code != null && !code.isEmpty()) {
-                SmsWaitResponse response = new SmsWaitResponse(code, null, null, phone, null);
+                SmsWaitResponse response = new SmsWaitResponse(
+                        code, null, null, phone, codeReceivedAt(phone));
                 future.complete(response);
                 pendingRequests.remove(phone);
                 return;
@@ -168,6 +176,25 @@ public class WaitingService implements MessageListener {
         // 挂 whenComplete 而不是在每个完成分支里各写一遍：正常出码、超时、
         // 异常三条路径都能覆盖到，以后加分支也不会漏。
         future.whenComplete((result, error) -> poller.cancel(false));
+    }
+
+    /**
+     * 读验证码的写入时刻（epoch 毫秒）。读不到返回 null。
+     *
+     * <p>返回 null 而不是「现在」：键缺失或损坏时，「这个时间未知」是诚实的，
+     * 而编一个「刚刚」会让调用方误以为拿到的是新码 —— 那恰恰是这个字段要解决的问题。
+     */
+    private Long codeReceivedAt(String phone) {
+        String raw = redisTemplate.opsForValue().get(SMS_CODE_AT_KEY_PREFIX + phone);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            log.warn("Malformed code timestamp in Redis: {}", raw);
+            return null;
+        }
     }
 
     @Override

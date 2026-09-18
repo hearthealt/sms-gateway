@@ -39,6 +39,8 @@ public class SmsService {
     private final TransactionTemplate transactionTemplate;
 
     private static final String SMS_CODE_KEY_PREFIX = "sms:code:";
+    /** 验证码的写入时刻（epoch 毫秒）。与验证码同 TTL，见写缓存处。 */
+    private static final String SMS_CODE_AT_KEY_PREFIX = "sms:code:at:";
     private static final long CODE_TTL_SECONDS = 300; // 5 min
 
     /**
@@ -178,6 +180,18 @@ public class SmsService {
         if (!code.isEmpty() && !normalizedPhone.isEmpty()) {
             String codeKey = SMS_CODE_KEY_PREFIX + normalizedPhone;
             redisTemplate.opsForValue().set(codeKey, code, CODE_TTL_SECONDS, TimeUnit.SECONDS);
+
+            // 时间戳单独存一个键，而不是把值改成 "code|ts"：
+            // 无论是 WaitingService 还是人工排查 Redis，都按「这个键里就是验证码」来理解，
+            // 改格式会破坏这个直觉。两个键同 TTL 一起写，不会漂移。
+            //
+            // 存它是因为 /wait 命中缓存时会**立即返回**，而缓存里的码可能已经存在 4 分钟、
+            // 早被别的调用方取走用过了 —— 调用方拿到的是一条过期数据却毫无察觉。
+            // 有了这个时间戳，它至少能自己判断新旧。
+            redisTemplate.opsForValue().set(
+                    SMS_CODE_AT_KEY_PREFIX + normalizedPhone,
+                    String.valueOf(System.currentTimeMillis()),
+                    CODE_TTL_SECONDS, TimeUnit.SECONDS);
         } else if (code.isEmpty()) {
             log.debug("No verification code parsed, skip Redis cache: phone={}, sender={}",
                     request.getPhone(), request.getSender());
