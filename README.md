@@ -69,7 +69,7 @@ sms-gateway/
 │   │   ├── interceptor/  三套鉴权拦截器
 │   │   ├── service/      业务逻辑，CollectRuleEngine 是规则引擎
 │   │   └── model/        entity / dto / enums
-│   └── sql/              schema.sql（建库）+ migrations/（已建库的增量升级）
+│   └── sql/schema.sql    建库 / 升级单文件（幂等，全新库与老库都适用）
 ├── management/       管理后台（Vue 3 + TypeScript + Element Plus）
 │   └── src/views/        仪表盘 / 设备 / 短信 / 规则 / API 密钥 / 接口文档
 └── docker/           docker-compose.yml（MySQL + Redis + Backend）
@@ -87,9 +87,73 @@ sms-gateway/
 | Maven | 3.8+ |
 | Node.js | 18+ |
 | Android Studio | 用于构建客户端（compileSdk 34，minSdk 26） |
-| Docker | 可选，用于一键起 MySQL / Redis |
+| Docker | 可选：一条命令起全套（前后端 + MySQL + Redis，见方式一）。只在改代码、跑源码时可以不装 |
 
-### 1. 启动 MySQL 与 Redis
+### 方式一：Docker —— 一条命令起全套
+
+前后端 + MySQL + Redis 都在 `docker/docker-compose.yml` 里，**本机不需要装 JDK / Maven / Node**。
+
+**1. 准备配置**
+
+```bash
+cd docker
+cp .env.example .env
+```
+
+打开 `docker/.env` 填上真实值。下面几项是**必填的，没填就拒绝启动**（compose 用的是 `${VAR:?}`，不是 `:-默认值`——就是为了不给"悄悄用默认值"的机会）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` | MySQL 口令 |
+| `REDIS_PASSWORD` | Redis 口令（里面明文存着管理员令牌与调用方 API Key）|
+| `APP_SECRET_KEY` | **系统主密钥**：设备令牌 = HMAC-SHA256(deviceId, 它)，泄漏等于可冒充任意设备。用 `openssl rand -hex 32` 生成 |
+| `APP_ADMIN_DEFAULT_PASSWORD` | 首次建库时创建管理员账号用的口令 |
+| `VITE_DEVICE_SERVER_URL` | 设备要访问的**后端**地址（会写进恢复码二维码）。**不能填 localhost** —— 对手机而言那是指向它自己 |
+
+**2. 起服务**
+
+```bash
+docker compose up -d --build
+```
+
+首次要构建前后端镜像（几分钟）。起来后：
+
+| | 地址 | 端口变量（在 `docker/.env`）|
+| --- | --- | --- |
+| 管理后台 | `http://<主机>:8081` | `FRONTEND_PORT` |
+| 后端 | `http://<主机>:8080` | `BACKEND_PORT` |
+| MySQL | `127.0.0.1:3306` | `MYSQL_PORT` |
+| Redis | `127.0.0.1:6379` | `REDIS_PORT` |
+
+MySQL 与 Redis 只绑回环（`127.0.0.1`），不发布到网卡上。
+
+初始账号 `admin` / `APP_ADMIN_DEFAULT_PASSWORD`。首次启动时后端会自己建库灌种子数据。
+
+**本机已经跑着后端 / MySQL / Redis 时**，把上面四个端口变量改成别的值就能两套并存。端口改了 `docker compose up -d` 即可生效；但 **`VITE_DEVICE_SERVER_URL` 是构建期变量**（Vite 在 build 时就把它内联进产物），改了必须 `docker compose build frontend`，只重启容器不会生效。另外 `BACKEND_PORT` 改了就同步改它，否则手机会被指到另一个后端上去。
+
+**3. 数据与清理**
+
+这套用自己的数据卷，和你本机装的 MySQL 互不影响：
+
+```bash
+docker compose down        # 停掉，保留数据
+docker compose down -v     # 连数据卷一起删（下次启动会重新建库并灌种子数据）
+```
+
+**4. 前面还有反向代理时（重要）**
+
+镜像里的 nginx 已配好 SPA 回退、`/api` 反代，以及 **SSE 必需的 `proxy_buffering off` 与
+`proxy_read_timeout`**（见 `management/nginx.conf`）。**链路上任何一层反向代理都要加这两条** ——
+最常见的漏法是容器前面再套一层 nginx 做 HTTPS 终止。界面的实时刷新走
+`GET /api/admin/events`（Server-Sent Events），**不是轮询**；漏掉任一条的表现都是
+「界面什么都不动、但也不报错」，最容易误判成前端坏了。配置以 `management/nginx.conf` 为准，
+别在文档里另抄一份。
+
+### 方式二：源码运行（改代码时用）
+
+下面三步是日常开发的做法。只想把系统跑起来，用方式一就够了。
+
+#### 1. 启动 MySQL 与 Redis
 
 ```bash
 cd docker
@@ -105,15 +169,18 @@ mysql --default-character-set=utf8mb4 -u root -p sms_gateway < backend/sql/schem
 `--default-character-set=utf8mb4` 不能省：中文 Windows 版 MySQL 的 client 字符集默认是
 gbk，读 UTF-8 的脚本会报 `Data too long for column 'rule_name'` 这种看似毫不相干的错。
 
-**已有库升级不要重跑 `schema.sql`。** 它通篇是 `CREATE TABLE IF NOT EXISTS`，
-对已存在的表**什么都不做** —— 新加的列、换掉的索引都不会生效，而后端已经在用它们了，
-启动后第一次查询就会报 `Unknown column`。升级走 `backend/sql/migrations/` 下对应日期的脚本：
-那些是增量的、**非幂等**（MySQL 8 不支持 `ADD COLUMN IF NOT EXISTS`），逐条确认后执行。
+**已有库升级直接重跑 `schema.sql` 即可**，不必手工 ALTER：它本身就是幂等的 ——
+第二、三段用存储过程查 `information_schema`，给已存在的库补列补索引、并在种子表为空时插入种子数据，
+所以全新库、已有库、连跑几遍都行。
+
+脚本内部已经写了 `SET NAMES utf8mb4`，因此**不依赖**上面那条客户端参数 ——
+Docker 启动时用 `docker-entrypoint-initdb.d` 自动灌库那条路径（客户端不带参数、容器里没有 locale，
+默认会退回 latin1）才不会把中文种子数据写成一堆乱码。
 
 脚本是**幂等**的，且**不切库**（没有 `USE`）—— 所以命令里必须指定目标库，跑错库会直接报
 `No database selected`，而不是静默写到别处去。全新库、老库升级、重复执行都用这一条命令。
 
-### 2. 启动后端
+#### 2. 启动后端
 
 ```bash
 cd backend
@@ -122,16 +189,9 @@ mvn spring-boot:run
 
 服务监听 `http://localhost:8080`。
 
-也可以用 Docker 连后端一起起（需先 `mvn package` 生成 jar，Dockerfile 依赖 `target/*.jar`）：
-
-```bash
-cd backend && mvn clean package -DskipTests
-cd ../docker && docker compose up -d
-```
-
 首次启动时，若 `admin_user` 表为空，`DataInitializer` 会按 `application.yml` 里的 `app.admin.default-username` / `default-password` 创建管理员账号（默认 `admin` / `zaq1,lp-`，**生产环境务必用环境变量覆盖**）。
 
-### 3. 启动管理后台
+#### 3. 启动管理后台
 
 ```bash
 cd management
@@ -146,6 +206,12 @@ npm run dev
 ```bash
 npm run build     # 产物在 management/dist/
 ```
+
+自己拿 `dist/` 挂到别的服务器上时，注意**方式一 · 4** 里那两条反向代理配置。
+
+**这两个 `.env` 都已加入 `.gitignore`，只有 `.env.example` 入库**：
+后端读 `docker/.env`（见 `docker/.env.example`），前端开发时读 `management/.env`
+（见 `management/.env.example`，只有 `VITE_` 前缀的变量会进前端代码）。
 
 ### 4. 构建 Android 客户端
 
