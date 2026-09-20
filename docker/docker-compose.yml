@@ -85,6 +85,18 @@ services:
       # 需要轮换管理员密码时临时设上、重启、确认登录成功后删掉。
       APP_ADMIN_RESET_PASSWORD: ${APP_ADMIN_RESET_PASSWORD:-}
 
+      # 消息转发（v2）的加密密钥。生成：openssl rand -base64 32
+      #
+      # **这里没有「转发总开关」**：它已经搬到数据库的 sys_config 表里，
+      # 在管理后台「系统设置」页开关，改完立即生效、不用重启容器 ——
+      # 原先是个环境变量，改一次就要重启一次，太麻烦。
+      #
+      # 留空时应用照常启动，只是转发不可启用（在界面上打开开关时会提示你去配）。
+      # 配置方法见 docs/notify-channel-setup.md。
+      #
+      # 注意：密钥丢了，已配的渠道凭据全都要重新填 —— 密文在库里，没有密钥读不出来。
+      NOTIFY_ENCRYPT_KEY: ${NOTIFY_ENCRYPT_KEY:-}
+
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
       mysql:
