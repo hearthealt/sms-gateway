@@ -2,15 +2,12 @@ package com.smsgateway.service;
 
 import com.smsgateway.model.entity.SmsCollectRule;
 import com.smsgateway.repository.CollectRuleRepository;
+import com.smsgateway.util.RuleMatcher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
 
 /**
  * 采集规则引擎：把 sms_collect_rule 表里配置的规则真正应用到接收流程。
@@ -31,17 +28,6 @@ import java.util.regex.PatternSyntaxException;
 public class CollectRuleEngine {
 
     public static final String ACTION_IGNORE = "ignore";
-
-    private static final String MATCH_EXACT = "EXACT";
-    private static final String MATCH_LIKE = "LIKE";
-    private static final String MATCH_REGEX = "REGEX";
-
-    /** LIKE 模式里需要按字面量处理的字符。 */
-    private static final String REGEX_META_CHARS = "\\^$.|?*+()[]{}";
-
-    /** 已编译正则缓存，key 为模式串本身。规则表很小且改动极少，不做失效处理。 */
-    private static final int MAX_CACHED_PATTERNS = 256;
-    private final Map<String, Pattern> patternCache = new ConcurrentHashMap<>();
 
     private final CollectRuleRepository collectRuleRepository;
 
@@ -86,66 +72,14 @@ public class CollectRuleEngine {
         return matchesValue(keyword, rule.getMatchType(), content);
     }
 
-    private boolean matchesValue(String pattern, String matchType, String value) {
-        if (pattern == null || value == null) {
-            return false;
-        }
-
-        String type = matchType == null ? MATCH_EXACT : matchType.trim().toUpperCase();
-        return switch (type) {
-            case MATCH_EXACT -> pattern.equals(value);
-            case MATCH_LIKE -> find(likeToRegex(pattern), value);
-            case MATCH_REGEX -> find(pattern, value);
-            default -> {
-                log.warn("Unknown matchType '{}' in collect rule, treated as not matched", matchType);
-                yield false;
-            }
-        };
-    }
-
-    private boolean find(String regex, String value) {
-        Pattern pattern = compile(regex);
-        return pattern != null && pattern.matcher(value).find();
-    }
-
-    /** 编译失败（管理员填了非法正则）时返回 null 并记日志，绝不让接收接口 500。 */
-    private Pattern compile(String regex) {
-        Pattern cached = patternCache.get(regex);
-        if (cached != null) {
-            return cached;
-        }
-
-        try {
-            Pattern compiled = Pattern.compile(regex, Pattern.DOTALL);
-            if (patternCache.size() < MAX_CACHED_PATTERNS) {
-                patternCache.put(regex, compiled);
-            }
-            return compiled;
-        } catch (PatternSyntaxException e) {
-            log.warn("Invalid regex in collect rule, treated as not matched: {}", regex, e);
-            return null;
-        }
-    }
-
     /**
-     * SQL LIKE 语义转正则：{@code %} 匹配任意长度，{@code _} 匹配单个字符，
-     * 其余字符一律按字面量处理（必须转义，否则规则里写 {@code .} 或 {@code *} 会变成元字符）。
+     * 具体的比较交给 {@link RuleMatcher} —— 转发规则用的是同一套。
+     *
+     * <p>注意这里**不能**换成 {@code RuleMatcher.matchesOptional}：那个把「空模式」
+     * 当作「不限制」而返回命中，而本方法要保持「空模式不命中」的原语义。
+     * 「关键词为空」这一情形上面已经单独判过了。
      */
-    static String likeToRegex(String like) {
-        StringBuilder regex = new StringBuilder(like.length() * 2);
-        for (int i = 0; i < like.length(); i++) {
-            char c = like.charAt(i);
-            switch (c) {
-                case '%' -> regex.append(".*");
-                case '_' -> regex.append('.');
-                default -> {
-                    if (REGEX_META_CHARS.indexOf(c) >= 0) {
-                        regex.append('\\');
-                    }
-                    regex.append(c);
-                }
-            }
-        }
-        return regex.toString();
+    private boolean matchesValue(String pattern, String matchType, String value) {
+        return RuleMatcher.matches(pattern, matchType, value);
     }
 }

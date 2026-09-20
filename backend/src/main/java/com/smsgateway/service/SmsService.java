@@ -7,6 +7,8 @@ import com.smsgateway.model.entity.SmsMessage;
 import com.smsgateway.model.enums.SmsStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
+import com.smsgateway.service.notify.NotifyOutbox;
+import com.smsgateway.util.CodeExtractor;
 import com.smsgateway.util.HashUtil;
 import com.smsgateway.util.PhoneUtil;
 import lombok.RequiredArgsConstructor;
@@ -43,33 +45,16 @@ public class SmsService {
     /** 有新短信（或重复计数变化）时推一条，让管理后台自己去拉最新数据。 */
     private final AdminEventBroadcaster adminEvents;
 
+    /**
+     * 事务性发件箱的写入侧。见 {@link NotifyOutbox} 的说明 ——
+     * 它必须在本方法的**事务内**被调用，这是「不存在『短信存了但没转发』」的全部实现。
+     */
+    private final NotifyOutbox notifyOutbox;
+
     private static final String SMS_CODE_KEY_PREFIX = "sms:code:";
     /** 验证码的写入时刻（epoch 毫秒）。与验证码同 TTL，见写缓存处。 */
     private static final String SMS_CODE_AT_KEY_PREFIX = "sms:code:at:";
     private static final long CODE_TTL_SECONDS = 300; // 5 min
-
-    /**
-     * 验证码提取模式。分两类：关键词在前（「验证码是123456」）与关键词在后
-     * （「123456 是您的验证码」）—— 后者此前完全漏掉。
-     *
-     * <p>数字两侧的 (?&lt;!\d)/(?!\d) 用于防止从更长的数字串里截取一段
-     * （如订单号 1234567890 被当成验证码）。
-     *
-     * <p>这里刻意**不再**保留「任意 6 位数字」兜底：那会把订单号、快递单号
-     * 误判成验证码，返回错码比返回空更糟。
-     */
-    private static final java.util.regex.Pattern[] CODE_PATTERNS = {
-            java.util.regex.Pattern.compile(
-                    "(?:验证码|校验码|动态码|安全码)[是为：:\\s]*(?<!\\d)(\\d{4,8})(?!\\d)"),
-            java.util.regex.Pattern.compile(
-                    "(?<!\\d)(\\d{4,8})(?!\\d)\\s*(?:是|为)?\\s*(?:您的|你的)?\\s*(?:登录|注册|支付|校验|动态)?\\s*(?:验证码|校验码|动态码)"),
-            java.util.regex.Pattern.compile(
-                    "(?:verification\\s+code|code)[是为：:\\s]*(?<!\\d)(\\d{4,8})(?!\\d)",
-                    java.util.regex.Pattern.CASE_INSENSITIVE),
-            java.util.regex.Pattern.compile(
-                    "(?<!\\d)(\\d{4,8})(?!\\d)\\s*(?:is)?\\s*(?:your)?\\s*(?:verification\\s+code|code)",
-                    java.util.regex.Pattern.CASE_INSENSITIVE)
-    };
 
     /**
      * 上报一条短信。
@@ -182,11 +167,16 @@ public class SmsService {
         smsMessageRepository.save(message);
 
         if (decision.ignored()) {
-            // 只留档：不写验证码缓存、不推送，避免污染正在等待验证码的调用方
+            // 只留档：不写验证码缓存、不推送、也不转发，避免污染正在等待验证码的调用方
             log.info("SMS ignored by rule '{}': deviceId={}, phone={}, sender={}",
                     decision.matchedRule(), authenticatedDeviceId, request.getPhone(), request.getSender());
             return new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null);
         }
+
+        // 转发任务入队。**位置很重要**：在保存 sms_message 之后（要 message.getId()）、
+        // 在同一个事务里（outbox 的全部意义所在）、且只对未被规则忽略的短信做
+        // （被忽略的短信不进转发，与它们不进验证码缓存是同一个道理）。
+        notifyOutbox.enqueue(device, message);
 
         // 列表上多了一条，推给管理后台。
         // 放在这里而不是方法末尾：被规则忽略的那些不进默认列表，不必惊动前端。
@@ -260,24 +250,16 @@ public class SmsService {
 
     /**
      * 客户端已解析出验证码时优先采用；否则由后端解析。
-     * 空串一律视为「未解析」——否则会绕过 extractVerificationCode 的兜底。
+     * 空串一律视为「未解析」——否则会绕过 CodeExtractor 的兜底。
+     *
+     * <p>提取逻辑搬到了 {@link CodeExtractor}：那是一段自成一体、有明确输入输出的
+     * 正则逻辑，留在本类里只会让「这条短信为什么没出码」更难查。
      */
     private String resolveCode(String clientCode, String content) {
         if (clientCode != null && !clientCode.isBlank()) {
             return clientCode.trim();
         }
-        return extractVerificationCode(content);
-    }
-
-    private String extractVerificationCode(String content) {
-        if (content == null || content.isBlank()) return "";
-        for (java.util.regex.Pattern pattern : CODE_PATTERNS) {
-            java.util.regex.Matcher matcher = pattern.matcher(content);
-            if (matcher.find()) {
-                return matcher.group(1);
-            }
-        }
-        return "";
+        return CodeExtractor.extract(content);
     }
 
     private String escapeJson(String value) {

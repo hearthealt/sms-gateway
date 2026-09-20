@@ -215,6 +215,126 @@ CREATE TABLE IF NOT EXISTS device_enroll_token (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+-- ---------------------------------------------------------------------------
+-- 7. 转发渠道（notify_channel）
+-- ---------------------------------------------------------------------------
+-- v2「消息转发」：短信到达后由服务端主动推给群机器人 / 个人 IM。
+-- 配置方法见 docs/notify-channel-setup.md；支持的渠道见 NotifyChannelType。
+--
+-- config_cipher 存的是**密文**（AES-GCM，密钥来自 app.notify.encrypt-key）。
+-- 与 api_key 的明文存储刻意相反：那里管理端要支持「点显示看完整值」，
+-- 而 webhook 地址创建时贴一次就够，之后只需要知道「配好了」，没有回显明文的场景。
+-- 能做加密就做 —— 库被读走时，密文在没有密钥的情况下读不出 webhook URL。
+--
+-- **没有 template / mask_policy 这类列。** 转发出去的就是短信原文，不做模板、
+-- 不打码。这意味着群里所有人都能用看到的验证码登录对应账号 —— 这是配置渠道时
+-- 就该知道的事（谁在那个群里），不是运行时要拦的事。管理端在建渠道时提示一次。
+CREATE TABLE IF NOT EXISTS notify_channel (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100) NOT NULL COMMENT '渠道名，如「运维群」',
+    type VARCHAR(32) NOT NULL COMMENT '渠道类型，见 NotifyChannelType',
+    config_cipher TEXT NOT NULL COMMENT '加密后的渠道配置 JSON（AES-GCM）',
+    rate_limit_per_min INT NOT NULL DEFAULT 20 COMMENT '每分钟上限，0=不限',
+    max_retries INT NOT NULL DEFAULT 3,
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    -- 健康状态：连续失败到阈值会自动停用，见 NotifyDispatcher
+    last_success_at DATETIME DEFAULT NULL,
+    last_error_at DATETIME DEFAULT NULL,
+    last_error VARCHAR(500) DEFAULT NULL COMMENT '**脱敏后**的错误摘要，不得出现完整 webhook URL',
+    consecutive_failures INT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_enabled (enabled),
+    INDEX idx_type (type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 8. 转发规则（notify_route + notify_route_channel）
+-- ---------------------------------------------------------------------------
+-- 刻意**不复用 sms_collect_rule**，关键一条是语义不同：
+-- 采集规则是「首条命中即定论」的二值判定（采不采集），而路由是**并集** ——
+-- 一条短信可以同时进「运维群」和「我的微信」，规则必须累加而不是短路。
+-- 另一条：采集规则决定「哪些短信进系统」，是数据入口策略；路由决定「进来的短信
+-- 发给谁」，是通知策略。混在一张表里，改通知会牵动数据采集。
+CREATE TABLE IF NOT EXISTS notify_route (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    route_name VARCHAR(100) NOT NULL,
+    -- 匹配条件语义与 sms_collect_rule 一致，共用 RuleMatcher 的匹配逻辑
+    sender_pattern VARCHAR(255) DEFAULT NULL COMMENT '空=不限发送方',
+    keyword_pattern VARCHAR(255) DEFAULT NULL COMMENT '空=不限正文',
+    match_type VARCHAR(20) NOT NULL DEFAULT 'LIKE' COMMENT 'EXACT/LIKE/REGEX',
+    device_id VARCHAR(128) DEFAULT NULL COMMENT '限定设备，空=不限',
+    phone_pattern VARCHAR(64) DEFAULT NULL COMMENT '限定接收号码（多卡场景），空=不限',
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 一条规则配多个渠道用关联表，而不是在 notify_route 上加一个 channel_id：
+-- 后者要一组规则配 N 个渠道就得复制 N 行，改匹配条件时得改 N 处。
+CREATE TABLE IF NOT EXISTS notify_route_channel (
+    route_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    PRIMARY KEY (route_id, channel_id),
+    INDEX idx_channel (channel_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 9. 投递记录（notify_delivery）—— 兼作 outbox
+-- ---------------------------------------------------------------------------
+-- 事务性发件箱：这一行的 INSERT 与 sms_message 的 INSERT 在**同一个事务**里。
+-- 事务提交则投递任务必然存在，回滚则两者都不存在 —— 不存在「短信存了但没转发」
+-- 的中间态。这也是「转发必须做在服务端」的根本理由：放在设备上就没有事务可依附。
+--
+-- 兼作投递日志，省掉一张表。
+--
+-- **刻意不存渲染后的消息正文**：正文含验证码明文，落库等于把验证码写了两遍、
+-- 且第二遍没有 TTL。排查用 last_error + response_code 够；要看正文按
+-- sms_message_id 关联回 sms_message（那里本来就有）。
+CREATE TABLE IF NOT EXISTS notify_delivery (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    sms_message_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/SENDING/SUCCESS/FAILED/DEAD',
+    attempts INT NOT NULL DEFAULT 0,
+    next_retry_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '到点才捞，限流推迟也写这里',
+    response_code INT DEFAULT NULL COMMENT '对端 HTTP 状态码',
+    last_error VARCHAR(500) DEFAULT NULL COMMENT '脱敏后的错误摘要',
+    sent_at DATETIME DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- 幂等：同一条短信对同一渠道只会有一条投递记录
+    UNIQUE KEY uk_sms_channel (sms_message_id, channel_id),
+    -- 调度主查询：(status, next_retry_at)
+    INDEX idx_dispatch (status, next_retry_at),
+    INDEX idx_channel_created (channel_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- ---------------------------------------------------------------------------
+-- 10. 运行期配置（sys_config）
+-- ---------------------------------------------------------------------------
+-- 管理后台「系统设置」页读写这张表，**改完立即生效、不用重启**。
+--
+-- 原先这些值在 application.yml 里，改了必须重启。项目里已有先例：api_key 当初
+-- 就是从 yml 的 app.client.token 迁到库里的，理由一模一样。
+--
+-- **哪些适合放这里**：运维过程中会想调、且调完就想看到效果的（转发总开关、
+-- 短信保留天数、转发调度参数）。
+-- **哪些不适合**：密钥（加密密钥尤其不能进库 —— 用库里的密钥解库里的密文是循环
+-- 依赖）、引导类配置（管理员初始密码）、以及极少改的超时/并发数。
+--
+-- 值一律按**字符串**存，类型转换由 SysConfigKey 上的 Type 决定：
+-- 这样加一项新配置只要加一个枚举值，**不用改这张表的结构**，
+-- 所以这里**没有种子数据** —— 缺哪个键就用枚举里的默认值。
+CREATE TABLE IF NOT EXISTS sys_config (
+    config_key VARCHAR(64) PRIMARY KEY COMMENT '配置键，见 SysConfigKey；不认识的行会被忽略',
+    config_value VARCHAR(500) NOT NULL COMMENT '值，一律按字符串存',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 -- ============================================================================
 -- 二、补列 / 补索引（只为**已存在的旧库**服务）
 --

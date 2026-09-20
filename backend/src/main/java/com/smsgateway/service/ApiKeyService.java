@@ -3,10 +3,10 @@ package com.smsgateway.service;
 import com.smsgateway.model.dto.ApiKeyRequest;
 import com.smsgateway.model.dto.ApiKeyView;
 import com.smsgateway.model.entity.ApiKey;
+import com.smsgateway.model.enums.SysConfigKey;
 import com.smsgateway.repository.ApiKeyRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,6 +34,7 @@ public class ApiKeyService {
 
     private final ApiKeyRepository apiKeyRepository;
     private final StringRedisTemplate redisTemplate;
+    private final SysConfigService sysConfigService;
 
     /** 缓存键前缀。参照 AdminAuthService.ADMIN_TOKEN_PREFIX，常量放在服务类上。 */
     public static final String API_KEY_CACHE_PREFIX = "sms:apikey:";
@@ -41,8 +42,16 @@ public class ApiKeyService {
     /** 密钥前缀，便于在日志/截图里一眼认出这是本系统的密钥。 */
     private static final String KEY_PREFIX = "sk-";
 
-    @Value("${app.api-key.cache-ttl-seconds:60}")
-    private long cacheTtlSeconds;
+    /**
+     * 校验结果的缓存时长。从库里读，管理后台「系统设置」页可改。
+     *
+     * <p>它是一个**取舍**：改大减轻数据库压力，但禁用/删除一个密钥后要过这么久才失效。
+     * 主动禁用/删除时会调 {@code evictCache} 立刻清掉，所以这里的延迟只影响
+     * 「密钥自然过期」与「数据库被直接改动」两种情形。
+     */
+    private long cacheTtlSeconds() {
+        return sysConfigService.getInt(SysConfigKey.API_KEY_CACHE_TTL_SECONDS);
+    }
 
     public List<ApiKeyView> list() {
         return apiKeyRepository.findAllByOrderByCreatedAtDesc().stream()
@@ -107,7 +116,7 @@ public class ApiKeyService {
 
         entity.setLastUsedAt(LocalDateTime.now());
         apiKeyRepository.save(entity);
-        redisTemplate.opsForValue().set(cacheKey, entity.getName(), cacheTtlSeconds, TimeUnit.SECONDS);
+        redisTemplate.opsForValue().set(cacheKey, entity.getName(), cacheTtlSeconds(), TimeUnit.SECONDS);
         return entity.getName();
     }
 

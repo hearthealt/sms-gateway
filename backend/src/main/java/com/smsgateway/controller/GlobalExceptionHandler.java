@@ -1,6 +1,7 @@
 package com.smsgateway.controller;
 
 import com.smsgateway.exception.EnrollTokenRequiredException;
+import com.smsgateway.service.notify.NotifyNotConfiguredException;
 import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.ApiResult;
 import lombok.extern.slf4j.Slf4j;
@@ -107,6 +108,20 @@ public class GlobalExceptionHandler {
         log.warn("No handler for path: {}", e.getResourcePath());
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(ApiResult.error(404, "接口不存在: " + e.getResourcePath()));
+    }
+
+    /**
+     * 转发功能没配好就被人用了（通常是没设那两个环境变量）。
+     *
+     * <p>用 **503** 而不是 500，且把异常的消息**原样**返回：那条消息本身就是操作指引
+     * （设哪两个变量、密钥怎么生成、要重启），掉进 500 兜底会变成一句
+     * 「服务器内部错误」，现场完全想不到是配置没做完。
+     */
+    @ExceptionHandler(NotifyNotConfiguredException.class)
+    public ResponseEntity<ApiResult<Void>> handleNotifyNotConfigured(NotifyNotConfiguredException e) {
+        log.warn("Notify not configured: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ApiResult.error(503, e.getMessage()));
     }
 
     @ExceptionHandler(Exception.class)

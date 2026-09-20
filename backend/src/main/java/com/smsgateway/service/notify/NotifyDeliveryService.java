@@ -1,0 +1,150 @@
+package com.smsgateway.service.notify;
+
+import com.smsgateway.model.dto.NotifyDeliveryView;
+import com.smsgateway.model.dto.PageResult;
+import com.smsgateway.model.entity.NotifyChannel;
+import com.smsgateway.model.entity.NotifyDelivery;
+import com.smsgateway.model.entity.SmsMessage;
+import com.smsgateway.model.enums.NotifyDeliveryStatus;
+import com.smsgateway.repository.NotifyChannelRepository;
+import com.smsgateway.repository.NotifyDeliveryRepository;
+import com.smsgateway.repository.SmsMessageRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class NotifyDeliveryService {
+
+    /** 列表里的正文预览长度。够看清是哪条短信，又不至于把整篇搬上来。 */
+    private static final int PREVIEW_LENGTH = 60;
+
+    private final NotifyDeliveryRepository deliveryRepository;
+    private final SmsMessageRepository smsMessageRepository;
+    /**
+     * 直接依赖渠道仓储，而不是绕道 {@code NotifyRouteService} 拿渠道名。
+     * 投递记录要展示的不只是名字，还有**渠道是否启用** —— 那决定了这条记录
+     * 是「排队中」还是「已暂停」，是两回事。
+     */
+    private final NotifyChannelRepository channelRepository;
+
+    public PageResult<NotifyDeliveryView> list(int page, int pageSize, Long channelId, String status) {
+        NotifyDeliveryStatus parsedStatus = parseStatus(status);
+
+        Page<NotifyDelivery> result = deliveryRepository.search(
+                channelId, parsedStatus, PageRequest.of(page - 1, pageSize));
+
+        List<NotifyDelivery> rows = result.getContent();
+
+        // 各批量取一次，避免 N+1：一页 20 条时逐个 findById 就是 20 次查询
+        Map<Long, SmsMessage> smsById = smsMessageRepository
+                .findAllById(rows.stream().map(NotifyDelivery::getSmsMessageId).distinct().toList())
+                .stream()
+                .collect(Collectors.toMap(SmsMessage::getId, Function.identity(), (a, b) -> a));
+
+        Map<Long, NotifyChannel> channelById = channelRepository.findAll().stream()
+                .collect(Collectors.toMap(NotifyChannel::getId, Function.identity(), (a, b) -> a));
+
+        List<NotifyDeliveryView> views = rows.stream()
+                .map(row -> toView(row, smsById.get(row.getSmsMessageId()),
+                        channelById.get(row.getChannelId())))
+                .toList();
+
+        return PageResult.of(views, result.getTotalElements(), page, pageSize);
+    }
+
+    /**
+     * 手动重投。
+     *
+     * <p>把记录退回 PENDING 并立即到期，剩下的交给调度器 —— 不在这里直接发。
+     * 直接发会绕过限流与 inFlight 串行，正是调度器存在的意义。
+     */
+    @Transactional
+    public NotifyDeliveryView retry(Long id) {
+        NotifyDelivery delivery = deliveryRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("投递记录不存在: " + id));
+
+        if (delivery.getStatus() == NotifyDeliveryStatus.SUCCESS) {
+            throw new IllegalArgumentException("这条已经投递成功了，重投会重复发送");
+        }
+
+        // 渠道不可用就拒绝重投。不挡的话它会变回「待投递」，而调度查询会滤掉停用/
+        // 已删除的渠道 —— 于是这条记录又回到「待投递 + 下次重试 13:51」那个状态，
+        // 正是「停用渠道时为什么不清掉积压」抱怨的那个样子。
+        NotifyChannel channel = channelRepository.findById(delivery.getChannelId()).orElse(null);
+        if (channel == null) {
+            throw new IllegalArgumentException(
+                    "这条记录所属的渠道已被删除，无法重投。请新建渠道并调整转发规则。");
+        }
+        if (!channel.isEnabled()) {
+            throw new IllegalArgumentException(
+                    "这条记录所属的渠道「" + channel.getName() + "」已停用。"
+                            + "请先在「转发渠道」页启用它，再回来重投 —— 否则它只会变回待投递，发不出去。");
+        }
+
+        // 重投是一次新的开始：attempts 归零，否则它一上来就已经用光了重试次数、
+        // 下次失败直接判死，等于重投没生效。
+        delivery.setStatus(NotifyDeliveryStatus.PENDING);
+        delivery.setAttempts(0);
+        delivery.setNextRetryAt(LocalDateTime.now());
+        delivery.setLastError(null);
+        deliveryRepository.save(delivery);
+
+        log.info("手动重投：deliveryId={}", id);
+
+        // channel 在上面校验时就查过了，这里直接复用（那时已保证非 null）
+        SmsMessage sms = smsMessageRepository.findById(delivery.getSmsMessageId()).orElse(null);
+        return toView(delivery, sms, channel);
+    }
+
+    private NotifyDeliveryStatus parseStatus(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return NotifyDeliveryStatus.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("不支持的投递状态：" + raw);
+        }
+    }
+
+    private NotifyDeliveryView toView(NotifyDelivery delivery, SmsMessage sms, NotifyChannel channel) {
+        NotifyDeliveryView view = new NotifyDeliveryView();
+        view.setId(delivery.getId());
+        view.setSmsMessageId(delivery.getSmsMessageId());
+        view.setChannelId(delivery.getChannelId());
+        view.setChannelName(channel == null ? "（渠道已删除）" : channel.getName());
+        // 渠道没了也按「暂停」显示：那条记录确实不会再发出去了
+        view.setChannelEnabled(channel != null && channel.isEnabled());
+        view.setStatus(delivery.getStatus().name());
+        view.setAttempts(delivery.getAttempts());
+        view.setNextRetryAt(delivery.getNextRetryAt());
+        view.setResponseCode(delivery.getResponseCode());
+        view.setLastError(delivery.getLastError());
+        view.setSentAt(delivery.getSentAt());
+        view.setCreatedAt(delivery.getCreatedAt());
+
+        if (sms != null) {
+            view.setSender(sms.getSender());
+            view.setPhone(sms.getPhone());
+            // 预览就是短信原文的前一段。这里**不再打码** —— 转发出去的本来就是
+            // 完整正文，管理端打码只会让人以为转发也打码了。
+            // 「投递记录不存渲染后的正文」这条设计仍然成立，理由与打码无关：
+            // 存了等于把验证码写两遍，而第二遍没有 TTL。
+            view.setContentPreview(NotifyRedactor.truncate(sms.getContent(), PREVIEW_LENGTH));
+        }
+
+        return view;
+    }
+}

@@ -2,6 +2,7 @@ package com.smsgateway.service;
 
 import com.smsgateway.model.entity.SmsCollectRule;
 import com.smsgateway.repository.CollectRuleRepository;
+import com.smsgateway.util.RuleMatcher;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -70,9 +71,9 @@ class CollectRuleEngineTest {
     @Test
     @DisplayName("LIKE 里的正则元字符按字面量处理")
     void likeEscapesRegexMetachars() {
-        assertThat(CollectRuleEngine.likeToRegex("106%")).isEqualTo("106.*");
-        assertThat(CollectRuleEngine.likeToRegex("a.b%")).isEqualTo("a\\.b.*");
-        assertThat(CollectRuleEngine.likeToRegex("1_2")).isEqualTo("1.2");
+        assertThat(RuleMatcher.likeToRegex("106%")).isEqualTo("106.*");
+        assertThat(RuleMatcher.likeToRegex("a.b%")).isEqualTo("a\\.b.*");
+        assertThat(RuleMatcher.likeToRegex("1_2")).isEqualTo("1.2");
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.smsgateway.model.entity.SmsMessage;
 import com.smsgateway.model.enums.SmsStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
+import com.smsgateway.service.notify.NotifyOutbox;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -76,6 +77,13 @@ class SmsServiceTest {
      */
     @Mock
     private AdminEventBroadcaster adminEvents;
+
+    /**
+     * 转发发件箱。服务里新加的依赖没在这里声明的话会被注入成 null ——
+     * 而它是在保存短信之后调的，null 会直接 NPE，把整条上报路径打断。
+     */
+    @Mock
+    private NotifyOutbox notifyOutbox;
 
     @InjectMocks
     private SmsService smsService;
