@@ -2,6 +2,7 @@ package com.smsgateway.app.util
 
 import android.content.Context
 import com.smsgateway.app.network.RetrofitClient
+import com.smsgateway.app.service.GatewayForegroundService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +36,22 @@ object AuthState {
     fun markTokenRejected(context: Context): Boolean {
         DevicePrefs.clearToken(context)
         RetrofitClient.updateToken(null)
+
+        // 顺手把网关停掉。放在这里而不是界面里，是因为 401 也可能由上传工作器在
+        // **界面已经退出**之后观察到 —— 那时没有 ViewModel 去收这条事件，
+        // 服务就会一直挂在那里空转。
+        //
+        // 为什么必须停：令牌失效意味着服务端那条设备记录**已经不存在**了，
+        // 此后每一次心跳、每一次上报都是 401，一条短信也送不出去；而前台服务那条
+        // 常驻通知还写着「运行中」，界面上下是「未注册」、下是「停止网关」，
+        // 现场看到的是一个自相矛盾的画面（反馈原文：注册成功后后台把设备删了，
+        // 仍能点启动，提示完照样变成「停止网关」）。
+        //
+        // 注意这与「被管理员禁用」**不是一回事**，那条「保持心跳以便发现自己被恢复」
+        // 的理由在这里不成立：被禁用时心跳是被放行的（见 DeviceAuthInterceptor），
+        // 设备确实能靠它恢复；而令牌失效时记录已经没了，再跳多少次也回不来，
+        // 唯一的出路是重新注册。
+        GatewayForegroundService.stop(context)
 
         if (_tokenRejected.value) return false
         _tokenRejected.value = true
