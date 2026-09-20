@@ -19,6 +19,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -151,8 +152,12 @@ public class SmsService {
             log.info("Duplicate SMS counted for device={}, msgId={}, count={}",
                     authenticatedDeviceId, existing.getId(), existing.getDuplicateCount());
 
-            // 这一行的「重复 N 次 · 最后 xx」变了，列表上得跟着动
-            adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS, Map.of("id", existing.getId()));
+            // 这一行的「重复 N 次 · 最后 xx」变了，列表上得跟着动。
+            // 用 singletonMap 而不是 Map.of：后者不接受 null 值，
+            // 而这里只是附带信息（前端只用它判断「该刷新了」），
+            // 不值得为它把整条上报路径搭进去。
+            adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS,
+                    Collections.singletonMap("id", existing.getId()));
             return new SmsReceiveResponse(existing.getId(), true, SmsStatus.DUPLICATE.name(), null);
         }
 
@@ -185,7 +190,12 @@ public class SmsService {
 
         // 列表上多了一条，推给管理后台。
         // 放在这里而不是方法末尾：被规则忽略的那些不进默认列表，不必惊动前端。
-        adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS, Map.of("id", message.getId()));
+        //
+        // 用 singletonMap 而不是 Map.of：**Map.of 遇到 null 值直接抛 NPE**，
+        // 而这里的 id 来自「save 之后由 JPA 回填」这一副作用（单元测试里桩掉 save
+        // 就复现了），推送又只是旁路信号 —— 不能让它有机会把上报整条打断。
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS,
+                Collections.singletonMap("id", message.getId()));
 
         String code = resolveCode(request.getCode(), request.getContent());
         // 外部调用方按号码取短信、不关心发送方，所以归一化后的号码是唯一的匹配维度。

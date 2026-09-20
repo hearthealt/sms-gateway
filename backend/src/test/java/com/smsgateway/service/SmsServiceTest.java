@@ -69,6 +69,14 @@ class SmsServiceTest {
     @Mock
     private CollectRuleEngine collectRuleEngine;
 
+    /**
+     * 事件推送通道。**必须有这个 mock**：@InjectMocks 只注入这里声明过的 mock，
+     * 少一个就会被注入成 null，等 receiveSms 走到推送那一步直接 NPE ——
+     * 而报错点在 setUp 的事务桩里，看不出跟它有关。
+     */
+    @Mock
+    private AdminEventBroadcaster adminEvents;
+
     @InjectMocks
     private SmsService smsService;
 
@@ -80,7 +88,10 @@ class SmsServiceTest {
 
         when(deviceRepository.findByDeviceId(DEVICE_ID)).thenReturn(Optional.of(device));
         when(smsMessageRepository.findByDeviceIdAndLocalMessageId(1L, "local-1")).thenReturn(Optional.empty());
-        when(smsMessageRepository.findBySourceHash(anyString())).thenReturn(Optional.empty());
+        // 判重是按 (device_id, source_hash) 做的，不是全局按内容 ——
+        // 两台手机收到同一段内容时各记一行，见 sameContentFromAnotherDeviceIsNotDuplicate
+        when(smsMessageRepository.findByDeviceIdAndSourceHash(anyLong(), anyString()))
+                .thenReturn(Optional.empty());
         when(smsMessageRepository.save(any(SmsMessage.class))).thenAnswer(inv -> inv.getArgument(0));
         // 让编程式事务直接执行回调，不真的开事务
         when(transactionTemplate.execute(any())).thenAnswer(inv -> {
@@ -224,21 +235,46 @@ class SmsServiceTest {
     }
 
     @Test
-    @DisplayName("内容重复时只回报重复，不再插入与唯一索引冲突的第二行")
-    void duplicateDoesNotInsertConflictingRow() {
+    @DisplayName("同一台设备重复上报同一段内容时：回报重复并在原行上计数，不插入第二行")
+    void duplicateIsCountedOnTheOriginalRow() {
         SmsMessage original = new SmsMessage();
         original.setId(99L);
         original.setStatus(SmsStatus.RECEIVED);
-        // 已存在同内容的行 —— 原实现正是在这里拿同一个 hash 再插一行，撞上 uk_source_hash
-        // 抛 DataIntegrityViolationException、被兜成 500，设备端于是无限重试。
-        // 那条 INSERT 100% 失败，所以这个分支从来没被跑到过：旧测试把查询恒桩成了 empty。
-        when(smsMessageRepository.findBySourceHash(anyString())).thenReturn(Optional.of(original));
+        original.setDuplicateCount(2);
+        // 这台设备名下已有同内容的行 —— 原实现正是在这里拿同一个 hash 再插一行，
+        // 撞上唯一索引抛 DataIntegrityViolationException、被兜成 500，设备端于是无限重试。
+        when(smsMessageRepository.findByDeviceIdAndSourceHash(eq(1L), anyString()))
+                .thenReturn(Optional.of(original));
 
         SmsReceiveResponse response = smsService.receiveSms(
                 DEVICE_ID, request("您的验证码是123456", null));
 
         assertThat(response.isDuplicate()).isTrue();
         assertThat(response.getMessageId()).isEqualTo(99L);
-        verify(smsMessageRepository, never()).save(any(SmsMessage.class));
+        // 计数落在**原行**上（列表上由此显示「重复 N 次 · 最后到达时刻」），不插第二行
+        assertThat(original.getDuplicateCount()).isEqualTo(3);
+        verify(smsMessageRepository).save(original);
+    }
+
+    @Test
+    @DisplayName("另一台设备收到同一段内容不算重复：各记一行，各自有自己的记录")
+    void sameContentFromAnotherDeviceIsNotDuplicate() {
+        SmsDevice other = new SmsDevice();
+        other.setId(2L);
+        other.setDeviceId("android-2");
+        when(deviceRepository.findByDeviceId("android-2")).thenReturn(Optional.of(other));
+        // 关键：判重查询带 deviceId。设备 2 名下没有这段内容，所以是**新的一条**，
+        // 而不是设备 1 那条的「重复」—— 原先按内容全局判重时，第二台机器的码
+        // 会被算成第一台的重复、自己没有记录，而「这台机器的码到没到」只能靠它自己那行回答。
+        when(smsMessageRepository.findByDeviceIdAndSourceHash(eq(2L), anyString()))
+                .thenReturn(Optional.empty());
+
+        SmsReceiveResponse response = smsService.receiveSms(
+                "android-2", request("您的验证码是123456", null));
+
+        assertThat(response.isDuplicate()).isFalse();
+        ArgumentCaptor<SmsMessage> saved = ArgumentCaptor.forClass(SmsMessage.class);
+        verify(smsMessageRepository).save(saved.capture());
+        assertThat(saved.getValue().getDeviceId()).isEqualTo(2L);
     }
 }

@@ -61,6 +61,10 @@ class DeviceServiceTest {
     @Mock
     private TransactionTemplate transactionTemplate;
 
+    /** 同 SmsServiceTest：服务里新加的依赖没在这里声明的话会被注入成 null */
+    @Mock
+    private AdminEventBroadcaster adminEvents;
+
     @InjectMocks
     private DeviceService deviceService;
 
