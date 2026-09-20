@@ -1,5 +1,5 @@
 import { del, get, post, put } from './http'
-import type { Device, RecoveryCode, Stats, PaginatedResponse } from '../types'
+import type { Device, EnrollToken, RecoveryCode, Stats, PaginatedResponse } from '../types'
 
 export function getDeviceList(params: {
   page?: number
@@ -43,6 +43,35 @@ export function deleteDevice(deviceId: string): Promise<number> {
  */
 export function issueRecoveryCode(deviceId: string): Promise<RecoveryCode> {
   return post(`/admin/device/${encodeURIComponent(deviceId)}/recovery-code`)
+}
+
+/**
+ * 「快速连接」用的接入口令。
+ *
+ * 它是**服务器**级别的准入凭证，不是设备身份 —— 一台全新手机扫码接入时，
+ * 服务端靠它区分「自己人」和「碰巧知道服务器地址的人」。
+ */
+export function getEnrollToken(): Promise<EnrollToken> {
+  return get('/admin/enroll-token')
+}
+
+/**
+ * 生成一张新口令并启用准入校验；已有口令时即轮换。
+ *
+ * 轮换会让现场那张旧二维码**立刻失效**，所以调用方必须先二次确认。
+ */
+export function rotateEnrollToken(): Promise<EnrollToken> {
+  return post('/admin/enroll-token/rotate')
+}
+
+/**
+ * 启用 / 停用准入校验。停用不删除口令，重新启用不必换一张。
+ *
+ * 停用后注册接口退回完全开放 —— 任何知道服务器地址的人都能注册设备进来。
+ * 这是给「临时批量接入」留的口子，界面必须把这句后果说清楚。
+ */
+export function setEnrollTokenEnabled(enabled: boolean): Promise<EnrollToken> {
+  return put('/admin/enroll-token/enabled', undefined, { params: { enabled } })
 }
 
 /**

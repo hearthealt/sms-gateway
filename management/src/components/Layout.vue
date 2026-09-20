@@ -68,6 +68,18 @@
           </el-breadcrumb>
         </div>
         <div class="header-right">
+          <!--
+            快速连接放在全站 header，而不是设备列表页的筛选栏里。
+
+            它跟「现在在哪一页」无关：新手机到场时，你可能正在仪表盘上看数据、
+            在短信页查记录 —— 而这是个随时可能要用、且要立刻用上的动作
+            （人站在你旁边等着接进来），不该先导航到设备页才点得到。
+          -->
+          <el-button class="header-action" type="primary" plain @click="openQuickConnect">
+            <el-icon><Connection /></el-icon>
+            <span class="header-action-text">快速连接</span>
+          </el-button>
+
           <el-dropdown trigger="click" @command="handleUserCommand">
             <span class="user-profile">
               <el-avatar :size="28" color="var(--color-primary)">{{ username.charAt(0).toUpperCase() }}</el-avatar>
@@ -97,20 +109,31 @@
       </el-main>
     </el-container>
   </el-container>
+
+  <!--
+    「快速连接」弹窗挂在 Layout 而不是某一页里：按钮在 header 上，全局可达。
+    必须绑 ref，否则 quickConnectDialog.value 永远是 undefined，点按钮会静默无反应。
+  -->
+  <QuickConnectDialog ref="quickConnectDialog" />
 </template>
 
 <script lang="ts">
 import { defineComponent, computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 // Expand 已不再需要：折叠按钮改成单个 Fold 图标翻转，见模板里的说明
-import { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu } from '@element-plus/icons-vue'
+import { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu, Connection } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import QuickConnectDialog from './QuickConnectDialog.vue'
 import { logout } from '../api/auth'
 import { clearSession, getUsername } from '../utils/auth'
 import { useIsMobile, useIsNarrow } from '../composables/useMediaQuery'
 
 export default defineComponent({
   name: 'AppLayout',
-  components: { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu },
+  components: {
+    Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu,
+    Connection, QuickConnectDialog,
+  },
   setup() {
     const router = useRouter()
     const route = useRoute()
@@ -163,6 +186,19 @@ export default defineComponent({
       router.push(index)
     }
 
+    const quickConnectDialog = ref<InstanceType<typeof QuickConnectDialog>>()
+
+    function openQuickConnect() {
+      // 不用 `?.` 静默吞掉：模板里漏挂 <QuickConnectDialog ref="..."> 时 ref 永远是
+      // undefined，表现就是「点按钮没反应」—— 没有报错也没有日志，现场只会反复点。
+      // 与设备列表页打开恢复码弹窗那边的写法一致。
+      if (!quickConnectDialog.value) {
+        ElMessage.error('快速连接弹窗未挂载（Layout 模板里缺少 <QuickConnectDialog ref="quickConnectDialog" />）')
+        return
+      }
+      quickConnectDialog.value.open()
+    }
+
     function handleUserCommand(command: string) {
       if (command === 'logout') {
         // 通知后端作废该 token；失败也照常清理本地状态并跳转，
@@ -185,6 +221,7 @@ export default defineComponent({
       collapsed, isCollapsed, isMobile, drawerOpen, username,
       menuItems, activeMenu, currentTitle,
       handleMenuSelect, handleUserCommand,
+      quickConnectDialog, openQuickConnect,
     }
   },
 })
@@ -390,6 +427,17 @@ export default defineComponent({
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/*
+ * 窄屏只留图标。顶栏这一行同时挤着面包屑、这个按钮和用户名，
+ * 三者里只有这个按钮的图标本身就能表意（连接），文字最先该让位。
+ * 768 与 useMediaQuery 的 isMobile 断点同源。
+ */
+@media (max-width: 768px) {
+  .header-action-text {
+    display: none;
+  }
 }
 .user-profile {
   display: flex;

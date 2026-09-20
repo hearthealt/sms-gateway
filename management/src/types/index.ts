@@ -117,3 +117,23 @@ export interface RecoveryCode {
   deviceId: string
   enrollSecret: string
 }
+
+/**
+ * 设备接入口令 —— 「快速连接」页里那个二维码携带的准入凭证。
+ *
+ * 与 `RecoveryCode` 是**两回事**，别混：那个认的是「我是哪台设备」（针对已存在的设备），
+ * 这个认的是「我被允许接入本服务器」（只在设备首次注册时校验）。
+ *
+ * `token` 是**明文**（与 API 密钥同理：要显示进二维码，哈希回读不出来），
+ * 界面上默认打码，点「显示」才展开。`token` 为 null 表示从未生成过，
+ * 此时准入校验未启用、注册接口是开放的。
+ */
+export interface EnrollToken {
+  token: string | null
+  /**
+   * 与 `token` 是两个维度：停用时 token 仍然留着，重新启用不必换一张。
+   * 前端据此区分「没生成过」和「生成过但关掉了」。
+   */
+  enabled: boolean
+  updatedAt: string | null
+}
