@@ -1,0 +1,19 @@
+# 前端镜像的构建上下文。
+#
+# node_modules 与 dist 必须在容器里重新生成：宿主机上的 node_modules 是
+# Windows 的原生模块，拷进 alpine 镜像直接报错。
+#
+# .env 一定要排除：Vite 会读它，而镜像里带着一份宿主机专用的配置
+# （比如指向本机局域网的地址）会让构建结果与 docker/.env 里的设置打架。
+node_modules
+dist
+
+.env
+.env.*
+!.env.example
+
+# 与前端无关的东西
+.git
+.gitignore
+Dockerfile
+.dockerignore
