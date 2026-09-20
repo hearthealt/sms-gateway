@@ -13,7 +13,18 @@ data class DeviceInfo(
      * 这个 deviceId 在服务端已存在时，必须带上它才拿得到令牌 —— 否则任何知道
      * 设备号的人都能把自己冒充成这台设备。重装丢失后由管理员在控制台签发恢复码取回。
      */
-    val enrollSecret: String? = null
+    val enrollSecret: String? = null,
+
+    /**
+     * 服务器接入口令，随管理后台「快速连接」的二维码下发。
+     *
+     * 与上面的 [enrollSecret] 是**两回事**：那个证明「我是这台设备」，服务端只在
+     * deviceId 已存在时校验；这个证明「我被允许接入本服务器」，服务端只在**首次注册**
+     * （deviceId 还不存在）时校验。
+     *
+     * 服务端没启用接入口令时留空即可 —— 校验会放行。
+     */
+    val enrollToken: String? = null
 )
 
 data class DeviceTokenData(

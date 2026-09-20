@@ -16,6 +16,7 @@ import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.*
 import com.smsgateway.app.network.ProbeResult
 import com.smsgateway.app.network.RetrofitClient
+import com.smsgateway.app.qr.QrIdentity
 import com.smsgateway.app.service.GatewayForegroundService
 import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DeviceName
@@ -37,6 +38,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** 自检结果的一项。 */
 data class SelfTestItem(val label: String, val ok: Boolean, val detail: String)
 
+/**
+ * 「快速连接」进行到哪一步。null 表示没有进行中的连接。
+ *
+ * 分阶段是为了让界面能说出「现在卡在哪一步」—— 探测最坏要 3 × 8 秒（见
+ * RetrofitClient.probe），期间只转一个不说话的圈，现场会当成死机。
+ */
+enum class ConnectStage { PROBING, REGISTERING }
+
+/** 「快速连接」的结论，也是注册本身的结论。 */
+data class ConnectOutcome(val ok: Boolean, val message: String)
+
 data class DashboardState(
     val isRunning: Boolean = false,
     /** 空串表示未设置；界面展示用的「未设置」由 composable 负责格式化。 */
@@ -52,6 +64,14 @@ data class DashboardState(
      * 正是这么来的，还顺带让二维码能把别人机器的名字写进来。展示处直接读系统值。
      */
     val serverUrl: String = DevicePrefs.DEFAULT_SERVER_URL,
+    /**
+     * 当前服务器的接入口令，未设置时为空串。
+     *
+     * 放在 state 里是为了让「导出到另一台设备」那张二维码能带上它：服务端启用了准入
+     * 校验时，不带口令的码扫到另一台手机上会注册失败 —— 导出的本意是「让另一台设备
+     * 也能接进这台服务器」，少了口令就不是一份完整的配置。
+     */
+    val enrollToken: String = "",
     /**
      * 注意这里**没有** serverStatus 字段。
      *
@@ -70,6 +90,18 @@ data class DashboardState(
     val isRegistering: Boolean = false,
     val registerMessage: String? = null,
     /**
+     * 「快速连接」进行到哪一步，null = 没有进行中的连接。界面据此显示进度。
+     */
+    val connectStage: ConnectStage? = null,
+    /**
+     * 「快速连接」的一次性结论，由扫码连接页取走后立即清空。
+     *
+     * 单独一个字段而不是复用 registerMessage：那条通道的消费者是 GatewayApp，
+     * 它把消息变成一闪而过的 snackbar。而失败原因（地址不对 / 对面不是本服务 /
+     * 口令被拒）需要**留在屏幕上**让人照着处理，不该自己消失。
+     */
+    val connectResult: ConnectOutcome? = null,
+    /**
      * 被禁用横幅上「检查状态」的结论。
      *
      * **只给那个横幅用。** 它是持久展示的：禁用状态下用户要拿它留在屏幕上对照，
@@ -78,12 +110,8 @@ data class DashboardState(
      */
     val testResult: String? = null,
 
-    // 设置页的一次性提示
-    /** 测试连接进行中。按钮据此切成「测试中…」并禁用。 */
-    val isTestingConnection: Boolean = false,
     /**
-     * 设置页的一次性提示：测试连接的结论、清理本地记录的结果等。
-     * 设置页消费后立即清空，以 snackbar 一闪而过。
+     * 设置页的一次性提示：清理本地记录的结果等。设置页消费后立即清空，以 snackbar 一闪而过。
      *
      * 单独一个字段而不是复用上面的 testResult：那个是持久展示的，
      * 写进去的消息不会自己消失，会在页面上留一句擦不掉的残留。
@@ -140,13 +168,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     private val registerInFlight = AtomicBoolean(false)
 
     /**
-     * 探活请求的并发闸门。理由同上：连点会起出多个并发探测，谁先回来谁把
-     * isTestingConnection 置为结束，于是按钮提前解禁、提示串台。
-     *
-     * 设置页也会在探测期间禁用按钮，但那是界面层的表达；真正防住重复的是这里 ——
-     * 界面状态可能因为重组、返回再进入而落后半步。
+     * 快速连接的并发闸门。理由同上：连点两次确认会串出两轮「探测 → 注册」，
+     * 而第二轮探测用的可能已经是第一轮刚写进去的地址。
      */
-    private val testInFlight = AtomicBoolean(false)
+    private val connectInFlight = AtomicBoolean(false)
 
     private val database = AppDatabase.getInstance(application)
     private val prefs = DevicePrefs.get(application)
@@ -206,7 +231,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         deviceId = DevicePrefs.deviceId(getApplication()),
                         deviceToken = "",
-                        registerMessage = "服务端已不认这台设备（令牌失效），请重新注册"
+                        // 说清去哪儿重注册。设置页那句「什么时候该点重新注册」的常驻说明
+                        // 已经删掉了，指路就落在这条消息上 —— 它出现在出问题的那一刻，
+                        // 比一条平时没人看的说明有用。
+                        registerMessage = "服务端已不认这台设备，请到「设置」里点重新注册"
                     )
                 }
                 AuthState.consume()
@@ -225,6 +253,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 deviceToken = DevicePrefs.deviceToken(app),
                 phone = DevicePrefs.phone(app),
                 serverUrl = DevicePrefs.serverUrl(app),
+                enrollToken = DevicePrefs.enrollToken(app),
                 isDisabled = DevicePrefs.isDisabled(app)
             )
         }
@@ -264,6 +293,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         if (changed) {
             DevicePrefs.clearToken(context)
             prefs.edit().remove(KEY_DEVICE_TOKEN).apply()
+            // 接入口令是**某台服务器**签发的，跟着地址一起作废：带到新服务器上既没用，
+            // 又是一次没必要的泄露。
+            DevicePrefs.clearEnrollToken(context)
         }
         RetrofitClient.ensureConfigured(context)
 
@@ -271,6 +303,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             it.copy(
                 serverUrl = normalized,
                 deviceToken = if (changed) "" else it.deviceToken,
+                // 口令与地址同进退：盘上那份已在上面清掉了，state 这份也要跟上，
+                // 否则「导出到另一台设备」会继续把上一台服务器的口令印进二维码。
+                enrollToken = if (changed) "" else it.enrollToken,
                 registerMessage = if (changed) {
                     "服务器地址已变更，请重新注册设备"
                 } else {
@@ -279,9 +314,6 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
     }
-
-    /** 供二维码导入使用：由界面确认后调用这里写入。@return 同 [updateServerUrl]。 */
-    fun importServerUrl(url: String): Boolean = updateServerUrl(url)
 
     /**
      * 采用二维码里的设备身份 —— 即管理员在控制台签发的恢复码。
@@ -303,6 +335,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update {
             it.copy(
                 deviceId = DevicePrefs.deviceId(app),
+                // **无条件清掉**，不能只靠 applyServerUrl 里那个 `changed` 分支。
+                // DevicePrefs.adoptEnrollIdentity 已经用 commit() 删了盘上的令牌，而这里
+                // 在「二维码里的地址与当前已保存地址相同」时 changed == false，state 里
+                // 那一份就被留下来了 —— 于是 isRegistered 报 true、界面显示「已注册」，
+                // 而每个请求都 401。扫的正好是当前这台服务器的恢复码时必然触发。
+                deviceToken = "",
                 registerMessage = "已采用恢复码中的设备身份，请重新注册设备"
             )
         }
@@ -444,89 +482,102 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
         viewModelScope.launch {
             try {
-                val app = getApplication<Application>()
-
-                // 先落盘再发请求。UUID 一旦生成就是持久的，即使这次请求失败或进程中途被杀，
-                // 重试复用的也是同一个标识，不会再注册出第二台设备。
-                val deviceId = DevicePrefs.getOrCreateDeviceId(app)
-                _state.update { it.copy(deviceId = deviceId) }
-
-                val phone = DevicePrefs.phone(app).ifBlank { null }
-
-                val response = RetrofitClient.getApiService().registerDevice(
-                    DeviceInfo(
-                        deviceId = deviceId,
-                        deviceName = effectiveDeviceName(),
-                        platform = "android",
-                        phone = phone,
-                        appVersion = BuildConfig.VERSION_NAME,
-                        enrollSecret = DevicePrefs.getOrCreateEnrollSecret(app)
-                    )
-                )
-
-                val data = response.body()?.data
-                if (response.isSuccessful && data != null) {
-                    val token = data.deviceToken
-                    RetrofitClient.updateToken(token)
-                    RetrofitClient.updateDeviceId(deviceId)
-
-                    prefs.edit().apply {
-                        putString(KEY_DEVICE_TOKEN, token)
-                        if (phone != null) putString(KEY_PHONE, phone)
-                    }.apply()
-
-                    // 注册响应带着设备状态，这里同步一次：被禁用的设备重新注册后仍是禁用，
-                    // 不该因为「注册成功了」就显示成可用。
-                    DeviceStatus.set(app, data.status.equals("DISABLED", ignoreCase = true))
-
-                    // 注册前收到的短信是以空 deviceId/phone 入库的，先把身份补上再触发上传。
-                    try {
-                        database.smsQueueDao().backfillIdentity(deviceId, phone.orEmpty())
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Backfill queue identity failed", e)
-                    }
-
-                    _state.update {
-                        it.copy(
-                            deviceToken = token,
-                            phone = phone.orEmpty(),
-                            // 成功也要说一声。原先这里置 null，于是点了「重新注册」之后
-                            // 界面上什么都不变 —— 现场无从判断到底成没成，只能靠猜。
-                            registerMessage = "注册成功"
-                        )
-                    }
-
-                    SmsUploadWorker.enqueue(app)
-                    refreshServerStats()
-                    startService()
-                } else {
-                    // 这里原本读 body()?.message —— 但 Retrofit 在非 2xx 时 body() 恒为 null，
-                    // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
-                    val detail = parseErrorMessage(response.errorBody()?.string())
-                    _state.update {
-                        it.copy(
-                            registerMessage = "注册失败（HTTP ${response.code()}）" +
-                                (detail?.let { "：$it" } ?: "")
-                        )
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: IOException) {
-                Log.e(TAG, "Registration failed: server unreachable", e)
-                _state.update {
-                    it.copy(registerMessage = "连不上服务器，请到设置里检查服务器地址")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Registration failed", e)
-                _state.update {
-                    it.copy(registerMessage = "注册失败：${e.message ?: e.javaClass.simpleName}")
-                }
+                _state.update { it.copy(registerMessage = runRegistration().message) }
             } finally {
                 registerInFlight.set(false)
                 _state.update { it.copy(isRegistering = false) }
             }
         }
+    }
+
+    /**
+     * 跑一次注册，把成败翻成一句给现场看的话。
+     *
+     * 异常一律在这里收口，于是调用方只剩「把这句话放上自己的通道」一件事 ——
+     * 而两条通道的去处不同：设置页那条是一闪而过的 snackbar，快速连接那条要留在
+     * 扫码页上让人照着排查。共用前半段、只在展示处分叉，才不会两边各写一遍 try/catch。
+     */
+    private suspend fun runRegistration(): ConnectOutcome = try {
+        performRegistration()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: IOException) {
+        Log.e(TAG, "Registration failed: server unreachable", e)
+        ConnectOutcome(false, "连不上服务器，请到设置里检查服务器地址")
+    } catch (e: Exception) {
+        Log.e(TAG, "Registration failed", e)
+        ConnectOutcome(false, "注册失败：${e.message ?: e.javaClass.simpleName}")
+    }
+
+    /**
+     * 真正发注册请求。
+     *
+     * **刻意不写 registerMessage**：由调用方决定这条结论走哪条通道（理由见 [runRegistration]）。
+     */
+    private suspend fun performRegistration(): ConnectOutcome {
+        val app = getApplication<Application>()
+
+        // 先落盘再发请求。UUID 一旦生成就是持久的，即使这次请求失败或进程中途被杀，
+        // 重试复用的也是同一个标识，不会再注册出第二台设备。
+        val deviceId = DevicePrefs.getOrCreateDeviceId(app)
+        _state.update { it.copy(deviceId = deviceId) }
+
+        val phone = DevicePrefs.phone(app).ifBlank { null }
+
+        val response = RetrofitClient.getApiService().registerDevice(
+            DeviceInfo(
+                deviceId = deviceId,
+                deviceName = effectiveDeviceName(),
+                platform = "android",
+                phone = phone,
+                appVersion = BuildConfig.VERSION_NAME,
+                enrollSecret = DevicePrefs.getOrCreateEnrollSecret(app),
+                // 服务端只在**首次注册**时看它，已注册的设备带着也无妨。
+                // 为空表示这台服务器没启用准入校验（或是老用户没扫过码），服务端会放行。
+                enrollToken = DevicePrefs.enrollToken(app).ifBlank { null }
+            )
+        )
+
+        val data = response.body()?.data
+        if (!response.isSuccessful || data == null) {
+            // 这里原本读 body()?.message —— 但 Retrofit 在非 2xx 时 body() 恒为 null，
+            // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
+            val detail = parseErrorMessage(response.errorBody()?.string())
+            return ConnectOutcome(
+                false,
+                "注册失败（HTTP ${response.code()}）" + (detail?.let { "：$it" } ?: "")
+            )
+        }
+
+        val token = data.deviceToken
+        RetrofitClient.updateToken(token)
+        RetrofitClient.updateDeviceId(deviceId)
+
+        prefs.edit().apply {
+            putString(KEY_DEVICE_TOKEN, token)
+            if (phone != null) putString(KEY_PHONE, phone)
+        }.apply()
+
+        // 注册响应带着设备状态，这里同步一次：被禁用的设备重新注册后仍是禁用，
+        // 不该因为「注册成功了」就显示成可用。
+        DeviceStatus.set(app, data.status.equals("DISABLED", ignoreCase = true))
+
+        // 注册前收到的短信是以空 deviceId/phone 入库的，先把身份补上再触发上传。
+        try {
+            database.smsQueueDao().backfillIdentity(deviceId, phone.orEmpty())
+        } catch (e: Exception) {
+            Log.w(TAG, "Backfill queue identity failed", e)
+        }
+
+        _state.update { it.copy(deviceToken = token, phone = phone.orEmpty()) }
+
+        SmsUploadWorker.enqueue(app)
+        refreshServerStats()
+        startService()
+
+        // 成功也要说一声。之前成功分支置 null，于是点了「重新注册」之后界面上什么都不变 ——
+        // 现场无从判断到底成没成，只能靠猜。
+        return ConnectOutcome(true, "注册成功")
     }
 
     /** 从错误响应体里取出后端给的 message。解析失败就当没有，不因此再抛一次。 */
@@ -539,26 +590,88 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private data class ErrorBody(val code: Int = 0, val message: String? = null)
 
-    /** 设置页的「测试连接」：测输入框里当前这个地址，不必先保存。 */
-    fun testConnection(rawUrl: String) {
-        if (!testInFlight.compareAndSet(false, true)) return
+    /**
+     * 「快速连接」：扫码拿到服务器地址后，一气做完 保存地址 → 测试连接 → 注册设备。
+     *
+     * <p>三步必须在 ViewModel 里串，**不能在 Composable 里逐个调用**：
+     * `testConnection` 的结论是异步落到 state 上的，界面拿不到那个布尔值，也就无从
+     * 决定要不要继续注册；而且两条路各自的闸门（`testInFlight` / `registerInFlight`）
+     * 会交错，连点两下能串出一次「先注册后探测」。
+     *
+     * <p>探测这一步不是可有可无的仪式：地址填错时它能说出「有响应但不是本服务」
+     * 或「连接被拒绝」，而注册失败只会给一句笼统的「连不上服务器」。
+     *
+     * @param enrollToken 二维码里带的服务器接入口令，没带时传 null。
+     * @param identity    二维码里带的设备身份（即恢复码）。非空时先采用它再注册 ——
+     *                    重装过的手机也走这个页面，扫的正是管理员签的那张恢复码，
+     *                    在这里拒收会把它变成一条死路。
+     */
+    fun quickConnect(url: String, enrollToken: String?, identity: QrIdentity? = null) {
+        if (!connectInFlight.compareAndSet(false, true)) return
 
-        val url = rawUrl.trim().ifBlank { DevicePrefs.DEFAULT_SERVER_URL }
-        _state.update { it.copy(isTestingConnection = true) }
+        _state.update { it.copy(connectStage = ConnectStage.PROBING, connectResult = null) }
 
         viewModelScope.launch {
             try {
-                // probe 不再抛异常，连不上也是 ProbeResult 的一种，所以无需再包 try/catch
-                val (_, message) = describeProbe(RetrofitClient.probe(url))
-                _state.update { it.copy(settingsMessage = message) }
+                // 保存。两条路都可能失败，且失败时**什么都不写**（见各自注释），
+                // 所以这里必须自己把结论报出来，否则界面会静默无反应。
+                val saved = if (identity != null) {
+                    adoptEnrollIdentity(identity.deviceId, identity.enrollSecret, url)
+                } else {
+                    updateServerUrl(url)
+                }
+                if (!saved) {
+                    _state.update {
+                        it.copy(
+                            connectStage = null,
+                            connectResult = ConnectOutcome(false, "地址格式不合法，未导入")
+                        )
+                    }
+                    return@launch
+                }
+
+                // 上面两步都会顺手写一句「请重新注册设备」——那是给**单独导入配置**那条路
+                // 用的提示，而这里紧接着就注册了。不抹掉的话，GatewayApp 会把那句已经过期
+                // 的话弹成 snackbar，现场看到的是「刚说连接成功，又让我去重新注册」。
+                _state.update { it.copy(registerMessage = null) }
+
+                // 口令跟着地址一起存。顺序不能反：applyServerUrl / adoptEnrollIdentity
+                // 换地址时会清掉旧口令（它是上一台服务器签发的）。
+                val token = enrollToken.orEmpty()
+                DevicePrefs.setEnrollToken(getApplication(), token)
+                _state.update { it.copy(enrollToken = token) }
+
+                val (ok, detail) = describeProbe(RetrofitClient.probe(url))
+                if (!ok) {
+                    _state.update {
+                        it.copy(connectStage = null, connectResult = ConnectOutcome(false, detail))
+                    }
+                    return@launch
+                }
+
+                _state.update {
+                    it.copy(connectStage = ConnectStage.REGISTERING, isRegistering = true)
+                }
+                val outcome = runRegistration()
+                _state.update { it.copy(connectStage = null, connectResult = outcome) }
             } finally {
-                // 放在 finally：协程被取消时也要把闸门和「测试中」状态放掉，
-                // 否则按钮会永远停在禁用态，用户只能杀掉应用。
-                testInFlight.set(false)
-                _state.update { it.copy(isTestingConnection = false) }
+                connectInFlight.set(false)
+                // 取消（离开页面、进程被回收）时也要把进行中状态放掉，
+                // 否则下次进这个页面会看到一个永远转不完的圈。
+                _state.update { it.copy(connectStage = null, isRegistering = false) }
             }
         }
     }
+
+    /** 扫码连接页展示完结论后调用，避免下次进这个页面又冒出来。 */
+    fun clearConnectResult() {
+        _state.update { if (it.connectResult == null) it else it.copy(connectResult = null) }
+    }
+
+    // 这里原先有一个给设置页「测试连接」按钮用的 testConnection()。设置页的那个按钮
+    // 已经删掉了 —— 它和「扫一扫」里的探测是同一件事，但结论只走一闪而过的
+    // settingsMessage，而那段流程的结论是留在页面上的。留着它就是留一条
+    // 「两个入口、两套待遇」的路。探活能力本身没丢：扫一扫每次连接都会探一次。
 
     /** 设置页展示完提示后调用，避免下次进设置页又冒出来。 */
     fun clearSettingsMessage() {

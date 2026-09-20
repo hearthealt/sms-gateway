@@ -57,7 +57,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.SmsRecord
-import com.smsgateway.app.qr.QrConfigScreen
+import com.smsgateway.app.qr.QrExportScreen
+import com.smsgateway.app.qr.QuickConnectScreen
 import com.smsgateway.app.ui.AppCard
 import com.smsgateway.app.ui.AppColor
 import com.smsgateway.app.ui.AppScreen
@@ -132,7 +133,7 @@ class MainActivity : ComponentActivity() {
  * 层级是树不是栈（每个子页面的父页面固定），所以不需要返回栈。
  */
 private enum class Screen {
-    HOME, SETTINGS, QUEUE, SERVER_SMS, SELF_TEST, QR_CONFIG
+    HOME, SETTINGS, QUEUE, SERVER_SMS, SELF_TEST, QR_EXPORT, QUICK_CONNECT
 }
 
 @Composable
@@ -161,7 +162,7 @@ fun GatewayApp(viewModel: DashboardViewModel) {
             onOpenQueue = { viewModel.refreshQueue(); screen = Screen.QUEUE },
             onOpenServerSms = { viewModel.loadServerSms(); screen = Screen.SERVER_SMS },
             onOpenSelfTest = { viewModel.runSelfTest(); screen = Screen.SELF_TEST },
-            onRegister = { viewModel.registerDevice() },
+            onOpenQuickConnect = { screen = Screen.QUICK_CONNECT },
             onToggleService = { viewModel.toggleService() },
             onCheckStatus = { viewModel.checkStatusNow() }
         )
@@ -171,7 +172,8 @@ fun GatewayApp(viewModel: DashboardViewModel) {
             viewModel = viewModel,
             snackbarHostState = snackbarHostState,
             onBack = { screen = Screen.HOME },
-            onOpenQrConfig = { screen = Screen.QR_CONFIG }
+            onOpenQuickConnect = { screen = Screen.QUICK_CONNECT },
+            onOpenQrExport = { screen = Screen.QR_EXPORT }
         )
 
         Screen.QUEUE -> QueueScreen(
@@ -192,11 +194,16 @@ fun GatewayApp(viewModel: DashboardViewModel) {
             onBack = { screen = Screen.HOME }
         )
 
-        Screen.QR_CONFIG -> QrConfigScreen(
+        Screen.QR_EXPORT -> QrExportScreen(
+            state = state,
+            onBack = { screen = Screen.SETTINGS }
+        )
+
+        // 返回主页而不是设置页：入口在主页顶部，从哪进来的就回哪去。
+        Screen.QUICK_CONNECT -> QuickConnectScreen(
             state = state,
             viewModel = viewModel,
-            snackbarHostState = snackbarHostState,
-            onBack = { screen = Screen.SETTINGS }
+            onBack = { screen = Screen.HOME }
         )
     }
 }
@@ -212,7 +219,7 @@ fun HomeScreen(
     onOpenQueue: () -> Unit,
     onOpenServerSms: () -> Unit,
     onOpenSelfTest: () -> Unit,
-    onRegister: () -> Unit,
+    onOpenQuickConnect: () -> Unit,
     onToggleService: () -> Unit,
     onCheckStatus: () -> Unit
 ) {
@@ -220,7 +227,11 @@ fun HomeScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            HomeHeader(onOpenSelfTest = onOpenSelfTest, onOpenSettings = onOpenSettings)
+            HomeHeader(
+                onOpenQuickConnect = onOpenQuickConnect,
+                onOpenSelfTest = onOpenSelfTest,
+                onOpenSettings = onOpenSettings
+            )
 
             // 内容做成一张顶部圆角的「纸」，压在渐变头部上。
             // 这是参考图里最值得留下的一笔：成本只是一个 Surface + 圆角，辨识度却上来了。
@@ -254,12 +265,9 @@ fun HomeScreen(
                         BatteryBanner()
                     }
 
-                    if (!state.isRegistered) {
-                        RegistrationGuideCard(
-                            isRegistering = state.isRegistering,
-                            onRegister = onRegister
-                        )
-                    }
+                    // 未注册不再单独占一张卡：HeroStatusCard 本来就会说「未注册」，
+                    // 而「该怎么办」挪到了灰着的启动按钮底下那一句（见 GatewayActionButton），
+                    // 以及顶部常驻的「扫一扫」图标。
 
                     // 自上而下就是优先级：能不能用 → 怎么操作 → 今天干了多少 → 这台是谁
                     HeroStatusCard(state = state)
@@ -295,11 +303,21 @@ fun HomeScreen(
  * 顶部渐变头部。
  *
  * 只放品牌与应用名，**不放「安全 · 稳定 · 便捷」那类标语** —— 这是内部工具，
- * 现场一天要开十次，那行字占的高度不如留给状态。操作入口（自检、设置）留在这里，
- * 与内容页分开，滚动时不会跟着跑。
+ * 现场一天要开十次，那行字占的高度不如留给状态。操作入口（扫一扫、自检、设置）
+ * 留在这里，与内容页分开，滚动时不会跟着跑。
+ *
+ * 三个入口按「多久用一次」从右往左排：设置最常碰、自检是排障时才用、
+ * 扫一扫一台设备一辈子用一次 —— 最不常点的放最不顺手的位置。
+ *
+ * 扫一扫**不随注册状态显隐**。它只在未注册时有用，但一个会凭空出现/消失的图标
+ * 比一个常年在那儿、偶尔才点的图标更难找；而且已注册的设备也可能要换服务器接入。
  */
 @Composable
-private fun HomeHeader(onOpenSelfTest: () -> Unit, onOpenSettings: () -> Unit) {
+private fun HomeHeader(
+    onOpenQuickConnect: () -> Unit,
+    onOpenSelfTest: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -338,6 +356,9 @@ private fun HomeHeader(onOpenSelfTest: () -> Unit, onOpenSettings: () -> Unit) {
             color = Color.White
         )
         Spacer(modifier = Modifier.weight(1f))
+        IconButton(onClick = onOpenQuickConnect) {
+            Icon(Icons.Default.QrCodeScanner, contentDescription = "扫一扫", tint = Color.White)
+        }
         IconButton(onClick = onOpenSelfTest) {
             Icon(Icons.AutoMirrored.Filled.FactCheck, contentDescription = "自检", tint = Color.White)
         }
@@ -408,8 +429,11 @@ private fun GatewayActionButton(isRunning: Boolean, enabled: Boolean, onClick: (
         }
 
         if (!enabled) {
+            // 这句话是「为什么点不动」和「那我该怎么办」的**唯一**去处 ——
+            // 主页原先那张「尚未连接服务器」的大卡被拿掉了，指路就落在这里。
+            // 只说前半句（「注册成功后才能启动」）等于把用户丢在一个死胡同里。
             Text(
-                text = "设备注册成功后才能启动网关",
+                text = "尚未接入服务器：点顶部「扫一扫」扫码连接",
                 fontSize = 12.sp,
                 color = Color(0xFF9E9E9E)
             )
@@ -508,46 +532,6 @@ private fun BatteryBanner() {
                 onClick = { openBatterySettings(context) },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("加入白名单") }
-        }
-    }
-}
-
-@Composable
-private fun RegistrationGuideCard(isRegistering: Boolean, onRegister: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD))
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Warning, null, tint = Color(0xFF1976D2), modifier = Modifier.size(24.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("设备未注册", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0D47A1))
-            }
-            Text("请先注册设备才能连接服务器。", fontSize = 14.sp, color = Color(0xFF1565C0))
-
-            Button(
-                onClick = onRegister,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isRegistering,
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                if (isRegistering) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = Color.White
-                    )
-                } else {
-                    Icon(Icons.Default.AppRegistration, contentDescription = null)
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(if (isRegistering) "注册中…" else "立即注册设备")
-            }
         }
     }
 }
@@ -823,13 +807,13 @@ fun SettingsScreen(
     viewModel: DashboardViewModel,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
-    onOpenQrConfig: () -> Unit
+    onOpenQuickConnect: () -> Unit,
+    onOpenQrExport: () -> Unit
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
 
-    var serverUrlInput by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
     var phoneInput by remember(state.phone) { mutableStateOf(state.phone) }
     var showReregisterDialog by remember { mutableStateOf(false) }
 
@@ -866,71 +850,51 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // 这张卡只剩「看一眼现在连的是哪」，改地址一律走扫一扫。
+            //
+            // 原先这里是 输入框 + [保存] + [测试连接] + [配置二维码]，等于把「扫一扫」
+            // 那套流程在设置页又实现了一遍，而且是缺斤少两的一遍：它不认接入口令
+            // （服务端启用口令后，在这里改完地址点重新注册必然 403，而这个页面
+            // 没有任何地方能填口令），测试结论还只走一闪而过的 snackbar，而扫一扫
+            // 那条路的结论是留在页面上的。
             SettingsCard(title = "服务器地址") {
-                OutlinedTextField(
-                    value = serverUrlInput,
-                    onValueChange = { serverUrlInput = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("http://192.168.1.100:8080") }
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            focusManager.clearFocus()
-                            // 只在校验通过、真的存进去之后才说「已保存」。
-                            // 原来不看结果一律弹成功，地址敲错也照样报「已保存」。
-                            toast(
-                                if (viewModel.updateServerUrl(serverUrlInput)) {
-                                    "服务器地址已保存"
-                                } else {
-                                    "地址格式不合法，未保存"
-                                }
-                            )
-                        },
-                        modifier = Modifier.weight(1f),
-                        enabled = serverUrlInput.isNotBlank()
-                    ) { Text("保存") }
-
-                    OutlinedButton(
-                        onClick = {
-                            focusManager.clearFocus()
-                            viewModel.testConnection(serverUrlInput)
-                        },
-                        modifier = Modifier.weight(1f),
-                        // 探测进行中禁用：连点会起出多个并发探测，谁先回来谁把状态置为结束
-                        enabled = serverUrlInput.isNotBlank() && !state.isTestingConnection
-                    ) {
-                        // 进行中状态就长在按钮自己身上，不另起一行 —— 另起一行会把它下面的
-                        // 「配置二维码」按钮顶来顶去。写法同下面「注册中… / 重新注册」那处。
-                        if (state.isTestingConnection) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
-                        Text(if (state.isTestingConnection) "测试中…" else "测试连接")
-                    }
+                SelectionContainer {
+                    Text(
+                        text = state.serverUrl,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = AppColor.Ink
+                    )
                 }
+
+                Button(
+                    onClick = onOpenQuickConnect,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("扫码连接服务器")
+                }
+
                 OutlinedButton(
-                    onClick = onOpenQrConfig,
+                    onClick = onOpenQrExport,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("配置二维码")
+                    Text("导出配置给另一台设备")
                 }
             }
 
             SettingsCard(title = "设备信息") {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(text = "设备 ID", fontSize = 14.sp, color = Color.Gray)
-                    SelectionContainer {
-                        Text(
-                            text = state.deviceId.ifBlank { "未设置" },
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
+                // 与下面几行同一种排法（左标签、右等宽值），不要拆成「标签一行、值一行」——
+                // 那会在这张卡里突兀地多占一行，而设备 ID 本身放得下。
+                StatusRow(
+                    label = "设备 ID",
+                    value = state.deviceId.ifBlank { "未设置" },
+                    monospace = true,
+                    selectable = true
+                )
 
                 // 设备名称只读展示，不给改：它跟随手机本身（见 DeviceName），
                 // 摆一个输入框只会让人以为能改，改完还会与手机里的名字打架。
@@ -972,10 +936,10 @@ fun SettingsScreen(
                     ) { Text("保存手机号", maxLines = 1) }
                 }
 
-                StatusRow(label = "注册状态", value = if (state.isRegistered) "已注册" else "未注册")
-                if (state.isDisabled) {
-                    StatusRow(label = "设备状态", value = "已被管理员禁用")
-                }
+                // 注册状态、禁用状态都不在这里重复一遍：主页的 HeroStatusCard 已经
+                // 用一整张卡说这件事，被禁用还有专门的横幅。用户来设置页是为了改东西，
+                // 不是为了看状态 —— 同一件事在两个地方各说一遍，改了其中一处的样式
+                // 另一处就跟着不一致。
 
                 OutlinedButton(
                     onClick = { showReregisterDialog = true },
@@ -992,22 +956,19 @@ fun SettingsScreen(
                 }
             }
 
-            SettingsCard(title = "数据") {
+            // 两张只剩一行内容的卡并成一张。原先「数据」单占一张卡、里面只有一个按钮，
+            // 而「关于」里只有版本号 —— 分开摆只是让页面更长。
+            SettingsCard(title = "其他") {
                 OutlinedButton(
-                    onClick = {
-                        viewModel.clearUploadedRecords()
-                        toast("已清理本地已上传记录")
-                    },
+                    onClick = { viewModel.clearUploadedRecords() },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("清理本地已上传记录") }
                 Text(
                     text = "只删本地已上传成功的历史，不影响服务端数据。",
                     fontSize = 12.sp,
-                    color = Color.Gray
+                    color = AppColor.InkMuted
                 )
-            }
 
-            SettingsCard(title = "关于") {
                 StatusRow(label = "应用版本", value = BuildConfig.VERSION_NAME)
             }
         }
@@ -1436,7 +1397,16 @@ fun StatusRow(
     label: String,
     value: String,
     valueColor: Color? = null,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    /** 等宽显示。给设备 ID 这类需要逐位核对的标识用。 */
+    monospace: Boolean = false,
+    /**
+     * 允许长按选中复制。
+     *
+     * 给「要拿去别处使用」的值用（设备 ID 得报给管理员）。默认关：行本身可点时光是
+     * 选中就够呛，会与点击抢手势。
+     */
+    selectable: Boolean = false
 ) {
     Row(
         modifier = Modifier
@@ -1448,12 +1418,16 @@ fun StatusRow(
     ) {
         Text(text = label, fontSize = 14.sp, color = Color.Gray)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = value,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = valueColor ?: Color.Unspecified
-            )
+            val valueText: @Composable () -> Unit = {
+                Text(
+                    text = value,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = if (monospace) FontFamily.Monospace else null,
+                    color = valueColor ?: Color.Unspecified
+                )
+            }
+            if (selectable) SelectionContainer { valueText() } else valueText()
             // 有下一级页面的行才显示箭头，让「可点」这件事看得出来
             if (onClick != null) {
                 Icon(

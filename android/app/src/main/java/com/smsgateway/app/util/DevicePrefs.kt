@@ -27,6 +27,18 @@ object DevicePrefs {
      */
     const val KEY_ENROLL_SECRET = "enroll_secret"
 
+    /**
+     * 服务器接入口令，随管理后台「快速连接」的二维码下发，首次注册时带给服务端。
+     *
+     * 与 [KEY_ENROLL_SECRET] 是**两回事**，别混：那个证明「我是这台设备」（本机生成、
+     * 服务端存哈希、重装丢失就得签恢复码）；这个证明「我被允许接入本服务器」
+     * （管理员生成、明文可回读、跟着服务器走）。
+     *
+     * 因为它认的是**某一台服务器**，换地址时必须一起清掉（见 [clearEnrollToken]）——
+     * 把甲服务器的口令带给乙服务器既没用，又是一次不必要的泄露。
+     */
+    const val KEY_ENROLL_TOKEN = "enroll_token"
+
     const val KEY_PHONE = "phone"
 
     /**
@@ -202,6 +214,24 @@ object DevicePrefs {
             .remove(KEY_DEVICE_TOKEN)
             .commit()
     }
+
+    /** 服务器接入口令，未设置时为空串（服务端未启用准入校验时就是这种状态）。 */
+    fun enrollToken(context: Context): String =
+        get(context).getString(KEY_ENROLL_TOKEN, "").orEmpty()
+
+    /** 写入接入口令。空串等同于清除 —— 免得留一个空值在 prefs 里让判断多一种情况。 */
+    fun setEnrollToken(context: Context, token: String) {
+        val trimmed = token.trim()
+        val editor = get(context).edit()
+        if (trimmed.isEmpty()) editor.remove(KEY_ENROLL_TOKEN) else editor.putString(KEY_ENROLL_TOKEN, trimmed)
+        editor.apply()
+    }
+
+    /**
+     * 清掉接入口令。换服务器时必须调用 —— 口令是**某台服务器**签发的。
+     */
+    fun clearEnrollToken(context: Context) =
+        get(context).edit().remove(KEY_ENROLL_TOKEN).apply()
 
     /**
      * 清掉令牌但保留设备标识。
