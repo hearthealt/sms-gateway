@@ -38,10 +38,32 @@
         @select="handleMenuSelect"
         class="sidebar-menu"
       >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
-          <el-icon class="menu-icon"><component :is="item.icon" /></el-icon>
-          <span>{{ item.label }}</span>
-        </el-menu-item>
+        <!--
+          一级 = 功能分区，二级 = 具体页面。
+
+          **仪表盘与系统设置不分组**：它们各自独立，硬塞进某个分区只会让那个分区的
+          名字变糊（「设备与短信 / 系统设置」算怎么回事）。
+
+          分组轴是「这条数据往哪走」：设备产短信（设备与短信）→ 短信被筛和转发
+          （采集与转发）→ 外部系统来取（开放接口）。
+        -->
+        <template v-for="item in menuItems" :key="item.path || item.label">
+          <el-sub-menu v-if="item.children" :index="item.label">
+            <template #title>
+              <el-icon class="menu-icon"><component :is="item.icon" /></el-icon>
+              <span>{{ item.label }}</span>
+            </template>
+            <el-menu-item v-for="child in item.children" :key="child.path" :index="child.path">
+              <el-icon class="menu-icon"><component :is="child.icon" /></el-icon>
+              <span>{{ child.label }}</span>
+            </el-menu-item>
+          </el-sub-menu>
+
+          <el-menu-item v-else :index="item.path">
+            <el-icon class="menu-icon"><component :is="item.icon" /></el-icon>
+            <span>{{ item.label }}</span>
+          </el-menu-item>
+        </template>
       </el-menu>
 
       <!-- Collapse toggle -->
@@ -121,18 +143,31 @@
 import { defineComponent, computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 // Expand 已不再需要：折叠按钮改成单个 Fold 图标翻转，见模板里的说明
-import { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu, Connection } from '@element-plus/icons-vue'
+import { Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu, Connection, Share, Tickets, Tools } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import QuickConnectDialog from './QuickConnectDialog.vue'
 import { logout } from '../api/auth'
 import { clearSession, getUsername } from '../utils/auth'
 import { useIsMobile, useIsNarrow } from '../composables/useMediaQuery'
 
+/**
+ * 菜单项。
+ *
+ * `path` 与 `children` 互斥：有 children 的是一级分区（自身不可点），
+ * 没有的是可直接点开的页面。用同一个类型而不是两个，模板里就只写一遍 v-for。
+ */
+interface MenuEntry {
+  path?: string
+  icon: string
+  label: string
+  children?: MenuEntry[]
+}
+
 export default defineComponent({
   name: 'AppLayout',
   components: {
     Odometer, Monitor, ChatDotSquare, Setting, Document, Key, Fold, ArrowDown, Menu,
-    Connection, QuickConnectDialog,
+    Connection, Share, Tickets, Tools, QuickConnectDialog,
   },
   setup() {
     const router = useRouter()
@@ -167,13 +202,51 @@ export default defineComponent({
     // 「接口文档」页就是这么只剩「首页」的。标题跟着路由定义走，就没有第二处要同步。
     const currentTitle = computed(() => (route.meta.title as string) || '')
 
-    const menuItems = [
+    /**
+     * 菜单。有 `children` 的是一级分区，否则是独立项。
+     *
+     * 图标用字符串名（`<component :is="item.icon" />` 靠全局注册解析）——
+     * 所以新加图标要回 main.ts 的白名单里补一行，那里有说明。
+     */
+    const menuItems: MenuEntry[] = [
       { path: '/dashboard', icon: 'Odometer', label: '仪表盘' },
-      { path: '/devices', icon: 'Monitor', label: '设备管理' },
-      { path: '/sms', icon: 'ChatDotSquare', label: '短信记录' },
-      { path: '/rules', icon: 'Setting', label: '规则管理' },
-      { path: '/apikeys', icon: 'Key', label: 'API 密钥' },
-      { path: '/api-docs', icon: 'Document', label: '接口文档' },
+
+      {
+        label: '设备短信',
+        icon: 'Monitor',
+        children: [
+          { path: '/devices', icon: 'Monitor', label: '设备管理' },
+          { path: '/sms', icon: 'ChatDotSquare', label: '短信记录' },
+        ],
+      },
+
+      {
+        label: '采集转发',
+        icon: 'Connection',
+        children: [
+          // 采集规则排最前，转发三项跟在后面：这是同一件事的两端 ——
+          // 「哪些短信进系统」之后紧接着就是「进来的短信发给谁」。
+          //
+          // 标签叫「采集规则」而不是「规则管理」：与「转发规则」并排时，
+          // 「规则管理 / 转发规则」分不清说的是哪个，而它们本来就是两套规则。
+          { path: '/rules', icon: 'Setting', label: '采集规则' },
+          { path: '/notify/channels', icon: 'Connection', label: '转发渠道' },
+          { path: '/notify/routes', icon: 'Share', label: '转发规则' },
+          { path: '/notify/deliveries', icon: 'Tickets', label: '投递记录' },
+        ],
+      },
+
+      {
+        label: '开放接口',
+        icon: 'Key',
+        children: [
+          { path: '/apikeys', icon: 'Key', label: 'API 密钥' },
+          { path: '/api-docs', icon: 'Document', label: '接口文档' },
+        ],
+      },
+
+      // 独立项收尾：改得最少的那个放最后
+      { path: '/sysconfig', icon: 'Tools', label: '系统设置' },
     ]
 
     const activeMenu = computed(() => {
@@ -305,7 +378,26 @@ export default defineComponent({
   --el-menu-text-color: var(--sidebar-text);
   --el-menu-active-color: var(--sidebar-active);
 }
-.sidebar-menu .el-menu-item {
+/*
+ * ═══════════ 普通项与「有二级菜单」的分区标题，必须同一套盒模型 ═══════════
+ *
+ * **`.el-sub-menu__title` 一定要走 `:deep()`。** 这一条踩过：
+ * scoped 样式只给**组件根元素**加 data-v 属性，而 ElSubMenu 的根是
+ * `<li class="el-sub-menu">`，里面那个 `<div class="el-sub-menu__title">` 拿不到。
+ * 于是 `.sidebar-menu .el-sub-menu__title { margin: 2px 8px }` 编译成带 [data-v] 的
+ * 选择器之后**一条都匹配不上** —— 分区标题既没有左右 8px 外边距，也没有圆角、
+ * 没有 gap，实际用的是 EP 自己的 margin-right:5px。
+ *
+ * 实测（浏览器里量的，见下）两者差 8px，看起来就是「有二级菜单的那些整体偏左」：
+ *
+ *   仪表盘（普通项）   行left 8.0   图标left 28.0   文字left 65.0
+ *   设备与短信（分区） 行left 0.0   图标left 20.0   文字left 49.0
+ *
+ * `.el-menu-item` 反过来**不能**加 `:deep()`：它本身就是 ElMenuItem 的根元素，
+ * 是 scoped 属性唯一能落到的那个。
+ */
+.sidebar-menu .el-menu-item,
+.sidebar-menu :deep(.el-sub-menu__title) {
   margin: 2px 8px;
   border-radius: var(--border-radius-small);
   /*
@@ -326,15 +418,26 @@ export default defineComponent({
               background-color 0.15s ease,
               color 0.15s ease;
 }
-.app-sidebar.collapsed .sidebar-menu .el-menu-item {
+.app-sidebar.collapsed .sidebar-menu .el-menu-item,
+.app-sidebar.collapsed .sidebar-menu :deep(.el-sub-menu__title) {
   margin-left: 0;
   margin-right: 0;
 }
-.sidebar-menu .el-menu-item:hover {
+.sidebar-menu .el-menu-item:hover,
+.sidebar-menu :deep(.el-sub-menu__title:hover) {
   background: rgba(255,255,255,0.08) !important;
 }
 .sidebar-menu .el-menu-item.is-active {
   background: rgba(64,158,255,0.2) !important;
+}
+/*
+ * 二级项：默认比一级轻一档。
+ *
+ * 一级是分区、二级才是页面，两者用同样的字重和字号时，一屏 10 行看起来是平的 ——
+ * 分组的层次就白做了。只压二级，不动一级。
+ */
+.sidebar-menu .el-menu .el-menu-item {
+  font-size: 13px;
 }
 .menu-icon {
   font-size: 18px;
@@ -357,15 +460,25 @@ export default defineComponent({
  * width / height / visibility 三个都得覆盖：只改 width 的话，
  * height: 0 配 overflow: hidden 仍会把文字纵向裁没，等于白改。
  */
-.sidebar-menu.el-menu--collapse .el-menu-item > span {
+/*
+ * 二级菜单（一级分区的标题）在 EP 里是**另一套选择器**：
+ *   .el-menu--collapse > .el-sub-menu > .el-sub-menu__title > span
+ * 只覆盖 `.el-menu-item > span` 的话，一级分区的文字在第一帧就消失，二级的才平滑 ——
+ * 半套动画比没有更怪。而且它对 `.el-menu-item > span` 那条 specificity 打平（都是 0,3,0），
+ * 谁赢取决于样式注入顺序，所以这里多带一层 `.el-sub-menu` 把权重顶上去。
+ */
+.sidebar-menu.el-menu--collapse .el-menu-item > span,
+.sidebar-menu.el-menu--collapse :deep(.el-sub-menu > .el-sub-menu__title > span) {
   width: auto;
   height: auto;
   visibility: visible;
 }
-.sidebar-menu .el-menu-item > .menu-icon {
+.sidebar-menu .el-menu-item > .menu-icon,
+.sidebar-menu :deep(.el-sub-menu > .el-sub-menu__title > .menu-icon) {
   flex-shrink: 0;   /* 图标不参与收缩，否则会被压扁 */
 }
-.sidebar-menu .el-menu-item > span {
+.sidebar-menu .el-menu-item > span,
+.sidebar-menu :deep(.el-sub-menu > .el-sub-menu__title > span) {
   flex-shrink: 1;
   min-width: 0;     /* 少了它，flex 子项不肯收缩到内容宽度以下 */
   overflow: hidden;

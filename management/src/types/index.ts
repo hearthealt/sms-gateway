@@ -137,3 +137,147 @@ export interface EnrollToken {
   enabled: boolean
   updatedAt: string | null
 }
+
+/**
+ * 转发渠道。
+ *
+ * `config` 是**打码过**的回显值（webhook 地址在库里是密文），
+ * 提交时约定「留空 = 不修改」—— 见 NotifyChannelPayload。
+ */
+export interface NotifyChannel {
+  id: number
+  name: string
+  type: NotifyChannelType
+  config: Record<string, unknown>
+  rateLimitPerMin: number
+  maxRetries: number
+  enabled: boolean
+  // 健康状态
+  lastSuccessAt: string | null
+  lastErrorAt: string | null
+  lastError: string | null
+  consecutiveFailures: number
+  /** 还没发出去的条数。比连续失败次数更早暴露「这个渠道卡住了」。 */
+  backlog: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 与后端 NotifyChannelType 一一对应（下拉选项本身是从 /channel/types 取的）。 */
+export type NotifyChannelType =
+  | 'WECOM_BOT'
+  | 'FEISHU_BOT'
+  | 'DINGTALK_BOT'
+  | 'TELEGRAM_BOT'
+  | 'SLACK_WEBHOOK'
+  | 'WXPUSHER'
+  | 'SERVERCHAN'
+  | 'PUSHPLUS'
+  | 'GENERIC_WEBHOOK'
+  | 'WECOM_APP'
+
+export interface NotifyChannelPayload {
+  name?: string
+  type?: NotifyChannelType
+  /** 明文配置。**留空或不传 = 保持原值不变**，不是清空。 */
+  config?: Record<string, unknown>
+  rateLimitPerMin?: number
+  maxRetries?: number
+  enabled?: boolean
+}
+
+export interface NotifyChannelTestResult {
+  success: boolean
+  statusCode: number | null
+  detail: string
+}
+
+/** 转发规则。匹配条件语义与采集规则一致：空 = 不限制这一项。 */
+export interface NotifyRoute {
+  id: number
+  routeName: string
+  senderPattern: string | null
+  keywordPattern: string | null
+  matchType: string
+  deviceId: string | null
+  phonePattern: string | null
+  enabled: boolean
+  channelIds: number[]
+  /** 与 channelIds 一一对应，便于列表直接展示。 */
+  targetChannelNames: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface NotifyRoutePayload {
+  routeName?: string
+  senderPattern?: string | null
+  keywordPattern?: string | null
+  matchType?: string
+  deviceId?: string | null
+  phonePattern?: string | null
+  channelIds?: number[]
+  enabled?: boolean
+}
+
+export type NotifyDeliveryStatus =
+  | 'PENDING'
+  | 'SENDING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'DEAD'
+  /** 渠道被停用，这条不再投递。与 DEAD 的区别：这个是预期内的，不需要人处理。 */
+  | 'CANCELLED'
+
+export interface NotifyDelivery {
+  id: number
+  smsMessageId: number
+  channelId: number
+  channelName: string
+  /**
+   * 所属渠道是否启用。
+   *
+   * **它决定这条记录还会不会发出去**：渠道被停用后记录会一直停在待投递、
+   * `nextRetryAt` 也停在过去 —— 只看状态会读成「马上要重试了」，实际不会再发。
+   */
+  channelEnabled: boolean
+  status: NotifyDeliveryStatus
+  attempts: number
+  nextRetryAt: string
+  responseCode: number | null
+  lastError: string | null
+  sentAt: string | null
+  createdAt: string
+  sender: string | null
+  phone: string | null
+  /** 短信原文预览 —— 投递记录刻意不存渲染后的正文（存了等于把验证码写两遍且第二遍没有 TTL）。 */
+  contentPreview: string | null
+}
+
+export interface NotifyChannelTypeOption {
+  value: NotifyChannelType
+  label: string
+}
+
+/**
+ * 一项运行期配置。改完立即生效、不用重启后端。
+ *
+ * `label` / `description` / `type` 都由后端从 `SysConfigKey` 带出来 ——
+ * 前端不硬编码一份，否则加一项配置要改两处，漏改的那次表现为「设置页少了一项」。
+ */
+export interface SysConfigItem {
+  key: string
+  value: string
+  /** 代码里的默认值。「已修改」标签与「恢复默认」都用它。 */
+  defaultValue: string
+  /**
+   * 决定用什么控件。
+   * `TIME` 是 `HH:mm`，用时间选择器而不是让人手填 cron。
+   */
+  type: 'BOOLEAN' | 'INT' | 'STRING' | 'TIME'
+  label: string
+  /** 第一行是简述，其余是详细说明（按 `\n` 分段渲染）。 */
+  description: string
+  /** 分组标签，页面按它把配置分成几张卡片。 */
+  group: string
+}

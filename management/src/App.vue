@@ -204,4 +204,17 @@ a:hover { color: var(--color-primary-dark); }
   .el-pagination .el-pagination__total,
   .el-pagination .el-pagination__sizes { display: none; }
 }
+
+/*
+ * 让提示里的换行真的换行。
+ *
+ * 后端有几条错误消息是**分行的操作指引**（比如「没配加密密钥」那条：该设哪个变量、
+ * 命令怎么写、docker 用户改哪个文件）。默认 CSS 会把换行折叠成空格，于是那条消息
+ * 在 toast 里挤成一长串，而它恰恰是最需要被照着做的一条。
+ *
+ * 这条规则对所有提示生效 —— 单行消息不受影响。
+ */
+.el-message__content {
+  white-space: pre-line;
+}
 </style>

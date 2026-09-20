@@ -44,7 +44,30 @@ const router = createRouter({
           path: 'rules',
           name: 'RuleManagement',
           component: () => import('../views/RuleManagement.vue'),
-          meta: { title: '规则管理' },
+          // 叫「采集规则」而不是「规则管理」：与「转发规则」并排时，
+          // 「规则管理 / 转发规则」分不清说的是哪个，而它们本来就是两套规则。
+          // 页面内部的小标题也一直是「采集规则」，这里对齐。
+          meta: { title: '采集规则' },
+        },
+        // 转发三个页面的顺序就是配置时的顺序：先建渠道（发到哪）→ 再建规则
+        // （哪些短信发过去）→ 最后看投递记录（发出去了吗）。
+        {
+          path: 'notify/channels',
+          name: 'NotifyChannel',
+          component: () => import('../views/NotifyChannel.vue'),
+          meta: { title: '转发渠道' },
+        },
+        {
+          path: 'notify/routes',
+          name: 'NotifyRoute',
+          component: () => import('../views/NotifyRoute.vue'),
+          meta: { title: '转发规则' },
+        },
+        {
+          path: 'notify/deliveries',
+          name: 'NotifyDelivery',
+          component: () => import('../views/NotifyDelivery.vue'),
+          meta: { title: '投递记录' },
         },
         {
           path: 'apikeys',
@@ -57,6 +80,13 @@ const router = createRouter({
           name: 'ApiDocs',
           component: () => import('../views/ApiDocs.vue'),
           meta: { title: '接口文档' },
+        },
+        // 放最后：配置项改得最少，而列表页天天要看
+        {
+          path: 'sysconfig',
+          name: 'SysConfig',
+          component: () => import('../views/SysConfig.vue'),
+          meta: { title: '系统设置' },
         },
       ],
     },
