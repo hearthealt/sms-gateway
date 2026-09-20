@@ -49,7 +49,7 @@
 | --- | --- | --- | --- |
 | Android 设备 | `/api/device/**`、`/api/sms/receive` | deviceToken（注册时下发） | `DeviceAuthInterceptor` |
 | 外部业务系统 | `/api/sms/wait`、`/api/sms/list` | API Key（管理后台签发） | `ClientAuthInterceptor` |
-| 管理后台 | `/api/admin/**` | 登录 Token（Redis，默认 2 小时） | `AdminAuthInterceptor` |
+| 管理后台 | `/api/admin/**` | 登录 Token（Redis，有效期在「系统设置」页配，默认 20 小时） | `AdminAuthInterceptor` |
 
 ---
 
@@ -63,7 +63,8 @@ sms-gateway/
 │       ├── worker/       SmsUploadWorker 离线队列重试上报
 │       ├── parser/       验证码提取与本地过滤
 │       ├── qr/           扫码接入服务器（CameraX + ZXing）
-│       └── service/      前台服务，保活
+│       ├── service/      前台服务，保活
+│       └── ui/           Compose 界面
 ├── backend/          服务端（Spring Boot 3.2 + JPA + Redis）
 │   ├── src/main/java/com/smsgateway/
 │   │   ├── controller/   接口层
@@ -73,8 +74,11 @@ sms-gateway/
 │   │   └── model/        entity / dto / enums
 │   └── sql/schema.sql    建库 / 升级单文件（幂等，全新库与老库都适用）
 ├── management/       管理后台（Vue 3 + TypeScript + Element Plus）
-│   └── src/views/        仪表盘 / 设备 / 短信 / 规则 / 转发 / API 密钥 / 接口文档
-└── docker/           docker-compose.yml（MySQL + Redis + Backend）
+│   └── src/views/        仪表盘 / 设备管理 / 短信记录 / 采集规则 / 转发渠道 /
+│                         转发规则 / 投递记录 / API 密钥 / 接口文档 / 系统设置
+├── docs/             专题文档（渠道对接指南等）
+├── config/           本机开发配置覆盖（真身不入库，模板 application.yml.example 入库）
+└── docker/           docker-compose.yml（MySQL + Redis + Backend + Frontend）
 ```
 
 ---
@@ -184,14 +188,29 @@ Docker 启动时用 `docker-entrypoint-initdb.d` 自动灌库那条路径（客�
 
 #### 2. 启动后端
 
+先把本机配置放好（**在仓库根执行**）：
+
+```bash
+cp config/application.yml.example config/application.yml
+```
+
+**数据库口令、转发加密密钥这类不该入库的值放这里**，模板见 `config/application.yml.example`。入库的是 `.example` 那份，真正的这份已在 `.gitignore` 里。三点要注意：它是**覆盖**不是替换（没写的项仍按 classpath 里的 `application.yml` 取值，所以模板只列了本机真正会改的几项，别把调优参数抄一份过去）；环境变量优先级仍高于它，docker / 生产那套不受影响；改它要重启。
+
+然后启动：
+
 ```bash
 cd backend
-mvn spring-boot:run
+mvn spring-boot:run -Dspring-boot.run.workingDirectory=..
 ```
 
 服务监听 `http://localhost:8080`。
 
-首次启动时，若 `admin_user` 表为空，`DataInitializer` 会按 `application.yml` 里的 `app.admin.default-username` / `default-password` 创建管理员账号（默认 `admin` / `zaq1,lp-`，**生产环境务必用环境变量覆盖**）。
+> **这个 `-D` 不能省。** Spring Boot 只加载**工作目录**下的 `config/application.yml`，而
+> `mvn spring-boot:run` 的工作目录默认是 `${project.basedir}`，也就是 `backend/` ——
+> 不加它，仓库根那份**不会生效**，而且**不报错**，只是悄悄用了 `application.yml` 里的默认值。
+> 在 IDEA / Android Studio 里直接 Run 主类则不必管：它的工作目录默认是仓库根。
+
+首次启动时，若 `admin_user` 表为空，`DataInitializer` 会按 `application.yml` 里的 `app.admin.default-username` / `default-password` 创建管理员账号（默认 `admin` / `DEV-ONLY-change-me`，**生产环境务必用环境变量覆盖**）。
 
 #### 3. 启动管理后台
 
@@ -227,6 +246,8 @@ gradle assembleDebug          # 注意：仓库未包含 gradle wrapper
 > 仓库里没有 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar`，命令行构建需要本机已装 Gradle，或先用 Android Studio 打开一次由它生成 wrapper。
 >
 > 正式签名走 `android/app/keystore.properties` + `release.jks`，这两个文件已加入 `.gitignore`，需自行提供；缺失时 release 构建会跳过签名配置，debug 构建不受影响。
+>
+> **源码包名与 APK 包名是分开的**：`namespace` 是 `com.smsgateway.app`（目录树里看到的那个），而 `applicationId` 是 `com.yunyi.smshub`。改 `applicationId` 等于换一个应用身份——系统会当成新装应用，本地存着的 `enrollSecret` 一并丢失，服务端也会多出一条设备记录。
 
 ### 5. 对接设备（快速连接）
 
@@ -378,6 +399,10 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 
 > 被禁用的设备**仍可发心跳**。这是刻意的：心跳是设备唯一能发现自己被恢复的通道，也让管理端能持续区分「禁用但设备还活着」和「禁用且失联」。
 
+### `POST /api/device/offline` — 主动下线
+
+无请求体，身份取自令牌。设备关闭网关时调用，让控制台立刻显示离线而不是等心跳超时。**尽力而为**：进程被系统杀掉时发不出这个请求，那种情况仍由心跳超时兜底。
+
 ### `GET /api/device/sms` — 本设备的短信记录
 
 参数 `page`（默认 1）、`pageSize`（默认 20）、`includeIgnored`（默认 `true`）。设备身份取自令牌，由拦截器写入请求属性，**不接受 `deviceId` 参数**——否则任何设备都能查到别人的记录。
@@ -419,10 +444,13 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 | --- | --- | --- |
 | POST | `/auth/login` | 登录，返回 Token |
 | POST | `/auth/logout` | 登出，失效 Token |
+| GET | `/events` | **SSE 事件流**，界面实时刷新的唯一来源（不是轮询）。返回流不是 `ApiResult` |
 | GET | `/device/list` | 设备列表 |
 | GET | `/device/stats` | 设备统计 |
 | GET | `/device/{deviceId}` | 设备详情 |
 | PUT | `/device/{deviceId}/enabled` | 启用 / 禁用设备 |
+| POST | `/device/{deviceId}/recovery-code` | 签发恢复码（**只此一次**回明文 `enrollSecret`） |
+| DELETE | `/device/{deviceId}` | 删除设备，连同其短信一起删（返回删掉的条数） |
 | GET | `/sms/list` | 短信列表 |
 | GET | `/sms/device/{deviceId}` | 指定设备的短信 |
 | GET | `/sms/stats/daily` | 按日统计 |
@@ -438,6 +466,7 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 | GET | `/enroll-token` | 当前设备接入口令（明文；`token` 为 null 表示未生成） |
 | POST | `/enroll-token/rotate` | 生成 / 轮换接入口令，并启用准入校验 |
 | PUT | `/enroll-token/enabled` | 启用 / 停用准入校验（停用不删除口令） |
+| GET | `/notify/status` | 转发是否就绪（`ready`，即加密密钥在不在） |
 | GET | `/notify/channel/types` | 支持的转发渠道类型（前端选择器用） |
 | GET | `/notify/channel/list` | 转发渠道列表（**凭据打码**） |
 | POST | `/notify/channel` | 新建渠道 |
@@ -452,6 +481,8 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 | PUT | `/notify/route/{id}/enabled` | 启停规则 |
 | GET | `/notify/delivery/list` | 投递记录（可按渠道/状态过滤） |
 | POST | `/notify/delivery/{id}/retry` | 手动重投 |
+| GET | `/sysconfig/list` | 全部运行期配置项（带 label / 说明 / 分组，前端直接渲染） |
+| PUT | `/sysconfig` | 改一项配置，**立即生效、不用重启**。只认 `SysConfigKey` 里列出的键 |
 
 管理后台左侧「接口文档」页内也有一份可交互的接口说明。
 
@@ -486,25 +517,43 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 spring:
   datasource:
     url: jdbc:mysql://localhost:3306/sms_gateway?...
-    username: root
-    password: root
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
   data:
     redis:
-      host: localhost
-      port: 6379
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      password: ${SPRING_REDIS_PASSWORD:}
 
 app:
   secret:
-    key: sms-gateway-secret-key-2024   # 设备 Token 的 HMAC 盐
-  api-key:
-    cache-ttl-seconds: 60              # 密钥校验结果在 Redis 的缓存时长
+    key: ${APP_SECRET_KEY:DEV-ONLY-...}      # 设备令牌的 HMAC 主密钥；仍是默认值时启动会告警
   admin:
-    default-username: admin            # 首次启动播种的管理员
-    default-password: zaq1,lp-
-    token-ttl-seconds: 7200            # 登录 Token 有效期
+    default-username: ${APP_ADMIN_DEFAULT_USERNAME:admin}
+    default-password: ${APP_ADMIN_DEFAULT_PASSWORD:DEV-ONLY-change-me}
+    reset-password: ${APP_ADMIN_RESET_PASSWORD:}  # 唯一能改已存在账号口令的途径，用完撤掉
+  sms:
+    cleanup-batch-size: 1000             # 清理每批删多少行（保留天数与执行时间在库里）
+  notify:
+    encrypt-key: ${NOTIFY_ENCRYPT_KEY:}  # 渠道凭据的加密密钥；留空则转发不可启用
+    dispatcher:
+      batch-size: 100
+      max-concurrent-channels: 8         # 渠道之间并发，**同一渠道内部串行**
+      retry-base-ms: 5000                # 退避基数，实际等待是 Full Jitter
+      retry-cap-ms: 3600000
+    stuck-sending-seconds: 120           # 卡在 SENDING 超这么久就退回待投递
+    http:
+      connect-timeout-ms: 3000
+      read-timeout-ms: 10000
+      max-response-bytes: 8192           # 对端是管理员填的任意地址，响应体要设上限
 ```
 
 所有配置项均可通过环境变量覆盖（`SPRING_DATASOURCE_URL`、`SPRING_REDIS_HOST` 等），`docker/docker-compose.yml` 里即为示例。
+
+> **运行时能调的配置不在这个文件里。** 转发总开关、附带来源信息、轮询间隔、失败阈值、
+> 短信保留天数、清理时间、登录有效期、API Key 校验缓存 —— 这八项在数据库 `sys_config` 表，
+> 管理后台「系统设置」页改完**立即生效**。判断标准只有一条：**密钥留环境变量，
+> 运行期策略进数据库**（见 `SysConfigKey`，那里是唯一的真源，别再往文档里抄一份）。
 
 ### 管理后台 `management/vite.config.ts`
 
@@ -713,9 +762,9 @@ mysql -u root -p sms_gateway < backend/sql/schema.sql
 
 **部署前请务必处理以下几项：**
 
-1. **修改默认管理员口令。** `application.yml` 里的 `app.admin.default-password: zaq1,lp-` 是明文默认值，生产环境必须通过环境变量覆盖，且只在 `admin_user` 表为空时生效——建库后改配置不会更新已存在的账号。
+1. **修改默认管理员口令。** `application.yml` 里的 `app.admin.default-password: DEV-ONLY-change-me` 是明文默认值，生产环境必须通过环境变量覆盖，且只在 `admin_user` 表为空时生效——建库后改配置不会更新已存在的账号。要轮换一个**已存在**账号的口令，设 `APP_ADMIN_RESET_PASSWORD` 重启一次，确认能登录后把它撤掉（这是目前唯一能改口令的途径，管理接口里没有这个功能）。
 
-2. **更换 `app.secret.key`。** 该值用于设备 Token 的 HMAC，泄漏后可伪造任意设备身份，同样建议走环境变量。
+2. **更换 `app.secret.key`（环境变量 `APP_SECRET_KEY`）。** 该值用于设备 Token 的 HMAC，且是**确定性推导**——知道它的人可以对任意 deviceId 直接算出合法令牌，冒充任意设备。更换会让所有已签发令牌立即失效，趁设备还少的时候把它定下来。
 
 3. **API Key 在库中是明文存储的。** 管理后台列表默认打码，但支持「点击显示完整值」，因此无法只存哈希。库被读走等同于密钥全部泄漏——这是内部系统的取舍，请相应收紧数据库访问权限。
 
@@ -744,7 +793,7 @@ mysql -u root -p sms_gateway < backend/sql/schema.sql
 ## 开发与测试
 
 ```bash
-# 后端测试（规则引擎、上报服务）
+# 后端测试（规则引擎、上报服务、转发调度与签名、SSRF 防护、凭据加解密）
 cd backend && mvn test
 
 # 管理后台类型检查 + 构建
