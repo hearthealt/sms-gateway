@@ -1,5 +1,6 @@
 package com.smsgateway.controller;
 
+import com.smsgateway.exception.EnrollTokenRequiredException;
 import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.ApiResult;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +41,20 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(EnrollmentRequiredException.class)
     public ResponseEntity<ApiResult<Void>> handleEnrollmentRequired(EnrollmentRequiredException e) {
         log.warn("Enrollment required: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ApiResult.error(403, e.getMessage()));
+    }
+
+    /**
+     * 首次注册没能出示本服务器的接入口令。
+     *
+     * <p>与上面那条同样是 403，理由也一样：这不是「请求写错了」，而是「你没被允许接入」，
+     * 而设备端只有拿到 403 才会把「去管理后台重新扫一张码」这条提示带到现场，400 会被它
+     * 当成终态错误直接放弃。
+     */
+    @ExceptionHandler(EnrollTokenRequiredException.class)
+    public ResponseEntity<ApiResult<Void>> handleEnrollTokenRequired(EnrollTokenRequiredException e) {
+        log.warn("Enrollment token required: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .body(ApiResult.error(403, e.getMessage()));
     }

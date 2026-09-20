@@ -42,6 +42,15 @@ public class DeviceService {
     /** 设备上线/掉线时推一条，让管理后台的设备列表自己刷新。 */
     private final AdminEventBroadcaster adminEvents;
 
+    /**
+     * 首次注册的服务器准入校验。
+     *
+     * <p>**只在设备不存在时用到**。已存在设备的重新注册走 {@link #verifyEnrollment}，
+     * 认的是设备身份而不是这张口令 —— 若那条路也要求口令，一开启准入，
+     * 所有老设备重装后就全部失联了。
+     */
+    private final DeviceEnrollTokenService enrollTokenService;
+
     @Value("${app.secret.key}")
     private String secretKey;
 
@@ -140,7 +149,16 @@ public class DeviceService {
             return new DeviceRegisterResponse(deviceToken, deviceId, device.getStatus());
         }
 
-        // 走到这里说明是台新设备。没有密钥就没法建立「这台设备是谁」的凭据，
+        // 走到这里说明是台新设备。
+        //
+        // 先过服务器准入，再谈设备身份 —— 顺序是有意的：注册接口必须免鉴权，
+        // 在这之前没有任何东西能区分「自己人」和「碰巧知道地址的人」，所以准入这道
+        // 必须最先判。没被允许接入，就没必要往下走。
+        //
+        // 未生成口令 / 口令被停用时 verify 直接放行，于是老部署升级后行为不变。
+        enrollTokenService.verify(request.getEnrollToken());
+
+        // 没有密钥就没法建立「这台设备是谁」的凭据，
         // 建出来的账号以后也永远无法重新注册 —— 与其留个隐患，不如现在拒绝。
         // 用 400 而不是 403：这是请求本身不完整，不是身份不通过。
         if (!hasSecret) {

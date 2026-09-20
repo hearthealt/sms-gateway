@@ -57,4 +57,19 @@ public class DeviceRegisterRequest {
     // 消息里会写清「升级 App」还是「去控制台签恢复码」。
     @Size(max = 128, message = "enrollSecret 超长（上限 128）")
     private String enrollSecret;
+
+    /**
+     * 服务器接入口令，随管理后台「快速连接」的二维码下发。
+     *
+     * <p>与上面的 {@code enrollSecret} 是**两回事**，不要混淆：那个证明「我是这台设备」
+     * （设备自己生成，只在 deviceId 已存在时校验）；这个证明「我被允许接入本服务器」
+     * （管理员生成，只在设备**不存在**、也就是首次注册时校验）。
+     *
+     * <p>服务端未启用接入口令时，这个字段留空即可 —— 校验会放行（见
+     * {@code DeviceEnrollTokenService.verify}）。
+     */
+    // 同样刻意不加 @NotBlank：缺字段要由 Service 判定并抛 403，
+    // 消息里才能写清「去管理后台重新扫码」这条能指路的话。
+    @Size(max = 64, message = "enrollToken 超长（上限 64）")
+    private String enrollToken;
 }

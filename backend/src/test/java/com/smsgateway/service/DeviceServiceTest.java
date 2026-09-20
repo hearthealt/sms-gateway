@@ -1,5 +1,6 @@
 package com.smsgateway.service;
 
+import com.smsgateway.exception.EnrollTokenRequiredException;
 import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.DeviceRegisterRequest;
 import com.smsgateway.model.dto.DeviceRegisterResponse;
@@ -27,6 +28,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -64,6 +66,14 @@ class DeviceServiceTest {
     /** 同 SmsServiceTest：服务里新加的依赖没在这里声明的话会被注入成 null */
     @Mock
     private AdminEventBroadcaster adminEvents;
+
+    /**
+     * 准入校验本身在 {@link DeviceEnrollTokenServiceTest} 里测；这里只关心
+     * DeviceService **在什么时机调用它**，所以给一个 mock。
+     * mock 的 verify 默认什么也不做，于是下面那些与口令无关的老用例不受影响。
+     */
+    @Mock
+    private DeviceEnrollTokenService enrollTokenService;
 
     @InjectMocks
     private DeviceService deviceService;
@@ -169,5 +179,47 @@ class DeviceServiceTest {
                 .hasMessageContaining("恢复码");
         // 校验失败必须整体拒绝，不能留下半截修改
         verify(deviceRepository, never()).save(any(SmsDevice.class));
+    }
+
+    @Test
+    @DisplayName("新设备首次注册时，把请求里的接入口令交给准入校验")
+    void newDevicePassesEnrollTokenToVerification() {
+        when(deviceRepository.findByDeviceId(DEVICE_ID)).thenReturn(Optional.empty());
+
+        DeviceRegisterRequest req = request(SECRET);
+        req.setEnrollToken("token-from-qr");
+        deviceService.register(req);
+
+        verify(enrollTokenService).verify("token-from-qr");
+    }
+
+    @Test
+    @DisplayName("准入校验不通过时整体拒绝，不建档")
+    void newDeviceRejectedWhenEnrollTokenInvalid() {
+        when(deviceRepository.findByDeviceId(DEVICE_ID)).thenReturn(Optional.empty());
+        doThrow(new EnrollTokenRequiredException("接入口令不正确"))
+                .when(enrollTokenService).verify(any());
+
+        assertThatThrownBy(() -> deviceService.register(request(SECRET)))
+                .isInstanceOf(EnrollTokenRequiredException.class);
+        verify(deviceRepository, never()).save(any(SmsDevice.class));
+    }
+
+    /**
+     * 这条守的是最容易踩、后果也最重的一个坑：若重新注册也要求接入口令，
+     * 那么管理员一开启准入，所有已注册设备只要重装一次（本地密钥随应用数据丢失、
+     * 或口令在此期间被轮换过）就再也注册不回来 —— 解绑与恢复码流程会变成唯一出路。
+     */
+    @Test
+    @DisplayName("已存在设备的重新注册不查接入口令 —— 开启准入不能把老设备挡在门外")
+    void reRegisterDoesNotRequireEnrollToken() {
+        when(deviceRepository.findByDeviceId(DEVICE_ID))
+                .thenReturn(Optional.of(existingDevice(HashUtil.sha256(SECRET))));
+
+        // 这台设备拿不出接入口令（老 App，或口令早已轮换），但它有设备密钥、能自证身份
+        DeviceRegisterResponse response = deviceService.register(request(SECRET));
+
+        assertThat(response.getDeviceToken()).isEqualTo(HashUtil.hmacSha256(DEVICE_ID, SECRET_KEY));
+        verify(enrollTokenService, never()).verify(any());
     }
 }

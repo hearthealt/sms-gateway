@@ -8,6 +8,7 @@ import com.smsgateway.model.entity.SmsDevice;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.util.HashUtil;
+import com.smsgateway.util.SecretGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -15,10 +16,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.Base64;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -32,8 +31,6 @@ public class AdminDeviceService {
     private final DeviceService deviceService;
 
     public static final String STATUS_DISABLED = "DISABLED";
-
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     /**
      * 签发一张恢复码：轮换该设备的重注册密钥，并把**明文**返回一次。
@@ -51,19 +48,12 @@ public class AdminDeviceService {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new IllegalArgumentException("设备不存在: " + deviceId));
 
-        String secret = randomSecret();
+        String secret = SecretGenerator.randomSecret();
         device.setEnrollSecretHash(HashUtil.sha256(secret));
         deviceRepository.save(device);
 
         log.warn("已为设备 {} 签发恢复码，其重注册密钥被轮换，旧密钥立即失效", deviceId);
         return new RecoveryCodeView(deviceId, secret);
-    }
-
-    /** 32 字节随机 → base64url（43 字符）：足够抗爆破，也便于人工转述。 */
-    private String randomSecret() {
-        byte[] bytes = new byte[32];
-        SECURE_RANDOM.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
     public PageResult<DeviceView> list(int page, int pageSize, String deviceId, String phone) {

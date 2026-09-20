@@ -184,6 +184,36 @@ CREATE TABLE IF NOT EXISTS api_key (
     INDEX idx_enabled (enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ---------------------------------------------------------------------------
+-- 6. Device enrollment token table (device_enroll_token) —— 单行表
+-- ---------------------------------------------------------------------------
+-- 「快速连接」用的接入口令：管理后台生成、随二维码下发，新设备**首次注册**时必须携带。
+--
+-- 挡的是这条路径：/api/device/register 必须免鉴权（设备得先能注册才拿得到令牌），
+-- 在那之前没有任何东西能区分「自己人」和「碰巧知道地址的人」—— 于是任何知道服务器
+-- 地址的人都能注册一台设备进来。
+--
+-- 单行表（id 恒为 1），不是每设备一张：现场用法是「一张码贴在那里，谁来了扫一下」，
+-- 全局一个口令 + 一键轮换最贴合，管理成本也最低。
+--
+-- token 存**明文**，取舍同 api_key：管理后台要把它显示进二维码，不可回读的哈希
+-- 做不到这一点。库被读走等同于口令泄露，属内部系统换取「管理员随时能再看到它」的取舍。
+--
+-- **表为空、或 enabled=0 时不校验**，注册接口退回开放 —— 这是刻意的向后兼容：
+-- 老部署灌完这份脚本后，新设备不会突然接不进来。要启用准入控制，得管理员在
+-- 控制台「快速连接」里显式生成口令。
+--
+-- 准入只在首次注册时判定。**已存在设备的重新注册不看这张表**，它走的是
+-- sms_device.enroll_secret_hash 那条路（见 DeviceService.verifyEnrollment）——
+-- 否则一开启口令，所有老设备重装后就全部失联了。
+CREATE TABLE IF NOT EXISTS device_enroll_token (
+    id BIGINT PRIMARY KEY COMMENT '恒为 1：这是单行表，不需要自增',
+    token VARCHAR(64) NOT NULL COMMENT '接入口令明文，32 字节随机 → base64url（43 字符）',
+    enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '0 = 关闭准入校验，注册接口退回开放',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 
 -- ============================================================================
 -- 二、补列 / 补索引（只为**已存在的旧库**服务）
