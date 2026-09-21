@@ -77,8 +77,17 @@ fun MiniBarChart(
 ) {
     if (bars.isEmpty()) return
 
-    val maxValue = bars.maxOf { it.value }.coerceAtLeast(1L)
-    val peakIndex = bars.indexOfFirst { it.value == maxValue }
+    // 峰值索引要按**真实**最大值找；柱子高度的分母才需要防 0。
+    //
+    // 这两件事不能合成一个值 —— 早先图省事写的是
+    //     val maxValue = bars.maxOf { it.value }.coerceAtLeast(1L)
+    //     val peakIndex = bars.indexOfFirst { it.value == maxValue }
+    // 于是全 0 的时候（新设备、或近 7 天一条短信都没有）分母被抬成了 1，而没有任何一根
+    // 的值是 1 —— indexOfFirst 返回 -1，下面 bars[peakIndex] 直接 IndexOutOfBoundsException，
+    // 主页一进来就闪退（真机上就是这么崩的，而且天天崩、躲不掉）。
+    val peakValue = bars.maxOf { it.value }
+    val scale = peakValue.coerceAtLeast(1L)
+    val peakIndex = bars.indexOfFirst { it.value == peakValue }
     var selected by remember(bars, defaultSelected) {
         mutableIntStateOf(defaultSelected.coerceIn(0, bars.lastIndex))
     }
@@ -120,7 +129,7 @@ fun MiniBarChart(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(plotHeight * (bar.value.toFloat() / maxValue))
+                                .height(plotHeight * (bar.value.toFloat() / scale))
                                 // 未选中的压暗一档：选中的那根要看得出来是哪根，
                                 // 但同一序列仍是同一个颜色（不靠色相区分）
                                 .background(
