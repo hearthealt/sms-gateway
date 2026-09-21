@@ -31,6 +31,23 @@ object HeartbeatSender {
     private val _lastSuccessAt = MutableStateFlow<Long?>(null)
     val lastSuccessAt: StateFlow<Long?> = _lastSuccessAt.asStateFlow()
 
+    @Volatile
+    private var hydrated = false
+
+    /**
+     * 首次访问时从 prefs 水合上一次的心跳时间。幂等，可从任意线程调用。
+     *
+     * 与 [GatewayState.ensureLoaded] 同一套写法、同一个理由：这个时间戳原本只活在
+     * 内存里，进程被杀就归零，界面于是在重开 App 时显示「服务刚起来，正在连服务器」——
+     * 设备到底是刚启动、还是已经断了十分钟，从这句话里看不出来。
+     */
+    @Synchronized
+    fun ensureLoaded(context: Context) {
+        if (hydrated) return
+        _lastSuccessAt.value = DevicePrefs.lastHeartbeatAt(context.applicationContext)
+        hydrated = true
+    }
+
     /** @return 是否成功（HTTP 2xx）。未注册或网络失败返回 false。 */
     suspend fun send(context: Context): Boolean {
         val app = context.applicationContext
@@ -75,7 +92,9 @@ object HeartbeatSender {
             }
 
             applyServerStatus(app, response.body()?.data?.status)
-            _lastSuccessAt.value = System.currentTimeMillis()
+            val at = System.currentTimeMillis()
+            DevicePrefs.setLastHeartbeatAt(app, at)
+            _lastSuccessAt.value = at
             true
         } catch (e: Exception) {
             Log.w(TAG, "Heartbeat failed", e)

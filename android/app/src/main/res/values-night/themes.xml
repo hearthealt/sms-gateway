@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色模式下的同名主题。
+
+      父主题必须从 Light 换成非 Light 的那个：Compose 里的颜色由 AppColor 按
+      isSystemInDarkTheme() 自己决定，但**窗口**这一层（背景、系统栏装饰、
+      对话框的默认外观）归 android 框架管，Compose 管不到。如果这里仍用
+      Theme.Material.Light，深色模式下冷启动会先闪一帧白底、系统级控件也是浅色的。
+
+      windowBackground 必须**逐字等于** AppColor 里 DarkPalette.screen 的值
+      （0xFF0E1116）。这个 item 存在的全部意义就是「冷启动那一帧跟紧接其后的
+      Compose 页面同色」，两个值差一档，它就只剩装饰作用了。
+    -->
+    <style name="Theme.SmsGateway" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0E1116</item>
+    </style>
+</resources>

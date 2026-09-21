@@ -61,6 +61,26 @@ object DevicePrefs {
      */
     const val KEY_GATEWAY_RUNNING = "gateway_running"
 
+    /**
+     * 最近一次心跳成功的时间（epoch 毫秒）。
+     *
+     * 落盘的理由和 [KEY_GATEWAY_RUNNING] 一样：它原本只活在 [HeartbeatSender] 的内存态里，
+     * 进程一被系统杀掉就归零。于是重新打开 App 时界面会显示「服务刚起来，正在连服务器」——
+     * 哪怕这台设备已经跑了三天、只是刚才被杀了一次，也看不出「到底是刚启动，还是已经断了」。
+     * 落盘之后界面能如实说「最后心跳 12 分钟前」。
+     */
+    const val KEY_LAST_HEARTBEAT_AT = "last_heartbeat_at"
+
+    /**
+     * 当前这一次网关启动的时刻（epoch 毫秒）。
+     *
+     * 它补的是 [KEY_LAST_HEARTBEAT_AT] 补不上的那一半：心跳时间只回答「上次成功是什么
+     * 时候」，回答不了「一次都没成功过」。而后者必须再拿「这次启动到现在过了多久」去比，
+     * 才能分出是「刚起来，正在连」还是「压根连不上」—— 少了它，一台从启动就没信号的
+     * 设备会永远显示「服务刚起来」，哪怕它已经这样挂了三天。
+     */
+    const val KEY_GATEWAY_STARTED_AT = "gateway_started_at"
+
     /** 一次性修复标记：早期版本把上传失败的行错标成 failed，需要扫回 pending 一次。 */
     const val KEY_STRANDED_SWEPT = "stranded_rows_swept"
 
@@ -73,7 +93,13 @@ object DevicePrefs {
     fun serverUrl(context: Context): String =
         get(context).getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
 
-    /** 设备标识。未注册时为空串，展示用的「未设置」由界面层格式化。 */
+    /**
+     * 设备标识。
+     *
+     * **第一次打开应用时就已经生成**（见 [getOrCreateDeviceId]），正常装机不会是空串 ——
+     * 空只出现在「升级前装的老版本、之后还没启动过」这一种情况，所以不要拿它空不空
+     * 当「有没有注册」的判据：那个是 [isRegistered]，它还要看令牌。
+     */
     fun deviceId(context: Context): String =
         get(context).getString(KEY_DEVICE_ID, "").orEmpty()
 
@@ -133,6 +159,15 @@ object DevicePrefs {
 
     /** 历史上被大量设备共用的 ANDROID_ID 坏值，见 newDeviceId()。 */
     private const val LEGACY_BROKEN_ANDROID_ID = "9774d56d682e549c"
+
+    /**
+     * 心跳时间戳最短落盘间隔。
+     *
+     * 刻意明显小于 90 秒的判离线阈值（服务端和界面用的是同一个值）：最坏情况下盘上的
+     * 值比真值落后这么多，重启后界面先读到的就是旧值 —— 若这个间隔逼近 90 秒，
+     * 服务刚起来、第一次心跳还没回来的那一瞬就会被误报成「连接中断」。
+     */
+    private const val HEARTBEAT_PERSIST_MIN_INTERVAL_MS = 60_000L
 
     /**
      * 取设备标识，没有就生成一个并**立即同步落盘**。
@@ -248,4 +283,41 @@ object DevicePrefs {
 
     fun markStrandedRowsSwept(context: Context) =
         get(context).edit().putBoolean(KEY_STRANDED_SWEPT, true).apply()
+
+    /** 最近一次心跳成功的时间，从未成功过返回 null。 */
+    fun lastHeartbeatAt(context: Context): Long? =
+        get(context).getLong(KEY_LAST_HEARTBEAT_AT, 0L).takeIf { it > 0L }
+
+    /**
+     * 记一次心跳成功。
+     *
+     * 用 apply() 而非 commit()：这个值每 30 秒写一次，丢一次的代价只是界面上少 30 秒
+     * 的精度，不值得同步落盘卡住心跳那一步。
+     *
+     * 并且 [HEARTBEAT_PERSIST_MIN_INTERVAL_MS] 内不重复落盘 —— 界面读它只为显示
+     * 「最后心跳 12 分钟前」这种分钟级的相对时间，30 秒的精度用不上，却会让 7×24
+     * 跑着的设备每天多写近三千次。与 [setDisabled] 上那条「值没变就不落盘」同一个取向。
+     * 内存里的那份（[HeartbeatSender.lastSuccessAt]）不受影响，仍然每次心跳都更新，
+     * 所以界面在进程活着时依旧是实时的。
+     */
+    fun setLastHeartbeatAt(context: Context, at: Long) {
+        val last = lastHeartbeatAt(context)
+        if (last != null && at - last < HEARTBEAT_PERSIST_MIN_INTERVAL_MS) return
+        get(context).edit().putLong(KEY_LAST_HEARTBEAT_AT, at).apply()
+    }
+
+    /** 网关本次启动的时刻，从未启动过返回 null。 */
+    fun gatewayStartedAt(context: Context): Long? =
+        get(context).getLong(KEY_GATEWAY_STARTED_AT, 0L).takeIf { it > 0L }
+
+    /** 传 null 表示清掉（网关已停止，不再有「本次启动」可言）。 */
+    fun setGatewayStartedAt(context: Context, at: Long?) {
+        val editor = get(context).edit()
+        if (at == null) {
+            editor.remove(KEY_GATEWAY_STARTED_AT)
+        } else {
+            editor.putLong(KEY_GATEWAY_STARTED_AT, at)
+        }
+        editor.apply()
+    }
 }

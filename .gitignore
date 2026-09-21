@@ -33,6 +33,7 @@ android/local.properties
 
 # 排查问题时在真机上截的图，纯过程产物，没有留存价值
 android/tools/preview/
+android/.verify/
 
 # 部署凭据（MySQL / Redis 口令、系统主密钥、管理员口令）。
 # 与 release.jks 同等重要 —— 泄漏 APP_SECRET_KEY 等于泄漏设备令牌的签发权。

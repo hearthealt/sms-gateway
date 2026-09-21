@@ -13,12 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.ui.AppCard
-import com.smsgateway.app.ui.AppColor
+import com.smsgateway.app.ui.theme.AppColor
+import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.ui.AppScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -94,7 +93,7 @@ fun QrExportScreen(
                 }
                 Text(
                     text = "在另一台设备上点顶部的「扫一扫」对准即可。",
-                    fontSize = 12.sp,
+                    style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
                 // 口令是这个应用里唯一会被二维码带出去、且能在服务端"起作用"的凭证，
@@ -102,14 +101,14 @@ fun QrExportScreen(
                 if (state.enrollToken.isNotBlank()) {
                     Text(
                         text = "注意：这张码包含服务器的接入口令，拿到它的人都能把一台设备接入本服务器。",
-                        fontSize = 12.sp,
+                        style = AppTypography.mono(AppTypography.caption),
                         color = AppColor.Danger
                     )
                 }
                 SelectionContainer {
                     Text(
                         text = payload,
-                        fontSize = 12.sp,
+                        style = AppTypography.caption,
                         fontFamily = FontFamily.Monospace
                     )
                 }

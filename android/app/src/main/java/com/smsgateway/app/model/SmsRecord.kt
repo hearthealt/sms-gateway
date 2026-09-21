@@ -25,8 +25,12 @@ data class DeviceSmsStats(
 /**
  * 服务端的短信记录（对应后端 SmsView）。
  *
- * status 是**服务端的判定**：RECEIVED 已收下、DUPLICATE 内容重复、IGNORED 被采集规则忽略。
+ * status 是**服务端的判定**：RECEIVED 已收下、IGNORED 被采集规则忽略。
  * 这是本地数据看不到的信息 —— 本地只知道"传没传上去"。
+ *
+ * **没有 DUPLICATE**：重复到达不新插行（服务端撞唯一索引后只在原行上累加 duplicate_count），
+ * 所以「内容重复」不是一种 status。判断有没有重复要看 duplicateCount，而那个字段
+ * 归管理端展示（设备端这份记录列表不带它）。
  */
 data class SmsRecord(
     val id: Long = 0,

@@ -18,18 +18,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.smsgateway.app.ConnectOutcome
 import com.smsgateway.app.ConnectStage
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppCard
-import com.smsgateway.app.ui.AppColor
+import com.smsgateway.app.ui.theme.AppColor
+import com.smsgateway.app.ui.theme.AppSpacing
+import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.ui.AppScreen
 
 /**
@@ -70,17 +70,27 @@ fun QuickConnectScreen(
     // 那个解析结果也叫 result，重名会被编译器点名。
     val currentOutcome = outcome
 
-    // 结论从 ViewModel 的持久字段挪到本地：留在那儿的话，下次进这个页面又会冒出来。
-    LaunchedEffect(state.connectResult) {
-        state.connectResult?.let {
-            outcome = it
-            scanning = false
-            viewModel.clearConnectResult()
-        }
+    // 这个页面「参与过」的连接：本页点过确认，或进来时它已经在跑。
+    // 连接跑在 viewModelScope 里，用户完全可以在它跑完之前退出去 —— 那条结论
+    // 会在**下一次**进这个页面时才到位。光靠 onDispose 清是不够的：
+    // onDispose 清的是它离开那一刻的值（那时还是 null），清不掉后到的那一条。
+    // 所以判定必须落在「这次页面有没有份」上，而不是「state 里有没有值」。
+    var awaiting by remember { mutableStateOf(false) }
+    LaunchedEffect(state.connectStage) {
+        if (state.connectStage != null) awaiting = true
     }
 
-    // 离开页面时再清一次。连接是在 ViewModel 里跑的，用户完全可以在它跑完之前退出去 ——
-    // 那条结论若留在 state 里，会在**下一次**进这个页面时冒出来，冒充成这一次的结果。
+    // 结论从 ViewModel 的持久字段挪到本地：留在那儿的话，下次进这个页面又会冒出来。
+    LaunchedEffect(state.connectResult) {
+        val result = state.connectResult ?: return@LaunchedEffect
+        if (!awaiting) return@LaunchedEffect
+        awaiting = false
+        outcome = result
+        scanning = false
+        viewModel.clearConnectResult()
+    }
+
+    // 离开页面时顺手清一次，别把没人认领的结论留在 state 里过夜。
     DisposableEffect(Unit) {
         onDispose { viewModel.clearConnectResult() }
     }
@@ -172,6 +182,7 @@ fun QuickConnectScreen(
                 manualOpen = false
                 outcome = null
                 error = null
+                awaiting = true
                 viewModel.quickConnect(config.url.orEmpty(), config.enrollToken, config.identity)
             }
         )
@@ -183,19 +194,17 @@ fun QuickConnectScreen(
             onDismissRequest = { pendingConfig = null },
             title = { Text(if (config.hasIdentity) "确认采用设备身份" else "确认连接") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
                     Text(
                         text = "即将把服务器地址改成下面这个，并立即注册本机。请核对无误 —— " +
                             "地址决定了本机所有短信和验证码发送到哪里。",
-                        fontSize = 13.sp
+                        style = AppTypography.bodySmall
                     )
                     // 完整地址以等宽字体展示，不截断：用户必须能看清每一个字符
                     SelectionContainer {
                         Text(
                             text = config.url.orEmpty(),
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium
+                            style = AppTypography.mono(AppTypography.bodySmall)
                         )
                     }
 
@@ -205,15 +214,13 @@ fun QuickConnectScreen(
                         Text(
                             text = "⚠ 这张码同时携带了设备身份，采用之后本机将以该设备的名义" +
                                 "上报短信 —— 请先确认这就是你自己的设备。",
-                            fontSize = 13.sp,
+                            style = AppTypography.bodySmall,
                             color = AppColor.Danger
                         )
                         SelectionContainer {
                             Text(
                                 text = identity.deviceId,
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Medium
+                                style = AppTypography.mono(AppTypography.bodySmall)
                             )
                         }
                     }
@@ -223,7 +230,7 @@ fun QuickConnectScreen(
                     if (config.enrollToken != null) {
                         Text(
                             text = "这张码包含服务器的接入口令。",
-                            fontSize = 12.sp,
+                            style = AppTypography.caption,
                             color = AppColor.InkMuted
                         )
                     }
@@ -232,6 +239,7 @@ fun QuickConnectScreen(
             confirmButton = {
                 TextButton(onClick = {
                     outcome = null
+                    awaiting = true
                     viewModel.quickConnect(
                         url = config.url.orEmpty(),
                         enrollToken = config.enrollToken,
@@ -306,11 +314,11 @@ private fun ManualInputDialog(
                 )
                 Text(
                     text = "地址不必写 http://。把「复制连接信息」整段粘进上面会自动拆出口令。",
-                    fontSize = 12.sp,
+                    style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
                 error?.let {
-                    Text(text = it, fontSize = 13.sp, color = AppColor.Danger)
+                    Text(text = it, style = AppTypography.bodySmall, color = AppColor.Danger)
                 }
             }
         },
@@ -346,18 +354,20 @@ private fun CameraView(hint: String, isError: Boolean, onDecoded: (String) -> Un
 
         Text(
             text = hint,
-            fontSize = 13.sp,
+            style = AppTypography.bodySmall,
             color = Color.White,
             textAlign = TextAlign.Center,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp, start = 24.dp, end = 24.dp)
-                // 出错时染红：连着扫错几次却看到同一句提示，人会以为应用卡住了
+                .padding(bottom = AppSpacing.xxl, start = AppSpacing.xl, end = AppSpacing.xl)
+                // 出错时染红：连着扫错几次却看到同一句提示，人会以为应用卡住了。
+                // 这两个色值不跟主题走：它压在相机取景画面上，底不是页面底色，
+                // 深色模式下把黑底调浅反而会让白字糊在画面上。
                 .background(
                     if (isError) Color(0xCCB3261E) else Color(0x99000000),
                     RoundedCornerShape(20.dp)
                 )
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = AppSpacing.md, vertical = AppSpacing.xs)
         )
     }
 }
@@ -372,10 +382,10 @@ private fun IdleView(message: String, onRetry: () -> Unit, onManual: () -> Unit)
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = message, fontSize = 14.sp, color = AppColor.InkSecondary)
-        Spacer(modifier = Modifier.height(20.dp))
+        Text(text = message, style = AppTypography.bodyMedium, color = AppColor.InkSecondary)
+        Spacer(modifier = Modifier.height(AppSpacing.lg))
         Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新申请相机权限") }
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(AppSpacing.xs))
         OutlinedButton(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("手动输入地址") }
     }
 }
@@ -396,7 +406,7 @@ private fun ConnectingView(stage: ConnectStage) {
                 ConnectStage.PROBING -> "正在测试连接…"
                 ConnectStage.REGISTERING -> "正在注册设备…"
             },
-            fontSize = 15.sp,
+            style = AppTypography.bodyLarge,
             fontWeight = FontWeight.Medium,
             color = AppColor.Ink
         )
@@ -427,19 +437,18 @@ private fun ResultView(result: ConnectOutcome, onRetry: () -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = if (result.ok) "连接成功" else "连接失败",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
+                        style = AppTypography.h3,
                         color = if (result.ok) AppColor.Success else AppColor.Danger
                     )
                     Text(
                         text = result.message,
-                        fontSize = 13.sp,
-                        color = if (result.ok) AppColor.Success else AppColor.Danger
+                        style = AppTypography.bodySmall,
+                        color = AppColor.Ink
                     )
                     if (result.ok) {
                         Text(
                             text = "返回主页即可看到设备状态。",
-                            fontSize = 12.sp,
+                            style = AppTypography.caption,
                             color = AppColor.InkMuted
                         )
                     }

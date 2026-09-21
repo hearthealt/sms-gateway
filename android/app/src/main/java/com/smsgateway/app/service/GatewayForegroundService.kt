@@ -9,9 +9,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.smsgateway.app.MainActivity
 import com.smsgateway.app.R
+import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
@@ -75,7 +77,10 @@ class GatewayForegroundService : Service() {
         createNotificationChannel()
         serviceAlive = true
         liveInstance = this
-        GatewayState.set(this, true)
+        // markStarted 而不是 set(true)：这里同时是「本次启动时刻」唯一的写入点。
+        // 它只在实例创建时执行一次，正好等于一条命的起点；onStartCommand 会重复来，
+        // 放那儿就会被每次启动请求刷新（理由见 GatewayState.markStarted）。
+        GatewayState.markStarted(this)
 
         // 被「停止网关」拦在本地的那批短信，现在该重新排队了 —— 界面承诺的是
         // 「短信会留在本地，不会上报」，恢复上报的时机就是网关重新跑起来。
@@ -92,14 +97,21 @@ class GatewayForegroundService : Service() {
         //
         // 服务实例存在就必须是前台服务并持续心跳，这是这个类的不变式，
         // 挂在哪个回调上只是实现细节。
-        startForeground(NOTIFICATION_ID, buildNotification("已连接"))
+        // 先水合再算文案：开机广播/系统重启拉起进程时，这个类往往是全进程第一个碰
+        // 心跳状态的地方，不水合就只会显示「等待首次心跳」——哪怕这台设备已经连了三天。
+        HeartbeatSender.ensureLoaded(this)
+        startForeground(NOTIFICATION_ID, buildNotification(notificationText()))
         if (heartbeatJob?.isActive != true) {
             heartbeatJob = startHeartbeatLoop()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification("已连接"))
+        // 用 notificationText() 而不是写死一句「已连接」：这个回调不只是「用户点了启动」
+        // 会走，应用每次打开的对账补发（见 DashboardViewModel.ensureGatewayServiceRunning）
+        // 也会走一遍。写死的话，一台已被管理员禁用、或服务器根本不可达的设备，
+        // 会在每次打开应用的那一瞬间把通知刷成「已连接」，几十秒后才被心跳纠正回来。
+        startForeground(NOTIFICATION_ID, buildNotification(notificationText()))
 
         // 每次收到启动命令都重申一次运行态，而不是只在 onCreate 里置位。
         //
@@ -141,9 +153,19 @@ class GatewayForegroundService : Service() {
 
     private fun startHeartbeatLoop(): Job = serviceScope.launch {
         while (isActive && serviceAlive) {
-            // 心跳实现与状态判定都在 HeartbeatSender 里，界面上的「检查状态」按钮走同一份逻辑
-            HeartbeatSender.send(this@GatewayForegroundService)
-            updateNotification(notificationText())
+            // 整轮包一层：心跳与通知更新里的意外异常不能把循环带走。
+            // 循环一旦退出，服务还活着、通知还挂着、运行态还是 true，而**再没有任何人
+            // 发心跳** —— 后端判离线，界面却显示「已启动」，现场只会以为是对面服务器的问题。
+            // 这类「活着的空壳」比服务直接挂掉更难查，所以宁可把异常吞在这一轮里。
+            try {
+                // 心跳实现与状态判定都在 HeartbeatSender 里，界面上的「检查状态」按钮走同一份逻辑
+                HeartbeatSender.send(this@GatewayForegroundService)
+                updateNotification(notificationText())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Heartbeat round failed", e)
+            }
 
             delay(
                 if (DeviceStatus.isDisabled(this@GatewayForegroundService)) {
@@ -163,7 +185,10 @@ class GatewayForegroundService : Service() {
         val at = HeartbeatSender.lastSuccessAt.value
         return when {
             DeviceStatus.isDisabled(this) -> "已被管理员禁用，等待恢复"
-            at == null -> "设备未注册"
+            // 「从未成功过」不等于「没注册」：注册好了但服务器一直不可达时也是这个状态，
+            // 报「未注册」会把人引到重新注册上去，越修越远
+            !DevicePrefs.isRegistered(this) -> "设备未注册"
+            at == null -> "等待首次心跳"
             else -> "心跳 ${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))}"
         }
     }

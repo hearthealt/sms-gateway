@@ -4,6 +4,15 @@
       主题继承自框架的 Material 主题：工程用的是 ComponentActivity + Compose，
       没有引入 AppCompat，因此不能用 Theme.AppCompat.* 作为父主题。
       NoActionBar 是因为界面自己画 TopAppBar。
+
+      windowBackground 跟着 Compose 的页面底色走：冷启动那一帧 Compose 还没画出来，
+      窗口底色就是用户看到的东西。默认白色会在深色模式下闪一下白屏。
+      深色那一份在 values-night/themes.xml。
+
+      这个值必须**逐字等于** AppColor 里 LightPalette.screen 的值（0xFFF4F6FA）——
+      两个值对不上，冷启动那一帧就仍是一道色差，这个 item 等于白写。
     -->
-    <style name="Theme.SmsGateway" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.SmsGateway" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFF4F6FA</item>
+    </style>
 </resources>

@@ -50,7 +50,9 @@ object DeviceName {
      * 取值与管控台设备列表「设备ID」列显示的是同一段（那边剥掉 `android-` 前缀后取前 8 位），
      * 所以现场两台手机摆一起，能一眼对上后台哪一行是哪台。
      *
-     * 注册之前设备标识还是空的，那时只有机型名；注册后第一次心跳（≤30 秒）就会补上。
+     * 设备标识在应用启动时就生成（见 DashboardViewModel.loadSavedState），所以名字
+     * **从第一次打开就带这段后缀**，注册请求里带的就是最终形态 —— 不会出现
+     * 「后台先按机型名记下、之后被心跳改成带后缀」这种前后不一致。
      */
     private fun idSuffix(context: Context): String =
         DevicePrefs.deviceId(context)

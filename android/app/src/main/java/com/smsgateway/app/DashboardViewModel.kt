@@ -84,6 +84,14 @@ data class DashboardState(
      */
     /** 最近一次心跳成功的时刻（epoch 毫秒），界面据此算相对时间。 */
     val lastHeartbeatAt: Long? = null,
+    /**
+     * 网关本次启动的时刻（epoch 毫秒），没在跑时为 null。
+     *
+     * 与 [lastHeartbeatAt] 配套：那个回答「上次成功是什么时候」，这个回答「这次是什么
+     * 时候起来的」。两个都要有才分得出「刚起来、正在连」和「起来很久了、一次都没连上」
+     * —— 后者的 lastHeartbeatAt 也是 null，只看它会把一台断了三天的设备说成「刚启动」。
+     */
+    val gatewayStartedAt: Long? = null,
     val pendingCount: Int = 0,
     val todaySmsCount: Int = 0,
     val todayCodeCount: Int = 0,
@@ -127,6 +135,8 @@ data class DashboardState(
     // 服务端记录页
     val smsRecords: List<SmsRecord> = emptyList(),
     val smsTotal: Long = 0,
+    /** 当前已加载到第几页（从 1 开始）。「加载更多」读它 +1。 */
+    val smsPage: Int = 1,
     val smsLoading: Boolean = false,
     val smsError: String? = null,
 
@@ -180,9 +190,38 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         loadSavedState()
         restoreRetrofitConfig()
         tryAutoFillPhone()
+        ensureGatewayServiceRunning()
         startMonitoring()
         observeService()
         observeUploads()
+    }
+
+    /**
+     * 对账：prefs 说「网关该在跑」，那就确保前台服务真的在跑。
+     *
+     * 这一步补的是一个死锁，症状是「启动过网关 → 上滑关掉 App → 过一会进来，
+     * 界面卡在『已启动，等待心跳』，而后端一直显示离线」：
+     *
+     * 1. 上滑清理杀掉进程时 `onDestroy` 不会执行，所以 prefs 里 `gateway_running`
+     *    仍是 true —— 界面据此显示「已启动」，而服务早就没了；
+     * 2. 系统那条 `START_STICKY` 在没有电池白名单的机器上未必把服务拉回来
+     *    （主页那条橙色横幅提示的就是这件事）；
+     * 3. 于是没有任何人在发心跳，而**重开 App 这条路径上原先是没有任何一行代码
+     *    会把服务重新拉起来的** —— `GatewayForegroundService.start` 只被开机广播
+     *    和用户点开关调用。开关此时还会反着来：它读的是持久化标志（true），
+     *    点下去走的是「停止」，对着一个不存在的服务调 stopService，界面毫无反应。
+     *
+     * 放在这里而不是 MainActivity：服务的运行态本来就由 ViewModel 订阅并展示，
+     * 「该在跑」与「真的在跑」的对账属于同一件事。此刻界面已在前台，
+     * Android 12+ 对前台服务启动的限制也不适用。
+     */
+    private fun ensureGatewayServiceRunning() {
+        val app = getApplication<Application>()
+        // 未注册就没得可跑：服务起来了也只会每 30 秒空转一次（发送器自己会跳过）
+        if (!DevicePrefs.isRegistered(app)) return
+        if (GatewayState.isRunning(app)) {
+            GatewayForegroundService.start(app)
+        }
     }
 
     /**
@@ -211,13 +250,26 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
         viewModelScope.launch {
+            GatewayState.startedAt.collect { at ->
+                _state.update { it.copy(gatewayStartedAt = at) }
+            }
+        }
+        viewModelScope.launch {
             HeartbeatSender.lastSuccessAt.collect { at ->
                 _state.update { it.copy(lastHeartbeatAt = at) }
             }
         }
         viewModelScope.launch {
             DeviceStatus.disabled.collect { disabled ->
-                _state.update { it.copy(isDisabled = disabled) }
+                // 解除禁用的同时清掉上一次的检查结论。留着的话，这台设备**下次**再被
+                // 禁用时，横幅一冒出来就顶着一句「已恢复」—— 那是上一轮的结论，
+                // 而用户还没点过任何按钮。
+                _state.update {
+                    it.copy(
+                        isDisabled = disabled,
+                        testResult = if (disabled) it.testResult else null
+                    )
+                }
             }
         }
 
@@ -247,9 +299,22 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         // 网关运行态的真源在 prefs 里（见 GatewayState），这里先水合再订阅，
         // 否则订阅到的是内存初值 false，界面会先闪一下「已停止」。
         GatewayState.ensureLoaded(app)
+        // 上一次心跳的时间也一起水合：否则进程重建后它归零，界面显示「服务刚起来」，
+        // 看不出设备是刚启动还是已经断了十分钟
+        HeartbeatSender.ensureLoaded(app)
         _state.update {
             it.copy(
-                deviceId = DevicePrefs.deviceId(app),
+                // 用「取或生成」而不是纯读：设备身份在启动这一步就落定，不再等注册。
+                //
+                // 这不只是显示问题。设备名末尾要缀一段设备标识（见 DeviceName），
+                // 而注册请求里带的正是这个名字 —— 等到注册时才生成的话，注册那一刻
+                // 还没有标识，后台先记成「Redmi K60 Ultra」，之后第一次心跳又变成
+                // 「Redmi K60 Ultra · a5362900」。同型号两台机器在后台本来就分不出来，
+                // 而这段后缀存在的唯一理由就是分辨它们，偏偏在最该起作用的那一刻缺席。
+                //
+                // 值取自 SSAID（见 newDeviceId），启动时生成与注册时生成完全一致，
+                // 所以服务端不会因此多出一条设备记录。
+                deviceId = DevicePrefs.getOrCreateDeviceId(app),
                 deviceToken = DevicePrefs.deviceToken(app),
                 phone = DevicePrefs.phone(app),
                 serverUrl = DevicePrefs.serverUrl(app),
@@ -436,7 +501,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun tryAutoFillPhone() {
         val app = getApplication<Application>()
-        if (DevicePrefs.phone(app).isNotBlank()) return
+        val existing = DevicePrefs.phone(app)
+        if (existing.isNotBlank()) {
+            backfillPhoneSubId(app, existing)
+            return
+        }
 
         // 优先按键列出卡再读：这样能一并记住号码属于哪张卡（多卡时判断归属性要用）
         val slot = DevicePhone.primarySlot(app)
@@ -450,6 +519,25 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         val number = DevicePhone.read(app) ?: return
         DevicePrefs.setPhone(app, number, -1)
         _state.update { it.copy(phone = number) }
+    }
+
+    /**
+     * 补上「号码属于哪张卡」。
+     *
+     * 号码本身**不动**（手填的值优先，也可能是用户改过的），只在能确定「盘上那个号码
+     * 就是这张卡读出来的」时才把 subId 补进去。要补的原因：早期版本列不出 SIM 卡时
+     * 走的是默认读取那条路，subId 只能记 -1，而 [SmsReceiver.resolveSmsPhone] 正是
+     * 拿它判断「这条短信是不是来自另一张卡」—— 恒为 -1 等于这个判断永远不成立，
+     * 一条从副卡进来的验证码会被记成主卡的号码，而服务端是按号码缓存验证码的。
+     */
+    private fun backfillPhoneSubId(app: Application, existing: String) {
+        if (DevicePrefs.phoneSubId(app) >= 0) return
+
+        val slot = DevicePhone.primarySlot(app) ?: return
+        val number = slot.number ?: return
+        if (!DevicePhone.sameNumber(number, existing)) return
+
+        DevicePrefs.setPhone(app, number, slot.subscriptionId)
     }
 
     /**
@@ -704,15 +792,24 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     // ---------- 队列页 ----------
 
     fun refreshQueue() {
-        viewModelScope.launch {
-            _state.update { it.copy(queueLoading = true) }
-            try {
-                val rows = database.smsQueueDao().getOutstanding()
-                _state.update { it.copy(queue = rows, queueLoading = false) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Load queue failed", e)
-                _state.update { it.copy(queueLoading = false) }
-            }
+        viewModelScope.launch { refreshQueueNow() }
+    }
+
+    /**
+     * 队列读取的挂起版本。
+     *
+     * 下拉刷新要「等这次读完再收手」，而 [refreshQueue] 只是把活派给 viewModelScope
+     * 就返回了 —— 从外面看它永远是瞬时完成的，转圈会在数据回来之前就被收掉。
+     * 所以真正干活的是这个版本，[refreshQueue] 退化成一层壳。
+     */
+    suspend fun refreshQueueNow() {
+        _state.update { it.copy(queueLoading = true) }
+        try {
+            val rows = database.smsQueueDao().getOutstanding()
+            _state.update { it.copy(queue = rows, queueLoading = false) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Load queue failed", e)
+            _state.update { it.copy(queueLoading = false) }
         }
     }
 
@@ -722,7 +819,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 database.smsQueueDao().retryNow(id)
                 SmsUploadWorker.enqueue(getApplication())
-                refreshQueue()
+                refreshQueueNow()
             } catch (e: Exception) {
                 Log.e(TAG, "Retry SMS $id failed", e)
             }
@@ -733,7 +830,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 database.smsQueueDao().deleteById(id)
-                refreshQueue()
+                refreshQueueNow()
             } catch (e: Exception) {
                 Log.e(TAG, "Delete SMS $id failed", e)
             }
@@ -761,43 +858,70 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     // ---------- 服务端记录页 ----------
 
     fun loadServerSms(page: Int = 1) {
-        viewModelScope.launch {
-            _state.update { it.copy(smsLoading = true, smsError = null) }
-            try {
-                val response = RetrofitClient.getApiService()
-                    .mySms(page = page, pageSize = SMS_PAGE_SIZE, includeIgnored = true)
+        viewModelScope.launch { loadServerSmsNow(page) }
+    }
 
-                val body = response.body()
-                if (response.isSuccessful && body?.data != null) {
-                    _state.update {
-                        it.copy(
-                            smsRecords = body.data.records,
-                            smsTotal = body.data.total,
-                            smsLoading = false
-                        )
+    /**
+     * 「加载更多」：把下一页接在现有列表后面。
+     *
+     * 已经有请求在飞就不发（列表底部那个按钮会被连点），读到最后一页也不发 ——
+     * 这两个判断都基于调用瞬间的状态，而真正的并发保护在 [_state] 的原子更新里
+     * （append 走 `current.smsRecords`，不会拿旧快照覆盖）。
+     */
+    fun loadMoreServerSms() {
+        val current = _state.value
+        if (current.smsLoading) return
+        if (current.smsRecords.size >= current.smsTotal) return
+        viewModelScope.launch { loadServerSmsNow(page = current.smsPage + 1, append = true) }
+    }
+
+    /** 挂起版本，理由同 [refreshQueueNow]：下拉刷新要等到这次请求真的回来。 */
+    suspend fun loadServerSmsNow(page: Int = 1, append: Boolean = false) {
+        _state.update { it.copy(smsLoading = true, smsError = null) }
+        try {
+            val response = RetrofitClient.getApiService()
+                .mySms(page = page, pageSize = SMS_PAGE_SIZE, includeIgnored = true)
+
+            val body = response.body()
+            if (response.isSuccessful && body?.data != null) {
+                _state.update { current ->
+                    val merged = if (append) {
+                        // 拼接前按 id 去重：翻页期间若有新短信进来，服务端的分页会整体
+                        // 后移，第二页可能把第一页已经给过的记录再发一遍。不去重的话，
+                        // 列表就出现两条同 id 的记录 —— 而 LazyColumn 的 key 正是 id，
+                        // 撞 key 直接抛异常崩掉，不是视觉上的重复。
+                        (current.smsRecords + body.data.records).distinctBy { it.id }
+                    } else {
+                        body.data.records
                     }
-                    // 列表刷新时同步刷新计数，保证两者永远一致
-                    refreshServerStats()
-                } else {
-                    _state.update {
-                        it.copy(
-                            smsLoading = false,
-                            smsError = "读取失败（HTTP ${response.code()}）" +
-                                (parseErrorMessage(response.errorBody()?.string())?.let { m -> "：$m" }
-                                    ?: "")
-                        )
-                    }
+                    current.copy(
+                        smsRecords = merged,
+                        smsTotal = body.data.total,
+                        smsPage = page,
+                        smsLoading = false
+                    )
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Load server SMS failed", e)
+                // 列表刷新时同步刷新计数，保证两者永远一致
+                refreshServerStats()
+            } else {
                 _state.update {
                     it.copy(
                         smsLoading = false,
-                        smsError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
+                        smsError = "读取失败（HTTP ${response.code()}）" +
+                            (parseErrorMessage(response.errorBody()?.string())?.let { m -> "：$m" }
+                                ?: "")
                     )
                 }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Load server SMS failed", e)
+            _state.update {
+                it.copy(
+                    smsLoading = false,
+                    smsError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
+                )
             }
         }
     }
