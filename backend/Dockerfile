@@ -9,9 +9,10 @@ ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
-# 改名要跟 backend/pom.xml 里的 <version> 同步（jar 名由它决定），
-# 顺带 .github/workflows/release.yml 里挂 Release 那步也是同一个名字。
-COPY target/sms-gateway-backend-1.0.2.jar app.jar
+# 用通配符，不写死版本号：jar 名由 pom 的 <version> 决定，写死的话每发一版都要改这里
+# （漏改就是构建失败）。**target 里只能有一个 jar** —— 换了版本又没 clean 的话会有两个，
+# 那时 docker 会直接报「more than one source file」而不是悄悄拿错一个。
+COPY target/sms-gateway-backend-*.jar app.jar
 
 EXPOSE 8080
 
