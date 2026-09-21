@@ -99,21 +99,25 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     container_name: sms-gateway-backend
-    # 让容器里的 host.docker.internal 指到宿主机。Linux 上 Docker **不自带**这个名字
-    # （只有 Docker Desktop 内建），而服务器上那套 MySQL / Redis 是装在宿主机上、
-    # 只监听宿主机地址的 —— 容器要用这个名字才连得到它们（.env 里就是这么填的）。
-    # 需要 Docker Engine 20.10+（host-gateway 是那一版引入的）。
+    # **host 网络**：容器与宿主机共用网络栈。
     #
-    # 注意：这条在 Docker Desktop 上会覆盖它内建的解析。本机若要跑 compose 做验证，
-    # 连接目标以 .env 里的地址为准（指向远端库时不走这个名字），不受影响。
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      # 同理：本机已跑着后端时用 BACKEND_PORT 挪开。
-      # 注意这个端口也要同步写进 VITE_DEVICE_SERVER_URL（设备扫二维码连的就是它），
-      # 否则手机会被指到另一个后端上去。
-      - "${BACKEND_PORT:-8080}:8080"
+    # 这是为了能连服务器上那套 MySQL / Redis —— 它们装在宿主机上、只听 127.0.0.1，
+    # 而 bridge 网络里容器自己的 127.0.0.1 是容器自己，根本到不了宿主机。
+    # 共用网络栈之后，.env 里直接写 127.0.0.1 就通了，服务器那边**一个字都不用改**
+    # （不动 bind-address、不用 socat、防火墙也不必给 3306/6379 开口子）。
+    #
+    # 代价（两条都容易踩）：
+    #   1. 下面没有 ports: —— host 网络下端口映射**无效**，容器监听什么端口，
+    #      宿主机上就是什么端口。这里让它只听回环（SERVER_ADDRESS），
+    #      于是外部（含设备）只能经前端那层 nginx 进来，8080 不对公网开放。
+    #   2. 自带容器（--profile local-db）也走这套网络：那时后端要连的是它们**发布的**
+    #      127.0.0.1 端口（MYSQL_PORT / REDIS_PORT），不是服务名 mysql / redis。
+    network_mode: host
     environment:
+      # 只监听回环：后端不该被外部直接访问，统一走前端那层 nginx（它会把 /api 转过来）。
+      # 端口与前端 nginx 配置里的 proxy_pass 用同一个值（都来自 .env 的 BACKEND_PORT）。
+      SERVER_ADDRESS: 127.0.0.1
+      SERVER_PORT: ${BACKEND_PORT:-8080}
       # characterEncoding 要的是 **Java 字符集名**（UTF-8），不是 MySQL 的服务端字符集名
       # （utf8mb4）。写成 utf8mb4 时 Connector/J 直接抛
       # `Unsupported character encoding 'utf8mb4'`，连接池建不起来、应用启动即退 ——
@@ -121,13 +125,13 @@ services:
       # Dialect」，跟真正的病因隔了好几层。库表字符集由 MySQL 那侧的
       # --character-set-server=utf8mb4 保证，这里只负责连接编码。
       #
-      # 默认值指向文件里那两个自带容器 —— 服务名 mysql / redis 只在容器网络里解析得到，
-      # 所以用外部实例时必须覆盖成 IP / 域名（.env.example 里有完整示例）。
-      # 上面这四项留空即回落到默认值。
-      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:mysql://mysql:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8}
+      # 默认值里的 mysql / redis 是**自带容器**的名字 —— host 网络下它们解析不到，
+      # 所以真要用自带容器时得把下面几项改成 127.0.0.1 + 发布的端口（.env.example 有说明）。
+      # 用宿主机上的库和缓存时（服务器上就是这情况）写 127.0.0.1 即可。
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:mysql://127.0.0.1:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8}
       SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:-smsuser}
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?请在 docker/.env 中设置数据库口令}
-      SPRING_REDIS_HOST: ${SPRING_REDIS_HOST:-redis}
+      SPRING_REDIS_HOST: ${SPRING_REDIS_HOST:-127.0.0.1}
       SPRING_REDIS_PORT: ${SPRING_REDIS_PORT:-6379}
       # 可空：外部 Redis 常常没设 requirepass（自带容器那边则强制非空，见 redis 服务）
       SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -171,31 +175,32 @@ services:
   frontend:
     # 同 backend：服务器上用这一行拉镜像，本机 --build 时用的是下面 build:。
     # 要钉版本就改 .env 里的 FRONTEND_IMAGE。
-    #
-    # 注意**镜像里已经内联了设备地址**（构建期变量）：CI 构建时由 GitHub 仓库变量
-    # VITE_DEVICE_SERVER_URL 提供，本机 --build 时由 docker/.env 里那一项提供。
-    # 所以换地址要么重新构建镜像，要么走运行期方案（见 README「方式一」）。
     image: ${FRONTEND_IMAGE:-ghcr.io/hearthealt/sms-gateway-frontend:latest}
     build:
       context: ../management
       dockerfile: Dockerfile
-      args:
-        # 设备要访问的**后端**地址，会写进「设备恢复码」二维码。
-        # 这是构建期变量（Vite 把它内联进产物），改完必须重建镜像：
-        #   docker compose build frontend
-        #
-        # 必须是设备能访问到的地址，不能是 localhost —— 对手机来说那是指向它自己。
-        # 填后端端口（不是下面的前端端口）。
-        VITE_DEVICE_SERVER_URL: ${VITE_DEVICE_SERVER_URL:?请在 docker/.env 中设置设备要访问的服务器地址}
     container_name: sms-gateway-frontend
-    ports:
-      - "${FRONTEND_PORT:-8081}:80"
+    # 同 backend：host 网络（要连宿主机的库和缓存，且只监听回环，两个容器必须在同一
+    # 个网络栈里才说得上话）。
+    #
+    # 没有 ports: —— 对外监听哪个端口由 nginx 决定，值来自下面的 FRONTEND_PORT，
+    # 容器启动时由 render-templates.sh 渲染进 default.conf（见 management/nginx.conf）。
+    # 所以改端口 = 改 .env 里的 FRONTEND_PORT + 重建容器，不再有「改了 ports 没反应」。
+    network_mode: host
     environment:
+      # 两个端口都渲染进 nginx 配置：对外监听端口，以及要转给后端的端口
+      # （后端容器里的 SERVER_PORT 是同一个值）。宿主机上只放行 FRONTEND_PORT。
+      FRONTEND_PORT: ${FRONTEND_PORT:-8081}
+      BACKEND_PORT: ${BACKEND_PORT:-8080}
+      # 设备要访问的地址**不在这里配**：二维码里写的是「管理员访问后台用的那个 origin」
+      # （前端唯一入口就是这层 nginx，设备的 /api/... 也由它转给后端），
+      # 所以以后上域名是自动的 —— 用域名打开后台，二维码里就是域名。
+      # 代价：别用 SSH 隧道 / 内网 IP 打开后台去生成二维码，那样地址是错的。
+      # 见 management/src/api/device.ts。
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
-      # 只要后端容器在就行：nginx 启动时得能解析 backend 这个名字。
-      # 不用 service_healthy —— 后端本身还在等 MySQL/Redis 就绪，串起来启动会慢很多，
-      # 而它晚几十秒可用对静态站点没有影响。
+      # 只要后端容器起来就行，不等它健康 —— 后端自己还在等 MySQL/Redis 就绪，
+      # 串起来启动会慢很多，而它晚几十秒可用对静态站点没有影响。
       - backend
 
 volumes:

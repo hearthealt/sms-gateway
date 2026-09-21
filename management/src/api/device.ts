@@ -75,27 +75,33 @@ export function setEnrollTokenEnabled(enabled: boolean): Promise<EnrollToken> {
 }
 
 /**
- * 设备要访问的服务器地址 —— 会写进恢复码二维码里。
+ * 设备要访问的服务器地址 —— 会写进恢复码 / 快速连接的二维码里。
  *
- * 控制台自己的 axios 走相对路径 `/api`，它只知道「从哪个 origin 取」，不知道
- * 设备该连哪台机器。开发时尤其明显：vite 把 `/api` 代理到 localhost:8080，
- * 而 localhost 对手机毫无意义。
+ * 取**当前后台的 origin**：后端只监听回环、前端那层 nginx 是这套系统对外的唯一入口，
+ * 所以「你此刻访问后台用的地址」就是设备要用的地址（设备的 /api/... 也由它转发给后端）。
+ * 以后上域名也是自动的：用域名打开后台，二维码里就是域名。
  *
- * 所以优先读 VITE_DEVICE_SERVER_URL，没配才退回当前 origin。
+ * 开发环境除外 —— 那里 vite 跑在 localhost:5173，而 localhost 对手机来说指向它自己，
+ * 所以**开发时**仍读 management/.env 里的 VITE_DEVICE_SERVER_URL（局域网地址）。
+ *
+ * ⚠️ 用 origin 的代价，现场排查时记得这一条：二维码里写的就是「你访问后台用的地址」，
+ * 所以**用 SSH 隧道 / VPN 从 localhost 或内网 IP 打开后台时，生成的二维码是错的** ——
+ * 手机连不上，而二维码看起来一切正常。生成二维码请用设备能访问到的那个地址打开后台。
+ * 弹窗里会把地址显示出来，生成完扫之前看一眼。
  */
 export function deviceServerUrl(): string | null {
+  // 开发时用 .env 里配的局域网地址（镜像里没有这个值：management/.dockerignore 排掉了 .env）
   const configured = import.meta.env.VITE_DEVICE_SERVER_URL
   if (typeof configured === 'string' && configured.trim()) {
     return configured.trim().replace(/\/+$/, '')
   }
 
-  // 没配就返回 null，**不要退回 window.location.origin**。
-  //
-  // 早先的版本就是退回了它，结果开发时控制台跑在 localhost:5173，扫出来的二维码
-  // 把设备的服务器地址改成了 http://localhost:5173 —— 对手机来说那是指向它自己，
-  // 网关从此再也连不上后端，而且现场看不出是二维码干的。
-  //
-  // 与其塞一个几乎必然是错的地址，不如让调用方明确报错、逼管理员去配。
-  // 配置方式见 management/.env.example。
-  return null
+  // 开发环境没配就返回 null，让调用方明确报错 —— 这时候 origin 是 localhost:5173，
+  // 写进二维码只会让现场懵（早先的版本就是这么坑的）。
+  if (import.meta.env.DEV) {
+    return null
+  }
+
+  // 正经部署：后台就是唯一入口，用它的 origin。
+  return window.location.origin
 }

@@ -126,7 +126,6 @@ cp .env.example .env
 | `REDIS_PASSWORD` | Redis 口令（里面明文存着管理员令牌与调用方 API Key）。**B 模式必填**（留空容器直接拒绝启动）；A 模式可留空 —— 外部 Redis 常常没设 `requirepass` —— 但那句话对你也成立，别把没口令的 Redis 放在内网里 |
 | `APP_SECRET_KEY` | **系统主密钥**：设备令牌 = HMAC-SHA256(deviceId, 它)，泄漏等于可冒充任意设备。用 `openssl rand -hex 32` 生成 |
 | `APP_ADMIN_DEFAULT_PASSWORD` | 首次建库时创建管理员账号用的口令 |
-| `VITE_DEVICE_SERVER_URL` | 设备要访问的**后端**地址（会写进恢复码二维码）。**不能填 localhost** —— 对手机而言那是指向它自己 |
 
 选 A 的话，还要填外部实例在哪（B 模式留空即用自带容器）：
 
@@ -155,23 +154,32 @@ docker compose --profile local-db up -d --build
 
 首次要构建前后端镜像（几分钟）。起来后：
 
-| | 地址 | 端口变量（在 `docker/.env`）|
-| --- | --- | --- |
-| 管理后台 | `http://<主机>:8081` | `FRONTEND_PORT` |
-| 后端 | `http://<主机>:8080` | `BACKEND_PORT` |
-| MySQL（仅 B 模式）| `127.0.0.1:3306` | `MYSQL_PORT` |
-| Redis（仅 B 模式）| `127.0.0.1:6379` | `REDIS_PORT` |
+| | 地址 | 端口变量（在 `docker/.env`）| 是否对公网开放 |
+| --- | --- | --- | --- |
+| 管理后台 | `http://<主机>:8081` | `FRONTEND_PORT` | **是** —— 这是唯一入口 |
+| 后端 | `127.0.0.1:8080` | `BACKEND_PORT` | 否，只听回环 |
+| MySQL（仅 B 模式）| `127.0.0.1:3306` | `MYSQL_PORT` | 否 |
+| Redis（仅 B 模式）| `127.0.0.1:6379` | `REDIS_PORT` | 否 |
 
-自带的 MySQL 与 Redis 只绑回环（`127.0.0.1`），不发布到网卡上。
+两个容器走 **host 网络**（与宿主机共用网络栈），所以：`.env` 里连库和缓存写 `127.0.0.1`
+就行，宿主机上的 MySQL/Redis **一个字都不用改**；而 compose 的 `ports:` 在这套网络下
+**无效** —— 对外监听哪个端口由 `FRONTEND_PORT` 决定（容器启动时渲染进 nginx 配置），
+`BACKEND_PORT` 交给后端自己监听，两者都不经过 compose 的端口映射。
+
+**安全组/防火墙只放行 `FRONTEND_PORT`**（外加以后 HTTPS 的 443）。后端那个端口只在
+回环上，外部够不着；真要让设备直连后端也可以，但没必要 —— 前端那层 nginx 已经把
+`/api` 转过去了。
 
 初始账号 `admin` / `APP_ADMIN_DEFAULT_PASSWORD`。B 模式下首次启动会自动建库灌种子数据；
 A 模式的库是你自己的，得先手工跑一次建表脚本（上面「准备配置」里那条）。
+B 模式也要注意：host 网络下后端连的是那两个容器**发布的**回环端口，所以要写
+`jdbc:mysql://127.0.0.1:<MYSQL_PORT>/...` 与 `SPRING_REDIS_PORT=<REDIS_PORT>`，不是服务名。
 
-**本机已经跑着后端 / MySQL / Redis 时**有两种做法：把上面四个端口变量改成别的值让两套并存；
-或者干脆走 A 模式，把 `.env` 里那几项指向你已有的实例（B 模式那两个容器就不再起了）。
-端口改了 `docker compose up -d` 即可生效；但 **`VITE_DEVICE_SERVER_URL` 是构建期变量**
-（Vite 在 build 时就把它内联进产物），改了必须 `docker compose build frontend`，
-只重启容器不会生效。另外 `BACKEND_PORT` 改了就同步改它，否则手机会被指到另一个后端上去。
+**设备要访问的地址不在这里配** —— 二维码里写的是「管理员访问后台用的那个 origin」：
+前端是唯一入口，设备的 `/api/...` 也由它转给后端（见 `management/src/api/device.ts`）。
+好处是以后上域名自动生效，用域名打开后台生成的二维码里就是域名。
+代价：**别用 SSH 隧道 / 内网 IP 打开后台去生成二维码** —— 那样写进二维码的地址手机
+连不上，而二维码本身看起来一切正常。生成前弹窗里会显示地址，扫之前看一眼。
 
 **3. 数据与清理**
 

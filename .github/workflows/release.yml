@@ -11,12 +11,10 @@ name: release
 # 顺带把后端 jar 挂到 Release 上：ghcr.io 万一拉不动，可以退回「下载 jar → 放进
 # backend/target/ → docker compose up -d --build」这条路（那就需要源码了）。
 #
-# ── 两个前提 ──
-# 1. 仓库变量 VITE_DEVICE_SERVER_URL 必须在（Settings → Secrets and variables →
-#    Actions → Variables）。它是**构建期**变量，会被 Vite 内联进前端产物 ——
-#    也就是二维码里给手机的那个地址。没设就让它失败，而不是塞一个猜的地址进去
-#    （猜错的后果见 management/src/api/device.ts 里那段注释）。
-# 2. 镜像里的设备地址一旦定下来就跟着镜像走：换地址（比如上域名）要重新打 tag 重构建。
+# ── 镜像里不含任何部署相关的信息 ──
+# 设备要访问的地址取「管理员访问后台用的那个 origin」（前端是唯一入口），
+# 所以不需要仓库变量、也不需要 build arg；端口也是容器启动时才渲染进 nginx 配置的
+# （见 management/render-templates.sh）。同一个镜像放到哪台机器上都对。
 
 on:
   push:
@@ -46,15 +44,6 @@ jobs:
           java-version: '17'
           cache: maven
 
-      # 先卡一道：没配设备地址就别构建 —— 内联错地址的镜像发出去，现场是「手机连不上、
-      # 还看不出为什么」，比构建失败难查得多。
-      - name: Check VITE_DEVICE_SERVER_URL
-        run: |
-          if [ -z "${{ vars.VITE_DEVICE_SERVER_URL }}" ]; then
-            echo "::error::仓库变量 VITE_DEVICE_SERVER_URL 没配。它是设备要访问的后端地址（会写进二维码），在 Settings → Secrets and variables → Actions → Variables 里加一个。"
-            exit 1
-          fi
-
       # package 会连单测一起跑。src/test 下都是纯单测（没有 @SpringBootTest / JPA），
       # 不需要 MySQL 与 Redis，runner 上跑得起来。某个测试本来就是红的时候，先加
       # -DskipTests 把镜像发出去，再单独收拾它 —— 部署不该被无关的红测试卡住。
@@ -80,14 +69,12 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.ref_name }}
             ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
 
-      # 前端镜像自己会 npm ci + build，设备地址靠 build-arg 传进去（Vite 在构建期内联）。
+      # 前端镜像自己会 npm ci + build，不含任何部署地址（那是运行期的事，见文件头）。
       - name: Build & push frontend
         uses: docker/build-push-action@v6
         with:
           context: management
           push: true
-          build-args: |
-            VITE_DEVICE_SERVER_URL=${{ vars.VITE_DEVICE_SERVER_URL }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }}
             ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
