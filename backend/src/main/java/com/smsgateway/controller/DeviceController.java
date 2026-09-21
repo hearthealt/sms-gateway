@@ -92,4 +92,19 @@ public class DeviceController {
         String deviceId = (String) httpRequest.getAttribute("deviceId");
         return ResponseEntity.ok(ApiResult.success(deviceService.todayStats(deviceId)));
     }
+
+    /**
+     * 主页那两张小图的数据：近 N 天 + 今日逐小时。
+     *
+     * 缺数据的天/小时由服务端补 0（见 DeviceService.trend）—— 柱状图里的空柱子
+     * 本身就是信息（那天一条都没收到），跳过去会把 7 天画成 3 天而读者不会发现。
+     */
+    @GetMapping("/sms/trend")
+    public ResponseEntity<ApiResult<DeviceTrend>> smsTrend(
+            @RequestParam(defaultValue = "7") int days,
+            HttpServletRequest httpRequest) {
+
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
+        return ResponseEntity.ok(ApiResult.success(deviceService.trend(deviceId, days)));
+    }
 }

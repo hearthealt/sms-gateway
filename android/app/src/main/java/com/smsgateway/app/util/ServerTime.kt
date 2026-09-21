@@ -26,6 +26,17 @@ object ServerTime {
 
     fun toLocalDate(raw: String?): LocalDate? = parse(raw)?.toLocalDate()
 
+    /**
+     * 只有日期没有时间的字符串（趋势接口的 `day`，形如 `2026-09-21`）→ LocalDate。
+     *
+     * 与 [toLocalDate] 分开：那个要求带时间部分（`2026-09-21T12:31:58`），
+     * 拿纯日期去 `LocalDateTime.parse` 会抛。
+     */
+    fun parseDay(raw: String?): LocalDate? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching { LocalDate.parse(raw, DateTimeFormatter.ISO_LOCAL_DATE) }.getOrNull()
+    }
+
     private fun parse(raw: String?): LocalDateTime? {
         if (raw.isNullOrBlank()) return null
         return runCatching {

@@ -3,6 +3,7 @@ package com.smsgateway.app.network
 import com.smsgateway.app.model.ApiResponse
 import com.smsgateway.app.model.DeviceInfo
 import com.smsgateway.app.model.DeviceSmsStats
+import com.smsgateway.app.model.DeviceTrend
 import com.smsgateway.app.model.DeviceTokenData
 import com.smsgateway.app.model.HeartbeatRequest
 import com.smsgateway.app.model.HeartbeatResponse
@@ -49,6 +50,15 @@ interface ApiService {
     /** 本设备今日的短信统计。设备身份同样来自令牌，服务端据此计算。 */
     @GET("api/device/sms/stats")
     suspend fun mySmsStats(): Response<ApiResponse<DeviceSmsStats>>
+
+    /**
+     * 主页两张小图的数据：近 N 天 + 今日逐小时。
+     *
+     * 两个图合成一个请求：它们永远一起出现、刷新节奏也一样，分开就是每次多一个往返，
+     * 而这台设备是 7×24 挂着的。
+     */
+    @GET("api/device/sms/trend")
+    suspend fun smsTrend(@Query("days") days: Int): Response<ApiResponse<DeviceTrend>>
 
     @POST("api/sms/receive")
     suspend fun uploadSms(

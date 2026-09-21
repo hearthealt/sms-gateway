@@ -1,5 +1,8 @@
 package com.smsgateway.app.ui.screens.sms
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,12 +16,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Text
@@ -27,11 +33,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
@@ -57,6 +65,8 @@ fun ServerSmsScreen(
     onBack: () -> Unit
 ) {
     val pullState = rememberPullToRefreshState()
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) { viewModel.loadServerSmsNow() }
 
@@ -74,14 +84,34 @@ fun ServerSmsScreen(
         }
     }
 
+    // 「复制今日验证码」：整页的码一次拿走（联调、客服常用）。
+    // 放在这一页而不是主页 —— 码就列在这页上，而主页现在只回答「在跑吗 / 正在变坏吗」。
+    LaunchedEffect(state.copyPayload) {
+        val payload = state.copyPayload ?: return@LaunchedEffect
+        if (payload.isBlank()) {
+            snackbarHostState.showSnackbar("今天还没有提取到验证码")
+        } else {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("验证码", payload))
+            // Android 13 起系统自己会弹「已复制」，但不说几条 —— 条数才是这里要交代的
+            snackbarHostState.showSnackbar("已复制 ${payload.lines().size} 条验证码")
+        }
+        viewModel.clearCopyPayload()
+    }
+
     AppScreen(
         title = "服务端记录",
         onBack = onBack,
         actions = {
+            IconButton(onClick = { viewModel.requestCopyTodayCodes() }) {
+                Icon(Icons.Default.ContentCopy, "复制今日验证码", tint = AppColor.onBrand)
+            }
             IconButton(onClick = { viewModel.loadServerSms() }) {
                 Icon(Icons.Default.Refresh, "刷新", tint = AppColor.onBrand)
             }
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Box(
             modifier = Modifier

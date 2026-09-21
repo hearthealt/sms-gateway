@@ -1,11 +1,15 @@
 package com.smsgateway.service;
 
 import com.smsgateway.exception.EnrollmentRequiredException;
+import com.smsgateway.model.dto.DailyCount;
 import com.smsgateway.model.dto.DeviceRegisterRequest;
 import com.smsgateway.model.dto.DeviceRegisterResponse;
 import com.smsgateway.model.dto.DeviceSmsStats;
+import com.smsgateway.model.dto.DeviceTrend;
 import com.smsgateway.model.dto.HeartbeatRequest;
+import com.smsgateway.model.dto.HourlyCount;
 import com.smsgateway.model.entity.SmsDevice;
+import com.smsgateway.model.enums.SmsStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.util.HashUtil;
@@ -19,6 +23,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -250,6 +258,69 @@ public class DeviceService {
         return new DeviceSmsStats(
                 smsMessageRepository.countByDeviceAndReceiveTimeBetween(device.getId(), start, end),
                 smsMessageRepository.countCodesByDeviceAndReceiveTimeBetween(device.getId(), start, end));
+    }
+
+    /**
+     * 设备端主页那两张小图：近 N 天 + 今日逐小时。
+     *
+     * **缺数据的点要补 0**，不能只把有数据的天/小时发给前端：
+     * 柱状图的「空柱子」本身就是信息（那天一条都没收到），跳过去会把 7 天画成 3 天，
+     * 而读者不会发现少了几天。
+     *
+     * 排除 IGNORED，与「今日短信」那两个数字同源 —— 主页上同一屏的数字和图形
+     * 对不上是最容易被现场抓住的那种不一致。
+     */
+    public DeviceTrend trend(String deviceId, int days) {
+        SmsDevice device = deviceRepository.findByDeviceId(deviceId)
+                .orElseThrow(() -> new RuntimeException("Device not found: " + deviceId));
+
+        LocalDate today = LocalDate.now();
+        int span = Math.max(1, Math.min(days, MAX_TREND_DAYS));
+        LocalDateTime from = today.minusDays(span - 1L).atStartOfDay();
+
+        Map<LocalDate, long[]> byDay = new HashMap<>();
+        for (Object[] row : smsMessageRepository.countDailySinceByDevice(
+                device.getId(), from, SmsStatus.IGNORED)) {
+            byDay.put(toLocalDate(row[0]), new long[]{asLong(row[1]), asLong(row[2])});
+        }
+        List<DailyCount> daily = new ArrayList<>(span);
+        for (int i = 0; i < span; i++) {
+            LocalDate day = today.minusDays(span - 1L - i);
+            long[] v = byDay.getOrDefault(day, new long[]{0, 0});
+            daily.add(new DailyCount(day.format(DAY_FORMAT), v[0], v[1]));
+        }
+
+        long[] hours = new long[24];
+        long[] hourCodes = new long[24];
+        for (Object[] row : smsMessageRepository.countHourlySinceByDevice(
+                device.getId(), today.atStartOfDay(), SmsStatus.IGNORED)) {
+            int hour = (int) asLong(row[0]);
+            if (hour < 0 || hour > 23) continue;
+            hours[hour] = asLong(row[1]);
+            hourCodes[hour] = asLong(row[2]);
+        }
+        List<HourlyCount> hourly = new ArrayList<>(24);
+        for (int h = 0; h < 24; h++) {
+            hourly.add(new HourlyCount(h, hours[h], hourCodes[h]));
+        }
+
+        return new DeviceTrend(daily, hourly);
+    }
+
+    /** 趋势图最长看多少天。别让一个查询参数把全表扫了。 */
+    private static final int MAX_TREND_DAYS = 30;
+
+    private static final DateTimeFormatter DAY_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+    /** 分组键是日期。JDBC 驱动给回来的可能是 java.sql.Date 也可能是 LocalDate，两种都认。 */
+    private static LocalDate toLocalDate(Object raw) {
+        if (raw instanceof java.sql.Date d) return d.toLocalDate();
+        if (raw instanceof LocalDate d) return d;
+        return LocalDate.parse(String.valueOf(raw));
+    }
+
+    private static long asLong(Object raw) {
+        return raw == null ? 0L : ((Number) raw).longValue();
     }
 
     public SmsDevice getDeviceByToken(String token) {

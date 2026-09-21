@@ -105,6 +105,44 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
                                    @Param("ignoredStatus") SmsStatus ignoredStatus);
 
     /**
+     * 按天分组的统计，**限定某台设备**。设备端主页的「近 7 天」用它。
+     *
+     * 与 countDailySince 同源（同样排除 IGNORED），只多一个设备条件 ——
+     * 设备端只能看自己那台，不能把整个服务器的量当成自己的。
+     * 返回 [java.sql.Date, 总数, 验证码数]。
+     */
+    @Query("select function('date', m.receiveTime), count(m), "
+            + "sum(case when m.code is not null and m.code <> '' then 1 else 0 end) "
+            + "from SmsMessage m "
+            + "where m.deviceId = :deviceId "
+            + "and m.receiveTime >= :from "
+            + "and m.status <> :ignoredStatus "
+            + "group by function('date', m.receiveTime) "
+            + "order by function('date', m.receiveTime)")
+    List<Object[]> countDailySinceByDevice(@Param("deviceId") Long deviceId,
+                                           @Param("from") LocalDateTime from,
+                                           @Param("ignoredStatus") SmsStatus ignoredStatus);
+
+    /**
+     * 按小时分组的统计，用于设备端主页的「今日分布」。调用方传今天 0 点作为 from。
+     *
+     * 只返回**有数据的小时**，缺的小时由服务层补 0 —— SQL 里补零要靠日历表或递归 CTE，
+     * 为一张 24 根柱的小图不值得。
+     * 返回 [小时(0-23), 总数, 验证码数]。
+     */
+    @Query("select function('hour', m.receiveTime), count(m), "
+            + "sum(case when m.code is not null and m.code <> '' then 1 else 0 end) "
+            + "from SmsMessage m "
+            + "where m.deviceId = :deviceId "
+            + "and m.receiveTime >= :from "
+            + "and m.status <> :ignoredStatus "
+            + "group by function('hour', m.receiveTime) "
+            + "order by function('hour', m.receiveTime)")
+    List<Object[]> countHourlySinceByDevice(@Param("deviceId") Long deviceId,
+                                            @Param("from") LocalDateTime from,
+                                            @Param("ignoredStatus") SmsStatus ignoredStatus);
+
+    /**
      * 取一批早于给定时刻的短信 id，最多 {@code batchSize} 条。
      *
      * <p><b>清理必须先取 id 再删</b>，不能直接 {@code delete ... limit}：投递记录只存

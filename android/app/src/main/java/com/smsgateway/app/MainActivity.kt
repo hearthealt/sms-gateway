@@ -151,9 +151,7 @@ private fun GatewayApp(viewModel: DashboardViewModel) {
                 onOpenSelfTest = { viewModel.runSelfTest(); screen = Screen.SELF_TEST },
                 onOpenQuickConnect = { screen = Screen.QUICK_CONNECT },
                 onToggleService = { viewModel.toggleService() },
-                onCheckStatus = { viewModel.checkStatusNow() },
-                onCopyTodayCodes = { viewModel.requestCopyTodayCodes() },
-                onCopyPayloadConsumed = { viewModel.clearCopyPayload() }
+                onCheckStatus = { viewModel.checkStatusNow() }
             )
         }
 

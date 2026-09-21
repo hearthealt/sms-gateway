@@ -84,12 +84,6 @@ object DevicePrefs {
     /** 一次性修复标记：早期版本把上传失败的行错标成 failed，需要扫回 pending 一次。 */
     const val KEY_STRANDED_SWEPT = "stranded_rows_swept"
 
-    /** 最后一次自检的结论（如「6 项全部通过」），没跑过时为空串。 */
-    const val KEY_LAST_SELF_TEST = "last_self_test"
-
-    /** 最后一次自检的时刻（epoch 毫秒），0 = 没跑过。 */
-    const val KEY_LAST_SELF_TEST_AT = "last_self_test_at"
-
     /** 模拟器访问宿主机 localhost 的地址。 */
     const val DEFAULT_SERVER_URL = "http://10.0.2.2:8080"
 
@@ -289,29 +283,6 @@ object DevicePrefs {
 
     fun markStrandedRowsSwept(context: Context) =
         get(context).edit().putBoolean(KEY_STRANDED_SWEPT, true).apply()
-
-    /**
-     * 记下最后一次自检的结论。
-     *
-     * 落盘的理由：主页上那行「自检」要显示上次结果，而自检本来是内存态 ——
-     * 不落盘的话每次打开 App 都显示「还没跑过」，那行就成了一个纯按钮，
-     * 起不到「不用点进去就知道六项还过不过」的作用。
-     *
-     * 用 apply()：它是给人看的一句摘要，丢一次只是回到「还没跑过」。
-     */
-    fun setLastSelfTest(context: Context, summary: String, at: Long) =
-        get(context).edit()
-            .putString(KEY_LAST_SELF_TEST, summary)
-            .putLong(KEY_LAST_SELF_TEST_AT, at)
-            .apply()
-
-    /** 最后一次自检的摘要，没跑过时为空串。 */
-    fun lastSelfTest(context: Context): String =
-        get(context).getString(KEY_LAST_SELF_TEST, "").orEmpty()
-
-    /** 最后一次自检的时刻（epoch 毫秒），没跑过时为 0。 */
-    fun lastSelfTestAt(context: Context): Long =
-        get(context).getLong(KEY_LAST_SELF_TEST_AT, 0L)
 
     /** 最近一次心跳成功的时间，从未成功过返回 null。 */
     fun lastHeartbeatAt(context: Context): Long? =
