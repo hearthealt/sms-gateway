@@ -153,11 +153,17 @@ fun QuickConnectScreen(
                 // 连接中：只留进度。相机这时已经出了组合（下面的分支没选它），
                 // 说清「现在在哪一步」—— 探测最坏要 3 × 8 秒，只转个不说话的圈，
                 // 现场会当成死机然后去杀进程。
-                stage != null -> ConnectingView(stage = stage)
+                stage != null -> ConnectingView(stage = stage, attempt = state.connectAttempt)
 
                 currentOutcome != null -> ResultView(
                     result = currentOutcome,
-                    onRetry = { outcome = null; error = null; scanning = true }
+                    onRetry = { outcome = null; error = null; scanning = true },
+                    onRetrySaved = {
+                        outcome = null
+                        error = null
+                        awaiting = true
+                        viewModel.retryQuickConnect()
+                    }
                 )
 
                 scanning -> CameraView(
@@ -391,7 +397,7 @@ private fun IdleView(message: String, onRetry: () -> Unit, onManual: () -> Unit)
 }
 
 @Composable
-private fun ConnectingView(stage: ConnectStage) {
+private fun ConnectingView(stage: ConnectStage, attempt: Int) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -403,7 +409,11 @@ private fun ConnectingView(stage: ConnectStage) {
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = when (stage) {
-                ConnectStage.PROBING -> "正在测试连接…"
+                // 重试时把次数说出来：刚连上 WiFi 时链路要十几秒才就绪，探测会重试几轮、
+                // 每轮最长 8 秒。只转一个圈的话，这十几秒看起来就是死机。
+                ConnectStage.PROBING ->
+                    if (attempt > 1) "正在测试连接（第 $attempt 次）…" else "正在测试连接…"
+
                 ConnectStage.REGISTERING -> "正在注册设备…"
             },
             style = AppTypography.bodyLarge,
@@ -418,7 +428,11 @@ private fun ConnectingView(stage: ConnectStage) {
  * 口令被拒）是现场要照着排查的东西，不该自己消失。
  */
 @Composable
-private fun ResultView(result: ConnectOutcome, onRetry: () -> Unit) {
+private fun ResultView(
+    result: ConnectOutcome,
+    onRetry: () -> Unit,
+    onRetrySaved: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -456,10 +470,22 @@ private fun ResultView(result: ConnectOutcome, onRetry: () -> Unit) {
             }
         }
 
-        // 失败才给「重试」：成功之后再摆一个扫码按钮，只会让人以为还得再扫一次。
+        // 失败才给按钮：成功之后再摆一个扫码按钮，只会让人以为还得再扫一次。
         if (!result.ok) {
             Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新扫码") }
+
+            // 地址已经存下了，失败多半是「刚连上 WiFi、局域网还没就绪」——
+            // 那种情况重扫一遍二维码纯属白费功夫，原地重试即可。所以把它放在主按钮位，
+            // 「重新扫码」降到次要 —— 只有二维码本身扫错了（地址不对）才需要它。
+            if (result.retryable) {
+                Button(onClick = onRetrySaved, modifier = Modifier.fillMaxWidth()) { Text("重试") }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+                    Text("换一张码扫")
+                }
+            } else {
+                Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新扫码") }
+            }
         }
     }
 }

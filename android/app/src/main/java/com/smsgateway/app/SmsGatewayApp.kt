@@ -3,6 +3,7 @@ package com.smsgateway.app
 import android.app.Application
 import android.util.Log
 import com.smsgateway.app.database.AppDatabase
+import com.smsgateway.app.network.NetworkWatch
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
@@ -29,6 +30,9 @@ class SmsGatewayApp : Application() {
         // 同上：Worker / 短信接收器会在进程刚起来时判断「网关在不在跑」，
         // 而那时没有任何界面组件被创建过。
         GatewayState.ensureLoaded(this)
+        // 网络回调要在进程早期注册：探测那边靠它判断「默认网络是不是刚切过来」，
+        // 注册晚了的话第一个回调要等下一次网络变化才来（理由见 NetworkWatch）。
+        NetworkWatch.ensureStarted(this)
 
         sweepStrandedRowsOnce()
     }

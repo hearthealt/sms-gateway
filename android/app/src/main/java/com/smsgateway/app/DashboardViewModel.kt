@@ -46,8 +46,14 @@ data class SelfTestItem(val label: String, val ok: Boolean, val detail: String)
  */
 enum class ConnectStage { PROBING, REGISTERING }
 
-/** 「快速连接」的结论，也是注册本身的结论。 */
-data class ConnectOutcome(val ok: Boolean, val message: String)
+/**
+ * 「快速连接」的结论，也是注册本身的结论。
+ *
+ * @param retryable 值不值得用**已保存的地址**再试一次（不必重新扫码）。
+ *   地址已经存下之后的失败（探测不通、注册失败）都是 true；而「地址格式不合法、
+ *   什么都没写」那种是 false —— 对着一个没被采用的地址重试，只会让人更迷惑。
+ */
+data class ConnectOutcome(val ok: Boolean, val message: String, val retryable: Boolean = false)
 
 data class DashboardState(
     val isRunning: Boolean = false,
@@ -101,6 +107,13 @@ data class DashboardState(
      * 「快速连接」进行到哪一步，null = 没有进行中的连接。界面据此显示进度。
      */
     val connectStage: ConnectStage? = null,
+    /**
+     * 探测正在第几次尝试（从 1 开始）。只在 [connectStage] == PROBING 时有意义。
+     *
+     * 单独一个字段而不是并进 ConnectStage：那是个枚举，而这里要的是「同一个阶段里的
+     * 第几次」。也不会进注册阶段 —— 注册不做重试。
+     */
+    val connectAttempt: Int = 1,
     /**
      * 「快速连接」的一次性结论，由扫码连接页取走后立即清空。
      *
@@ -633,7 +646,8 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             val detail = parseErrorMessage(response.errorBody()?.string())
             return ConnectOutcome(
                 false,
-                "注册失败（HTTP ${response.code()}）" + (detail?.let { "：$it" } ?: "")
+                "注册失败（HTTP ${response.code()}）" + (detail?.let { "：$it" } ?: ""),
+                retryable = true
             )
         }
 
@@ -697,7 +711,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     fun quickConnect(url: String, enrollToken: String?, identity: QrIdentity? = null) {
         if (!connectInFlight.compareAndSet(false, true)) return
 
-        _state.update { it.copy(connectStage = ConnectStage.PROBING, connectResult = null) }
+        _state.update { it.copy(connectStage = ConnectStage.PROBING, connectAttempt = 1, connectResult = null) }
 
         viewModelScope.launch {
             try {
@@ -729,7 +743,13 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 DevicePrefs.setEnrollToken(getApplication(), token)
                 _state.update { it.copy(enrollToken = token) }
 
-                val (ok, detail) = describeProbe(RetrofitClient.probe(url))
+                // 把「第几次尝试」实时喂给界面：刚连上 WiFi 时那次探测可能要重试几轮、
+                // 每轮最长 8 秒，只转一个不说话的圈现场会以为死机（然后去杀进程）。
+                val (ok, detail) = describeProbe(
+                    RetrofitClient.probe(url) { attempt ->
+                        _state.update { it.copy(connectAttempt = attempt) }
+                    }
+                )
                 if (!ok) {
                     _state.update {
                         it.copy(connectStage = null, connectResult = ConnectOutcome(false, detail))
@@ -749,6 +769,25 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.update { it.copy(connectStage = null, isRegistering = false) }
             }
         }
+    }
+
+    /**
+     * 重试上一次的快速连接：用**已保存的**地址与口令重跑一遍探测 + 注册，不必重新扫码。
+     *
+     * 加它是为了让「刚连上 WiFi、局域网还没就绪」那个窗口不再等于白扫一次：实测那段时间
+     * 可能有二十几秒（关闭 WiFi 再连那次量到 28 秒仍然不通），任何预算都可能不够，
+     * 而重新扫一次二维码本身又要几秒 —— 一键重试比加大预算更管用。
+     *
+     * 地址与口令都从 prefs 取，不经过二维码：探测失败时它们已经落盘了
+     * （见 quickConnect 里「先保存再探测」的顺序）。重跑时地址没变，
+     * applyServerUrl 里那条「换地址就清令牌」的分支不会触发，令牌是安全的。
+     */
+    fun retryQuickConnect() {
+        val app = getApplication<Application>()
+        quickConnect(
+            url = DevicePrefs.serverUrl(app),
+            enrollToken = DevicePrefs.enrollToken(app).ifBlank { null }
+        )
     }
 
     /** 扫码连接页展示完结论后调用，避免下次进这个页面又冒出来。 */

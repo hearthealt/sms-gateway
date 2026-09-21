@@ -210,20 +210,39 @@ object RetrofitClient {
      * 接受 url 参数而不是直接读 baseUrl，这样设置页可以测输入框里当前的值，
      * 不必先保存再测。本函数不抛异常（协程取消除外），失败也以 Unreachable 返回，
      * 因为「连不上」和「连上了但不是本服务」对调用方是同一层级的正常结果。
+     *
+     * @param onAttempt 第 N 次尝试开始时回调（N 从 1 开始）。界面拿它显示「正在重试」，
+     *   免得最长十几秒的等待看起来像死机。
      */
-    suspend fun probe(url: String): ProbeResult = withContext(Dispatchers.IO) {
-        // 失败重试一次，隔 1.5 秒。
-        //
-        // 针对的是「WiFi 刚断开重连」那一两秒：系统还没把默认网络切回来，
-        // 第一次连接可能落在旧网络或蜂窝数据上，于是当场报「连不上」，
-        // 过后同一个地址一点就通 —— 现场会以为地址填错了。
+    suspend fun probe(
+        url: String,
+        onAttempt: ((Int) -> Unit)? = null
+    ): ProbeResult = withContext(Dispatchers.IO) {
+        // 失败重试，隔 1.5 秒、之后翻倍。
         //
         // 只对 Unreachable 重试：NotOurService（有响应但不是本服务）是确定答案，
         // 地址就是错的，再试一次只是白等。
-        var lastFailure: ProbeResult.Unreachable? = null
-        var delayMs = PROBE_RETRY_DELAY_MS
+        //
+        // 重试预算分两档，取决于 WiFi 是不是刚连上（见 [wifiJustCameUp]）：
+        //
+        //   - **刚连上**：链路要十几秒才真正可用，失败可能是秒回的「本机没路由」，
+        //     也可能是干等超时 —— 两种都得一直试到预算用完，否则现场就是
+        //     「连不上，过一会再点一次就好了」，全看运气。
+        //   - **不在窗口里**（WiFi 早就连上、或者压根没连 WiFi）：保持原行为。
+        //     慢失败说明包发出去了对面没回（防火墙丢包、服务没起），再试两次只是白等。
+        val settling = wifiJustCameUp()
+        val maxAttempts = if (settling) PROBE_SETTLING_ATTEMPTS else PROBE_ATTEMPTS
+        // 用可空而不是 Long.MAX_VALUE：`now + Long.MAX_VALUE` 会溢出成负数，
+        // 于是「不是刚切网」时下面那句 deadline 判断立刻成立 —— 变成一次都不重试，
+        // 把原来那条「秒回失败就重试」的规则一起废掉了。
+        val deadline = if (settling) System.currentTimeMillis() + PROBE_SETTLING_BUDGET_MS else null
 
-        repeat(PROBE_ATTEMPTS) { attempt ->
+        var delayMs = PROBE_RETRY_DELAY_MS
+        var lastFailure: ProbeResult.Unreachable? = null
+
+        repeat(maxAttempts) { attempt ->
+            if (attempt > 0) onAttempt?.invoke(attempt + 1)
+
             val startedAt = System.currentTimeMillis()
             val result = probeOnce(url)
             val elapsed = System.currentTimeMillis() - startedAt
@@ -231,16 +250,44 @@ object RetrofitClient {
             if (result !is ProbeResult.Unreachable) return@withContext result
             lastFailure = result
 
-            // 只在「秒回的失败」上重试。见 PROBE_FAST_FAILURE_MS 的说明：
-            // 快失败是本机没路由（网络刚切换），等一下就通；慢失败是对面没响应，重试无意义。
-            if (attempt >= PROBE_ATTEMPTS - 1 || elapsed > PROBE_FAST_FAILURE_MS) {
-                return@withContext result
+            if (attempt >= maxAttempts - 1) return@withContext fail(result, settling)
+            // 稳了之后还慢失败 → 对面没响应，别再耗
+            if (elapsed > PROBE_FAST_FAILURE_MS && !settling) return@withContext fail(result, settling)
+            // 刚切网也不能无限试：窗口再长也有个头
+            if (deadline != null && System.currentTimeMillis() > deadline) {
+                return@withContext fail(result, settling)
             }
+
             delay(delayMs)
-            delayMs *= 2
+            delayMs = (delayMs * 2).coerceAtMost(PROBE_RETRY_MAX_DELAY_MS)
         }
-        lastFailure!!
+        fail(lastFailure!!, settling)
     }
+
+    /**
+     * 放弃时收尾。
+     *
+     * 「刚切网」那十几秒里试遍了还不通，原因几乎不可能是地址写错 —— 是链路还没就绪。
+     * 那就把下一步动作一起说出来：等十几秒再点一次。否则现场看到「没路由」只会去查地址、
+     * 查防火墙，全查完了再点一次发现好了。
+     */
+    private fun fail(result: ProbeResult.Unreachable, settling: Boolean): ProbeResult.Unreachable =
+        if (!settling) {
+            result
+        } else {
+            result.copy(reason = result.reason + "。刚连上 WiFi 时局域网一般要十几秒才通，稍等再试一次")
+        }
+
+    /**
+     * WiFi 是不是刚连上（[WIFI_SETTLING_MS] 以内）。
+     *
+     * 实测 WiFi 拿到 IP 之后**还要十几秒局域网才通**，而现场扫码恰好就在那十几秒里。
+     * 跟踪不起来时（回调没注册上）或当前没有 WiFi 时按「不在窗口里」处理：
+     * 也就是保持原来的快节奏，不去赌 —— 关掉 WiFi 只剩蜂窝时，
+     * 探测不该因此从等 8 秒变成等 20 秒。
+     */
+    private fun wifiJustCameUp(): Boolean =
+        NetworkWatch.millisSinceWifiAvailable()?.let { it < WIFI_SETTLING_MS } ?: false
 
     private suspend fun probeOnce(url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
@@ -297,6 +344,15 @@ object RetrofitClient {
                 raw.contains("no route to host", ignoreCase = true) ||
                 root is NoRouteToHostException ->
                 "网络不可达：本机到该地址没有路由。WiFi 刚重连、或同时开着蜂窝数据时会这样"
+
+            // 本机这一侧把连接断掉了。真机上「刚连上 WiFi 那十几秒」量到过两种：
+            // `isConnected failed: ECONNABORTED (Software caused connection abort)`、
+            // 以及 `Socket closed`（OkHttp 的 callTimeout 到点时会把 socket 关掉，
+            // 表面上报的是这个）。两种都落在本机，换个时机就好，不是对方的问题。
+            raw.contains("ECONNABORTED", ignoreCase = true) ||
+                raw.contains("Software caused connection abort", ignoreCase = true) ||
+                raw.contains("Socket closed", ignoreCase = true) ->
+                "连接被本机中断：网络刚切换（WiFi 刚连上或刚断开）时常见，稍等重试"
 
             raw.contains("refused", ignoreCase = true) ->
                 "连接被拒绝：对面在，但那个端口上没有服务在监听"
@@ -355,6 +411,29 @@ private const val PROBE_RETRY_DELAY_MS = 1500L
  * 再试两次只会让按钮多转 16 秒，结论不会变。
  */
 private const val PROBE_FAST_FAILURE_MS = 3_000L
+
+/**
+ * WiFi 连上多久之内，算「刚连上」，放宽探测的重试预算。
+ *
+ * 实测「WiFi 拿到 IP」到「局域网真正通」之间约 15 秒，30 秒留了余量 ——
+ * 太短会在这台机器上漏掉，太长则会把「网络稳了但对面真的没响应」也拖进重试。
+ */
+private const val WIFI_SETTLING_MS = 30_000L
+
+/**
+ * 刚切网时**总共**允许试几次。
+ *
+ * 3 次不够：实测失败可能是秒回的「本机没路由」，这时 3 次加起来只覆盖约 5 秒，
+ * 而窗口有十几秒 —— 真机上就是这样失败的（点了自检，12 秒时还没结果，最终报「连不上」）。
+ * 配上下面的退避与预算，8 次覆盖约 20 秒。
+ */
+private const val PROBE_SETTLING_ATTEMPTS = 8
+
+/** 刚切网时的探测总预算。到点就放弃，别让界面无限转下去。 */
+private const val PROBE_SETTLING_BUDGET_MS = 25_000L
+
+/** 退避上限。别让后面的重试间隔越拉越长，那会白占掉预算里本可以再试一次的时间。 */
+private const val PROBE_RETRY_MAX_DELAY_MS = 3_000L
 
 private data class HealthEnvelope(val code: Int, val data: HealthData?)
 
