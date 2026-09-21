@@ -61,12 +61,12 @@ class NotifyMessageFactoryTest {
     }
 
     @Test
-    @DisplayName("元信息（设备/发送方/时间）拼在前面，多台手机时能分清是哪台")
+    @DisplayName("元信息（设备/接收方/时间）拼在前面，双卡时能分清是哪个号收的")
     void prefixesMetadata() {
         RenderedMessage message = factory.build(sms("正文"), "备用机-1");
 
         assertThat(message.text()).startsWith("【");
-        assertThat(message.text()).contains("备用机-1").contains("10690300").contains("10:30:00");
+        assertThat(message.text()).contains("备用机-1").contains("13800138000").contains("10:30:00");
         assertThat(message.text()).endsWith("正文");
     }
 
@@ -75,7 +75,7 @@ class NotifyMessageFactoryTest {
     void handlesMissingDeviceName() {
         RenderedMessage message = factory.build(sms("正文"), null);
 
-        assertThat(message.text()).contains("10690300");
+        assertThat(message.text()).contains("13800138000");
         assertThat(message.text()).doesNotContain("· ·").doesNotContain("【 ·");
     }
 
@@ -99,7 +99,7 @@ class NotifyMessageFactoryTest {
         // 注意别断言「不含【」：这条短信的正文自己就以【开头（发送方署名就是那个写法），
         // 那种断言会误伤，而且它想表达的其实是「不含来源信息那一行」。
         assertThat(message.text()).isEqualTo("【某某】您的验证码是483920。");
-        assertThat(message.text()).doesNotContain("备用机-1").doesNotContain("10690300");
+        assertThat(message.text()).doesNotContain("备用机-1").doesNotContain("13800138000");
     }
 
     // ---------------------------------------------------------------- 字节截断

@@ -43,7 +43,8 @@ public enum SysConfigKey {
             Type.BOOLEAN,
             Group.NOTIFY,
             "附带来源信息",
-            "在正文前加一行「设备 · 发送方 · 时间」。多台手机或双卡时建议保留，否则分不清是哪台收的。"),
+            "在正文前加一行「设备 · 接收方 · 时间」。多台手机或双卡时建议保留，"
+                    + "否则分不清是哪台机器的哪个号收的（接收方就是收到这条短信的那张卡）。"),
 
     NOTIFY_POLL_INTERVAL_MS(
             "notify.poll-interval-ms",

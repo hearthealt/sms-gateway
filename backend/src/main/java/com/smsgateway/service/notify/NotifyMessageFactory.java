@@ -24,9 +24,13 @@ import java.time.format.DateTimeFormatter;
  *       —— 谁在那个群里 —— 所以提示放在管理端的建渠道页，不在投递链路上拦。</li>
  * </ul>
  *
- * <p>元信息（发送方 / 设备 / 时间）仍带上：多台手机或双卡时，只看到一段正文根本
- * 分不清是哪台机器、哪个号收到的。它们不影响正文，包在最外层。
+ * <p>元信息（设备 / **接收方** / 时间）仍带上：多台手机或双卡时，只看到一段正文根本
+ * 分不清是哪台机器、**哪个号**收到的。它们不影响正文，包在最外层。
  * 真正「一条都不加」的话，企微那边收到的就是一段没有上下文的文字。
+ *
+ * <p>用**接收方**而不是发送方：一条验证码来自哪家平台（发送方）通常看正文就够，
+ * 而「这台机器的哪个号收到的」是正文里没有、且双卡时最需要知道的那一条
+ * （见 {@code SmsReceiver.resolveSmsPhone}：记录里的号码就是收到它的那张卡的号码）。
  */
 @Component
 @RequiredArgsConstructor
@@ -41,12 +45,15 @@ public class NotifyMessageFactory {
     /**
      * 拼出要发出的正文。
      *
-     * <p>格式写死：{@code 【设备 · 发送方 · 时间】\n原文}。设备读不到时自动省掉那一段，
-     * 不会留一个孤零零的分隔符。
+     * <p>格式写死：{@code 【设备 · 接收方 · 时间】\n原文}。其中任一项读不到时自动省掉
+     * 那一段，不会留一个孤零零的分隔符。
      */
     public RenderedMessage build(SmsMessage sms, String deviceName) {
         String content = sms.getContent() == null ? "" : sms.getContent();
-        String sender = sms.getSender() == null ? "" : sms.getSender();
+        // 接收方 = 这台机器**收到这条短信的那个号**。双卡时它才分得清是卡 1 还是卡 2
+        // （记录里的号码就取自「收到它的那张卡」，见 SmsReceiver.resolveSmsPhone）；
+        // 而发送方是谁，正文开头的【某某平台】署名基本都写着。
+        String receiver = sms.getPhone() == null ? "" : sms.getPhone();
         String time = sms.getReceiveTime() == null ? "" : sms.getReceiveTime().format(TIME_FORMAT);
 
         // 来源信息可以在「系统设置」里关掉（只有一台手机、一张卡时它是噪音）
@@ -56,7 +63,7 @@ public class NotifyMessageFactory {
 
         // 先滤掉空的那几项再拼。**不能直接 String.join**：它对空字符串照样插分隔符，
         // 三项都读不到时会拼出一个孤零零的「【 ·  · 】」。
-        String header = java.util.stream.Stream.of(deviceName, sender, time)
+        String header = java.util.stream.Stream.of(deviceName, receiver, time)
                 .filter(v -> v != null && !v.isBlank())
                 .map(String::trim)
                 .collect(java.util.stream.Collectors.joining(" · "));

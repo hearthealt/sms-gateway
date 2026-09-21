@@ -25,11 +25,17 @@
               <el-button size="default" plain @click="handleIssueRecoveryCode">
                 生成恢复码
               </el-button>
+              <!--
+                钉住宽度：它带 :loading，而 Element Plus 的加载态会在文字前插一个转圈，
+                不钉的话按钮会变宽一下再缩回去，还会把旁边的「生成恢复码」挤动。
+                「禁用设备 / 启用设备」四个字加转圈约 104px。
+              -->
               <el-button
                 :type="device.enabled ? 'warning' : 'success'"
                 size="default"
                 :loading="toggling"
                 plain
+                style="min-width: 104px"
                 @click="handleToggle"
               >
                 {{ device.enabled ? '禁用设备' : '启用设备' }}

@@ -57,12 +57,19 @@
               @update:model-value="(v: string) => (drafts[item.key] = v)"
             />
 
+            <!--
+              不能用 v-model="drafts[item.key]"：草稿一律是字符串（见 drafts 的说明，
+              后端也按字符串收），而 el-input-number 只接受 Number | Null ——
+              直接绑会报 "Expected Number | Null, got String"，值也照旧传不进去。
+              这里在边界上换一次类型：读出来转 Number，写回去转 String。
+            -->
             <el-input-number
               v-else-if="item.type === 'INT'"
-              v-model="drafts[item.key]"
+              :model-value="numberDraft(item.key)"
               :min="0"
               :controls="false"
               class="input-number"
+              @update:model-value="(v: number | null) => (drafts[item.key] = v == null ? '' : String(v))"
             />
 
             <el-input v-else v-model="drafts[item.key]" class="input-text" />
@@ -106,6 +113,19 @@ const saving = ref(false)
 const drafts = reactive<Record<string, string>>({})
 
 const dirtyCount = computed(() => items.value.filter(isDirty).length)
+
+/**
+ * 草稿是字符串，el-input-number 要 Number —— 在这里换算，边界只此一处。
+ *
+ * 空串（用户清空了输入框）回 null 而不是 0：0 是个合法值（保留天数 0 = 不清理），
+ * 拿它顶替「没填」会让保存下去的值悄悄变成 0。
+ */
+function numberDraft(key: string): number | null {
+  const raw = drafts[key]
+  if (raw === undefined || raw === '') return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
 
 /** 按后端给的分组切片，顺序取后端返回的顺序（也就是枚举里的声明顺序）。 */
 const groups = computed(() => {

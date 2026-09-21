@@ -14,99 +14,121 @@
   <el-dialog
     v-model="visible"
     title="快速连接"
-    width="520px"
+    width="min(640px, 94vw)"
     :close-on-click-modal="false"
     @closed="clear"
   >
     <!--
-      服务器地址。这是整个功能的**前提** —— 码里要写设备能访问的地址，而控制台自己
-      只知道「从哪个 origin 取数据」，不知道设备该连哪台机器（开发时 origin 是
-      localhost，对手机毫无意义）。没配就直接不给开这个弹窗，见 open()。
+      安全状态放最上面，一行说清。**只有出问题时才升级成整块 el-alert** ——
+      一切正常时也用 alert 报「已启用」，等于拿一个占三行的框去说一件不需要
+      处置的事，真正需要看见的那两种（没口令 / 已停用）反而被稀释。
     -->
-    <div class="section-label">服务器地址</div>
-    <div class="url-row">
-      <span class="mono url-text">{{ serverUrl }}</span>
-      <el-button size="small" @click="handleCopyUrl">复制地址</el-button>
+    <div v-if="token?.enabled" class="qc-status">
+      <el-icon><CircleCheck /></el-icon>
+      <span>接入口令已启用 —— 新设备必须扫下面这张码才能接入。</span>
     </div>
-    <!--
-      启用了口令之后，「复制地址」单独一段是**不完整**的：手机粘过去只拿到地址，
-      注册会被服务端以「没带接入口令」拒掉，而现场看不出是少了什么。
-      所以再给一个把地址与口令一起带走的按钮。
-
-      没有口令时不显示它 —— 那时候两个按钮复制的内容完全一样，多一个只是噪音。
-    -->
-    <div v-if="token?.token" class="connect-info-row">
-      <el-button size="small" @click="handleCopyConnectInfo">复制连接信息（含口令）</el-button>
-      <span class="hint hint--inline">没相机扫码时，把这个整段贴给手机即可</span>
-    </div>
-
-    <div v-if="qr" class="qr-box">
-      <img :src="qr" alt="快速连接二维码" />
-    </div>
-    <div v-else class="qr-box qr-box--loading">
-      <el-icon class="is-loading"><Loading /></el-icon>
-    </div>
-
-    <p class="hint">
-      在手机 App 主页点「扫码连接服务器」对准这里。已配置过的手机可走
-      「设置 → 配置二维码 → 扫码导入」。
-    </p>
-
-    <el-divider />
-
-    <div class="section-label">接入口令</div>
-
     <!--
       未生成：注册接口是**开放**的。这不是一个可以轻描淡写带过的状态 ——
-      任何知道上面这个地址的人都能注册一台设备进来，所以这里显式警告，
+      任何知道下面这个地址的人都能注册一台设备进来，所以这里显式警告，
       并且把口令的生成做成一个明确的按钮，不自动生成：静默改变安全边界
       比多点一次更糟。
     -->
     <el-alert
-      v-if="!token"
+      v-else-if="!token"
       type="warning"
       :closable="false"
       show-icon
       title="尚未启用接入口令"
-      description="此刻任何知道上面这个地址的人都能注册一台设备进来。生成一张口令后，新设备必须扫这张码才能接入。"
+      description="此刻任何知道下面这个地址的人都能注册一台设备进来。生成一张口令后，新设备必须扫这张码才能接入。"
     />
-    <template v-else>
-      <el-alert
-        v-if="!token.enabled"
-        type="warning"
-        :closable="false"
-        show-icon
-        title="接入口令已停用"
-        description="注册接口现在是开放的，任何知道该地址的人都能注册设备。口令本身还留着，重新启用即可，不必换一张。"
-      />
-      <el-alert
-        v-else
-        type="success"
-        :closable="false"
-        show-icon
-        title="接入口令已启用"
-        description="新设备必须携带这张二维码里的口令才能注册。"
-      />
+    <el-alert
+      v-else
+      type="warning"
+      :closable="false"
+      show-icon
+      title="接入口令已停用"
+      description="注册接口现在是开放的，任何知道该地址的人都能注册设备。口令本身还留着，重新启用即可，不必换一张。"
+    />
 
-      <div class="token-row">
-        <span class="mono token-text">{{ revealed ? token.token : maskToken(token.token) }}</span>
-        <el-button link type="primary" size="small" @click="revealed = !revealed">
-          {{ revealed ? '隐藏' : '显示' }}
-        </el-button>
-        <el-button link type="primary" size="small" @click="handleCopyToken">复制</el-button>
+    <!--
+      左右两栏：二维码在左、要读要复制的信息在右。
+
+      原先是一列向下排（地址、二维码、口令三段各占一行），弹窗总高约 660px ——
+      而这张弹窗真正要传达的只有一件事：扫这张码。二维码竖着占掉 260px 之后，
+      剩下的信息被推到折叠线以下，弹窗在笔电屏幕上顶到天花板。
+      分栏之后二维码旁边那块空白正好用来放地址与口令，高度掉到 300px 出头。
+    -->
+    <div class="qc-body">
+      <div class="qc-qr-col">
+        <div v-if="qr" class="qc-qr">
+          <img :src="qr" alt="快速连接二维码" />
+        </div>
+        <div v-else class="qc-qr qc-qr--loading">
+          <el-icon class="is-loading"><Loading /></el-icon>
+        </div>
       </div>
-    </template>
+
+      <div class="qc-info-col">
+        <!--
+          服务器地址是整个功能的**前提** —— 码里要写设备能访问的地址，而控制台
+          自己只知道「从哪个 origin 取数据」，不知道设备该连哪台机器（开发时 origin
+          是 localhost，对手机毫无意义）。没配就直接不给开这个弹窗，见 open()。
+        -->
+        <div class="qc-label">服务器地址</div>
+        <div class="mono qc-url-text">{{ serverUrl }}</div>
+        <div class="qc-actions">
+          <el-button size="small" @click="handleCopyUrl">复制地址</el-button>
+          <!--
+            启用了口令之后，「复制地址」单独一段是**不完整**的：手机粘过去只拿到地址，
+            注册会被服务端以「没带接入口令」拒掉，而现场看不出是少了什么。
+            没有口令时不显示它 —— 那时两个按钮复制的内容完全一样，多一个只是噪音。
+          -->
+          <el-button v-if="token?.token" size="small" @click="handleCopyConnectInfo">
+            复制连接信息
+          </el-button>
+        </div>
+
+        <template v-if="token">
+          <div class="qc-label qc-label--spaced">接入口令</div>
+          <div class="qc-token">
+            <span class="mono qc-token-text">
+              {{ revealed ? token.token : maskToken(token.token) }}
+            </span>
+            <el-button link type="primary" size="small" @click="revealed = !revealed">
+              {{ revealed ? '隐藏' : '显示' }}
+            </el-button>
+            <el-button link type="primary" size="small" @click="handleCopyToken">复制</el-button>
+          </div>
+          <!--
+            口令自己的操作留在这里，不放到弹窗页脚：页脚是全弹窗的动作区，
+            摆在那里会让「停用」看起来像在关掉这个弹窗。
+          -->
+          <div class="qc-actions">
+            <el-button size="small" :loading="busy" @click="handleToggleEnabled">
+              {{ token.enabled ? '停用' : '启用' }}
+            </el-button>
+            <el-button size="small" type="primary" :loading="busy" @click="handleRotate">
+              重新生成
+            </el-button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!--
+      这段说明放在两栏**下方通栏**，而不是塞进左栏：塞在二维码底下时左栏比右栏高出一截，
+      弹窗底部是参差的，而它本来是两个栏目共用的旁注。
+    -->
+    <p class="qc-hint qc-hint--foot">
+      手机 App 主页点「扫码连接服务器」对准二维码；已配置过的手机走
+      「设置 → 配置二维码 → 扫码导入」。
+    </p>
 
     <template #footer>
+      <!-- 还没有口令时，「生成」是这个弹窗当前唯一该做的事，所以留在页脚 -->
       <el-button v-if="!token" type="primary" :loading="busy" @click="handleRotate">
         生成接入口令
       </el-button>
-      <template v-else>
-        <el-button :loading="busy" @click="handleToggleEnabled">
-          {{ token.enabled ? '停用' : '启用' }}
-        </el-button>
-        <el-button type="primary" :loading="busy" @click="handleRotate">重新生成</el-button>
-      </template>
       <el-button @click="visible = false">关闭</el-button>
     </template>
   </el-dialog>
@@ -297,65 +319,103 @@ defineExpose({ open })
 </script>
 
 <style scoped>
-.section-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--el-text-color-regular);
-  margin-bottom: 8px;
-}
-.url-row {
+/* 顶部那行安全状态。用成功色的浅底而不是 el-alert：一行能说清的事不该占三行 */
+.qc-status {
   display: flex;
   align-items: center;
-  gap: 12px;
-}
-.connect-info-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-.hint--inline {
-  text-align: left;
-}
-.url-text {
-  flex: 1;
-  /* 地址是这一页最需要被核对的东西，不能截断（要能看清每一个字符） */
-  word-break: break-all;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  border-radius: 6px;
   font-size: 13px;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success);
 }
-.qr-box {
+
+/*
+ * 左右两栏。窄到放不下时（flex-wrap）自动上下堆叠，而不是把二维码压扁 ——
+ * 压扁的二维码扫不出来，而堆叠只是让弹窗长一点。
+ */
+.qc-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.qc-qr-col {
+  flex: 0 0 auto;
+  width: 200px;
+}
+.qc-qr {
   display: flex;
   justify-content: center;
-  padding: 12px 0;
 }
-.qr-box img {
-  width: 260px;
-  height: 260px;
+.qc-qr img {
+  width: 200px;
+  height: 200px;
 }
-.qr-box--loading {
-  height: 260px;
+.qc-qr--loading {
+  height: 200px;
   align-items: center;
   font-size: 24px;
   color: var(--el-text-color-placeholder);
 }
-.hint {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--el-text-color-secondary);
-  text-align: center;
+
+.qc-info-col {
+  flex: 1 1 260px;
+  /* 不加这句，里面那个不换行的长地址会把这一栏撑破、把二维码挤出弹窗 */
+  min-width: 0;
 }
-.token-row {
+
+.qc-label {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+}
+.qc-label--spaced {
+  margin-top: 16px;
+}
+.qc-url-text {
+  /* 地址是这一页最需要被核对的东西，不能截断（要能看清每一个字符） */
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.qc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* 与弹窗页脚同一个理由：这几颗按钮带 :loading，钉住宽度就不会随转圈抖动 */
+.qc-actions .el-button {
+  min-width: 88px;
+}
+
+.qc-token {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
 }
-.token-text {
+.qc-token-text {
   flex: 1;
+  min-width: 0;
   font-size: 12px;
   word-break: break-all;
 }
+
+.qc-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+.qc-hint--foot {
+  margin-top: 14px;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
