@@ -1,0 +1,108 @@
+name: release
+
+# 打 tag 就出镜像（后端 + 前端），推到 ghcr.io。服务器**不用放源码、也不用装 JDK/Maven**，
+# 一句 `docker compose pull && docker compose up -d` 就是一次部署：
+#
+#   服务器上只需要两个文件：docker/docker-compose.yml 和 docker/.env（都不含源码）
+#   cd /data/sms-gateway/docker
+#   docker compose pull
+#   docker compose up -d
+#
+# 顺带把后端 jar 挂到 Release 上：ghcr.io 万一拉不动，可以退回「下载 jar → 放进
+# backend/target/ → docker compose up -d --build」这条路（那就需要源码了）。
+#
+# ── 两个前提 ──
+# 1. 仓库变量 VITE_DEVICE_SERVER_URL 必须在（Settings → Secrets and variables →
+#    Actions → Variables）。它是**构建期**变量，会被 Vite 内联进前端产物 ——
+#    也就是二维码里给手机的那个地址。没设就让它失败，而不是塞一个猜的地址进去
+#    （猜错的后果见 management/src/api/device.ts 里那段注释）。
+# 2. 镜像里的设备地址一旦定下来就跟着镜像走：换地址（比如上域名）要重新打 tag 重构建。
+
+on:
+  push:
+    tags: ['v*']
+
+  # 需要「当前分支立刻出一版镜像」时，到 Actions 页面手动跑一次（镜像会打上分支名）。
+  workflow_dispatch:
+
+permissions:
+  contents: write # 挂 Release
+  packages: write # 推 ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ${{ github.repository_owner }}/sms-gateway-backend
+  FRONTEND_IMAGE: ${{ github.repository_owner }}/sms-gateway-frontend
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # 先卡一道：没配设备地址就别构建 —— 内联错地址的镜像发出去，现场是「手机连不上、
+      # 还看不出为什么」，比构建失败难查得多。
+      - name: Check VITE_DEVICE_SERVER_URL
+        run: |
+          if [ -z "${{ vars.VITE_DEVICE_SERVER_URL }}" ]; then
+            echo "::error::仓库变量 VITE_DEVICE_SERVER_URL 没配。它是设备要访问的后端地址（会写进二维码），在 Settings → Secrets and variables → Actions → Variables 里加一个。"
+            exit 1
+          fi
+
+      # package 会连单测一起跑。src/test 下都是纯单测（没有 @SpringBootTest / JPA），
+      # 不需要 MySQL 与 Redis，runner 上跑得起来。某个测试本来就是红的时候，先加
+      # -DskipTests 把镜像发出去，再单独收拾它 —— 部署不该被无关的红测试卡住。
+      - name: Build backend jar
+        working-directory: backend
+        run: mvn -B package
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 后端镜像的 Dockerfile 只 COPY 上面那个 jar，所以两步的顺序不能反。
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
+
+      # 前端镜像自己会 npm ci + build，设备地址靠 build-arg 传进去（Vite 在构建期内联）。
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: management
+          push: true
+          build-args: |
+            VITE_DEVICE_SERVER_URL=${{ vars.VITE_DEVICE_SERVER_URL }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+
+      # 兜底产物：ghcr.io 拉不动时用得上（服务器上放回 backend/target/ 即可）。
+      - name: Attach jar to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: backend/target/sms-gateway-backend-1.0.0.jar
+
+# ── 换个仓库（比如服务器拉不动 ghcr.io 时改用 Docker Hub）──
+# docker.io 那侧你已经验证过能拉（node/nginx/temurin 都是从那拉的）。要换的话：
+#   1. Docker Hub 上建两个仓库，建一个 Access Token
+#   2. GitHub 仓库 Secrets 加 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+#   3. 把上面 env.REGISTRY 改成 docker.io、两个 LOGIN/BUILD 步骤的 registry 与
+#      username/password 换成对应的 secret，镜像名前面的 owner 换成 Docker Hub 用户名
+#   4. 服务器 .env 里 BACKEND_IMAGE / FRONTEND_IMAGE 跟着换（见 docker/.env.example）
