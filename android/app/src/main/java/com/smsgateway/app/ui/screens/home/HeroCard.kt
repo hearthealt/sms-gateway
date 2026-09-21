@@ -36,6 +36,7 @@ import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
+import com.smsgateway.app.ui.utils.formatRelative
 import com.smsgateway.app.ui.utils.rememberHapticFeedback
 import com.smsgateway.app.ui.utils.rememberNow
 
@@ -239,20 +240,6 @@ private data class StatusInfo(
     val background: Color,
     val icon: ImageVector
 )
-
-/**
- * 相对时间格式化。
- */
-private fun formatRelative(at: Long?, now: Long): String {
-    if (at == null || at <= 0L) return "无"
-    val deltaSeconds = ((now - at) / 1000).coerceAtLeast(0)
-    return when {
-        deltaSeconds < 5 -> "刚刚"
-        deltaSeconds < 60 -> "$deltaSeconds 秒前"
-        deltaSeconds < 3600 -> "${deltaSeconds / 60} 分钟前"
-        else -> "${deltaSeconds / 3600} 小时前"
-    }
-}
 
 /**
  * 「持续了多久」。与 [formatRelative] 方向相反（那是「多久之前」），所以单独一个函数。

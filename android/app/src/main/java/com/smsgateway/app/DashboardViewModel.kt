@@ -25,6 +25,7 @@ import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
+import com.smsgateway.app.util.ServerTime
 import com.smsgateway.app.util.UploadEvents
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.*
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.io.IOException
+import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** 自检结果的一项。 */
@@ -145,6 +147,31 @@ data class DashboardState(
     val queue: List<SmsQueueEntity> = emptyList(),
     val queueLoading: Boolean = false,
 
+    /**
+     * 主页「最近收到」用的几条：服务端最新 3 条。
+     *
+     * 与 [smsRecords]（记录页那一份，带分页）分开：这份只服务主页那三行摘要，
+     * 不能因为主页要看一眼就把记录页的分页状态搅乱。
+     */
+    val recentSms: List<SmsRecord> = emptyList(),
+
+    /**
+     * 最后一次自检的摘要（如「6 项全部通过」）与时刻，没跑过时为空串 / 0。
+     *
+     * 主页那行「自检」拿它显示结论 —— 现场不用点进去等六项跑完就知道还过不过。
+     */
+    val lastSelfTest: String = "",
+    val lastSelfTestAt: Long = 0L,
+
+    /**
+     * 待写入剪贴板的内容（一次性的）。
+     *
+     * 剪贴板要 Context，而这里走「ViewModel 备好内容 → 界面写剪贴板并清空」这条路，
+     * 与 registerMessage / settingsMessage 同一套一次性通道。
+     * 空串是有效值：表示「今天一条验证码都没有」，界面据此提示而不是复制一段空白。
+     */
+    val copyPayload: String? = null,
+
     // 服务端记录页
     val smsRecords: List<SmsRecord> = emptyList(),
     val smsTotal: Long = 0,
@@ -175,6 +202,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_SERVER_URL = DevicePrefs.KEY_SERVER_URL
 
         private const val SMS_PAGE_SIZE = 20
+
+        /** 主页「最近收到」显示几条。三行足够看出「还在收」，再多就把主页撑回一屏列表了。 */
+        private const val RECENT_SMS_COUNT = 3
+
+        /**
+         * 「复制今日验证码」拉多少条。
+         *
+         * 设备接口没有日期筛选参数，只能取一页再按日期过滤 —— 100 条够一天的量，
+         * 今天超过 100 条时会少几个（现场联调够用，要全量有服务端记录页）。
+         */
+        private const val COPY_CODES_PAGE_SIZE = 100
     }
 
     private val _state = MutableStateFlow(DashboardState())
@@ -251,6 +289,8 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 if (count == 0L) return@collect
                 refreshPendingCount()
                 refreshServerStats()
+                // 刚传上去一条 —— 主页那三行摘要立刻跟上，不等下一个 30 秒
+                refreshRecentSms()
             }
         }
     }
@@ -332,7 +372,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 phone = DevicePrefs.phone(app),
                 serverUrl = DevicePrefs.serverUrl(app),
                 enrollToken = DevicePrefs.enrollToken(app),
-                isDisabled = DevicePrefs.isDisabled(app)
+                isDisabled = DevicePrefs.isDisabled(app),
+                // 上次自检的结论也一起水合：主页那行「自检」靠它显示「6 项全部通过 · 2 小时前」
+                lastSelfTest = DevicePrefs.lastSelfTest(app),
+                lastSelfTestAt = DevicePrefs.lastSelfTestAt(app)
             )
         }
     }
@@ -442,6 +485,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 // 真正需要「立刻」的那种变化（刚传上去一条）走 UploadEvents，不靠这里。
                 if (ticks % 6 == 0) {
                     refreshServerStats()
+                    refreshRecentSms()
                 }
                 ticks++
 
@@ -894,6 +938,72 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    // ---------- 主页「复制今日验证码」 ----------
+
+    /**
+     * 备好「今日全部验证码」的文本，交给界面写剪贴板。
+     *
+     * 走服务端记录接口而不是本地库：本地库里只有**还没传上去**的行，传上去就删了，
+     * 拿它拼「今日验证码」只会拼出一个几乎为空的列表。
+     *
+     * 只取第一页 100 条再按日期过滤（设备接口没有日期筛选参数）。今天超过 100 条时
+     * 会少几个 —— 现场联调那种场景够用，真要全量有服务端记录页。宁可这样，
+     * 也不为了「凑满」去翻页：那会把一个「点一下给我码」的动作变成拉几十个请求。
+     */
+    fun requestCopyTodayCodes() {
+        viewModelScope.launch {
+            val lines = try {
+                val response = RetrofitClient.getApiService()
+                    .mySms(page = 1, pageSize = COPY_CODES_PAGE_SIZE, includeIgnored = false)
+                val records = response.body()?.data?.records.orEmpty()
+                val today = LocalDate.now()
+                records
+                    .filter { record ->
+                        !record.code.isNullOrBlank() &&
+                            ServerTime.toLocalDate(record.receiveTime) == today
+                    }
+                    .map { "${it.sender.orEmpty().ifBlank { "未知" }} ${it.code}" }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Load today codes failed", e)
+                emptyList()
+            }
+
+            // 空列表也要把 copyPayload 置上（空串）：界面据此说「今天还没有验证码」，
+            // 而不是静默什么都不发生 —— 那种「点了没反应」最难查。
+            _state.update { it.copy(copyPayload = lines.joinToString("\n")) }
+        }
+    }
+
+    /** 界面写完剪贴板后调用。 */
+    fun clearCopyPayload() {
+        _state.update { if (it.copyPayload == null) it else it.copy(copyPayload = null) }
+    }
+
+    // ---------- 主页「最近收到」 ----------
+
+    /**
+     * 拉服务端最新几条，供主页那三行摘要。
+     *
+     * 复用记录页那个接口（只取第一页的前几条），不新开接口：这是**看一眼**的东西，
+     * 不值得为它加一个后端端点。失败就静默留着上一次的结果 —— 主页的摘要过期几秒
+     * 比冒一句报错强，真要排查有记录页和服务端记录页两处。
+     */
+    private suspend fun refreshRecentSms() {
+        if (!DevicePrefs.isRegistered(getApplication())) return
+        try {
+            val response = RetrofitClient.getApiService()
+                .mySms(page = 1, pageSize = RECENT_SMS_COUNT, includeIgnored = true)
+            val records = response.body()?.data?.records ?: return
+            _state.update { it.copy(recentSms = records.take(RECENT_SMS_COUNT)) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Load recent sms failed", e)
+        }
+    }
+
     // ---------- 服务端记录页 ----------
 
     fun loadServerSms(page: Int = 1) {
@@ -1027,7 +1137,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
 
-            _state.update { it.copy(selfTestRunning = false) }
+            // 结论留一份给主页那行「自检」：不落盘的话它每次都显示「还没跑过」，
+            // 那行就退化成纯按钮，起不到「不用点进去就知道六项还过不过」的作用。
+            val failed = results.count { !it.ok }
+            val summary = if (failed == 0) "${results.size} 项全部通过" else "$failed 项未通过"
+            val at = System.currentTimeMillis()
+            DevicePrefs.setLastSelfTest(app, summary, at)
+            _state.update {
+                it.copy(selfTestRunning = false, lastSelfTest = summary, lastSelfTestAt = at)
+            }
         }
     }
 

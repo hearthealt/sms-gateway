@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -37,8 +36,9 @@ import com.smsgateway.app.ui.theme.AppTypography
  * 现场一天要开十次，那行字占的高度不如留给状态。操作入口（扫一扫、自检、设置）
  * 留在这里，与内容页分开，滚动时不会跟着跑。
  *
- * 三个入口按「多久用一次」从右往左排：设置最常碰、自检是排障时才用、
- * 扫一扫一台设备一辈子用一次 —— 最不常点的放最不顺手的位置。
+ * 两个入口按「多久用一次」从右往左排：设置最常碰、扫一扫一台设备一辈子用一次。
+ * 自检原本也在这一排（最中间那个勾选图标），但现场没人知道那是自检 —— 已挪到主页
+ * 单独一行，带文字、并显示上次结论（见 SelfTestRow）。
  *
  * 扫一扫**不随注册状态显隐**。它只在未注册时有用，但一个会凭空出现/消失的图标
  * 比一个常年在那儿、偶尔才点的图标更难找；而且已注册的设备也可能要换服务器接入。
@@ -46,7 +46,6 @@ import com.smsgateway.app.ui.theme.AppTypography
 @Composable
 fun HomeHeader(
     onOpenQuickConnect: () -> Unit,
-    onOpenSelfTest: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     Row(
@@ -89,13 +88,8 @@ fun HomeHeader(
         IconButton(onClick = onOpenQuickConnect) {
             Icon(Icons.Default.QrCodeScanner, contentDescription = "扫一扫", tint = AppColor.onBrand)
         }
-        IconButton(onClick = onOpenSelfTest) {
-            Icon(
-                Icons.AutoMirrored.Filled.FactCheck,
-                contentDescription = "自检",
-                tint = AppColor.onBrand
-            )
-        }
+        // 自检原先也在这里，只有一个勾选图标 —— 现场不知道那是什么。
+        // 已挪到主页单独一行（带文字、并显示上次结论，不过的时候变红），见 SelfTestRow。
         IconButton(onClick = onOpenSettings) {
             Icon(Icons.Default.Settings, contentDescription = "设置", tint = AppColor.onBrand)
         }

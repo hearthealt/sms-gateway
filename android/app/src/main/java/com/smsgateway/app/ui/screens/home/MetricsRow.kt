@@ -34,20 +34,20 @@ import com.smsgateway.app.ui.theme.AppTypography
  * 全页最贵的地方只说了三件事，而且结构完全一样，读起来像同一件事说三遍。
  * 压成一行之后省下约 130dp，头不再那么重。
  *
- * 代价是**三个数字变成一句话**，所以取舍是：
+ * 代价是三个数字挤在一处，所以取舍是：
  * - 保留那个「大于 0 就要处置」的值单独醒目显示 —— 「待上传」；
  * - 「今日短信 / 今日验证码」两个同源的数字合成一段，用「条 / 码」后缀区分；
  * - 原来那几句 hint（「全部已上传」「今天还没收到」「有短信，未提取到」）不再单独占行：
  *   0 本身就说清了「没有」，而两个数字并排时「有短信但没验证码」也看得出来。
  *
- * ## 一段话，两个入口
+ * ## 左右各半，两个入口
  *
- * 读起来得是一句话（左对齐、挨着排），所以不做「左右两半各贴一边」——
- * 那样中间会空出一大片，眼睛要跳一下才把两段连起来。
+ * 两段点去的地方不同（队列页 / 服务端记录页），所以做成**左右各占一半**、各自可点：
+ * 一是两半各约 180dp 宽 × 44dp 高，点击面积比挤在一处宽松得多；
+ * 二是「本地积压」和「服务端今日」本来就是对立的两个来源，贴两端正好把这件事说清。
  *
- * 但两段点去的地方不同（队列页 / 服务端记录页），所以是**并列的两个 clickable**，
- * 不是「整行可点 + 内嵌一个」：嵌套 clickable 在读屏上会读成两个按钮套在一起。
- * 「>」紧跟在它指向的那一段后面，不单独飘在行尾。
+ * 两个都是**并列的 clickable**，不是「整行可点 + 内嵌一个」：嵌套 clickable 在读屏上
+ * 会读成两个按钮套在一起。两半各带一个箭头 —— 省略左边那个，那一半就看不出可点了。
  */
 @Composable
 fun MetricsRow(
@@ -55,23 +55,17 @@ fun MetricsRow(
     onOpenQueue: () -> Unit,
     onOpenServerSms: () -> Unit
 ) {
-    val backlog = state.pendingCount
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.md),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 待上传 → 队列页。大于 0 才染色 —— 这是唯一一个「要人去处置」的信号，
+    Row(modifier = Modifier.fillMaxWidth()) {
+        // 左半：本地积压 → 队列页。大于 0 才染色 —— 这是唯一一个「要人去处置」的信号，
         // 颜色留给它（原先「今日验证码为 0 但有短信」也染橙，而那是每天的常态：
         // 大多数短信本来就没有验证码，橙卡天天出现就没人当回事了）。
         Row(
             modifier = Modifier
+                .weight(1f)
                 .clickable(onClick = onOpenQueue)
-                .padding(vertical = AppSpacing.xxs),
+                .padding(start = AppSpacing.lg, end = AppSpacing.sm, top = AppSpacing.md, bottom = AppSpacing.md),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(AppSpacing.xxs)
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)
         ) {
             Text(
                 text = "待上传",
@@ -79,41 +73,41 @@ fun MetricsRow(
                 color = AppColor.InkSecondary
             )
             Text(
-                text = backlog.toString(),
+                text = state.pendingCount.toString(),
                 style = AppTypography.h3,
-                color = if (backlog > 0) AppColor.Warning else AppColor.Ink
+                color = if (state.pendingCount > 0) AppColor.Warning else AppColor.Ink
             )
+            Chevron()
         }
 
-        // 两段之间的点：既不属于左边也不属于右边，所以放在两个 clickable 之外
-        Text(
-            text = "·",
-            style = AppTypography.bodyMedium,
-            color = AppColor.Faint,
-            modifier = Modifier.padding(horizontal = AppSpacing.sm)
-        )
-
-        // 今日 → 服务端记录页
+        // 右半：今日 → 服务端记录页
         Row(
             modifier = Modifier
+                .weight(1f)
                 .clickable(onClick = onOpenServerSms)
-                .padding(vertical = AppSpacing.xxs),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(start = AppSpacing.sm, end = AppSpacing.lg, top = AppSpacing.md, bottom = AppSpacing.md),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End
         ) {
             Text(
                 text = todaySummary(state),
                 style = AppTypography.bodyMedium,
                 color = AppColor.InkSecondary
             )
-            Spacer(modifier = Modifier.width(AppSpacing.xxs))
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = "服务端记录",
-                tint = AppColor.Faint,
-                modifier = Modifier.size(18.dp)
-            )
+            Spacer(modifier = Modifier.width(AppSpacing.xs))
+            Chevron()
         }
     }
+}
+
+@Composable
+private fun Chevron() {
+    Icon(
+        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+        contentDescription = null,
+        tint = AppColor.Faint,
+        modifier = Modifier.size(18.dp)
+    )
 }
 
 /**
