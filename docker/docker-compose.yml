@@ -90,6 +90,15 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     container_name: sms-gateway-backend
+    # 让容器里的 host.docker.internal 指到宿主机。Linux 上 Docker **不自带**这个名字
+    # （只有 Docker Desktop 内建），而服务器上那套 MySQL / Redis 是装在宿主机上、
+    # 只监听宿主机地址的 —— 容器要用这个名字才连得到它们（.env 里就是这么填的）。
+    # 需要 Docker Engine 20.10+（host-gateway 是那一版引入的）。
+    #
+    # 注意：这条在 Docker Desktop 上会覆盖它内建的解析。本机若要跑 compose 做验证，
+    # 连接目标以 .env 里的地址为准（指向远端库时不走这个名字），不受影响。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # 同理：本机已跑着后端时用 BACKEND_PORT 挪开。
       # 注意这个端口也要同步写进 VITE_DEVICE_SERVER_URL（设备扫二维码连的就是它），
