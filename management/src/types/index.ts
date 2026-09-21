@@ -28,7 +28,13 @@ export interface SmsRecord {
   sender: string
   content: string
   code: string | null
-  /** 采集状态：RECEIVED / DUPLICATE / PROCESSED / IGNORED（命中 ignore 规则）。 */
+  /**
+   * 采集状态。**实际只有两种**：RECEIVED、IGNORED（命中 ignore 规则）。
+   *
+   * DUPLICATE 只是上报给设备端的响应码（去重是撞 uk_device_source_hash 之后更新原行的
+   * duplicateCount，不新插行），PROCESSED 在后端只有枚举声明、没有任何一处写它 ——
+   * 两个都落不到这一列上。别照这个字段判「是不是重复」，那看 duplicateCount。
+   */
   status: string | null
   receiveTime: string
   /** 这段内容后来又收到过几次。0 = 只收到过一次。 */

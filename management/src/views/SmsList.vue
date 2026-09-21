@@ -110,16 +110,36 @@
             <span v-else class="no-code">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="采集" width="96" align="center">
+        <!--
+          列名不能叫「采集」：这一格装的是**服务端对这条短信的判定**，而不只是
+          「采没采」—— 命中 ignore 规则是「已忽略」，同一内容反复到达是「重复 N 次」，
+          正常收下则什么都不标。叫「采集」的话，「已忽略」和「重复 N 次」两个回复
+          都答不上「采集了没」这个问题。
+          「判定」这个词是跟着 SmsRecord.status 的注释来的（那个字段写的正是
+          「服务端判定」，只有 RECEIVED / IGNORED 两种，重复看 duplicateCount）。
+        -->
+        <el-table-column label="判定" width="150" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.status === 'IGNORED'" type="danger" size="small" effect="plain">已忽略</el-tag>
-            <!-- 重复到达不单开一行，计数就记在这一格上；具体时刻看右侧「更新时间」列。
-                 展开行里还有一句完整的（首次是什么时候、之后又来过几次）。 -->
-            <el-tag v-else-if="row.duplicateCount > 0" type="warning" size="small" effect="plain">
-              重复 {{ row.duplicateCount }} 次
-            </el-tag>
-            <el-tag v-else-if="row.status === 'DUPLICATE'" type="info" size="small" effect="plain">重复</el-tag>
-            <span v-else class="no-code">-</span>
+            <div class="verdict-cell">
+              <el-tag v-if="row.status === 'IGNORED'" type="danger" size="small" effect="plain">已忽略</el-tag>
+              <!-- 重复到达不单开一行，计数就记在这一格上；具体时刻看右侧「更新时间」列。
+                   展开行里还有一句完整的（首次是什么时候、之后又来过几次）。
+
+                   和上面那个 tag 是**并列**的，不是 `v-else-if`：命中 ignore 规则的短信
+                   照样会被重复投递（同一个码连来几次），挤掉的话那次数就再也看不到了 ——
+                   而「同样的内容又来了几次」正是判断「被重放 / 双卡各收了一遍」的唯一线索。
+
+                   也刻意不判 `status === 'DUPLICATE'`：库里的 status 只可能是 RECEIVED 或
+                   IGNORED（去重是撞 uk_device_source_hash 之后更新原行的 duplicate_count，
+                   不新插行），那个分支永远命中不了。 -->
+              <el-tag v-if="row.duplicateCount > 0" type="warning" size="small" effect="plain">
+                重复 {{ row.duplicateCount }} 次
+              </el-tag>
+              <!-- 一个标签都没有时才用「-」占位。不能写成某个标签的 v-else：
+                   那样「已收下但重复过 2 次」会显示成「- 重复 2 次」，那个横杠
+                   读起来像是「状态未知」。 -->
+              <span v-if="row.status !== 'IGNORED' && row.duplicateCount === 0" class="no-code">-</span>
+            </div>
           </template>
         </el-table-column>
         <!-- 放在最后：它是「这条记录什么时候动过」，不是阅读这条短信的入口。
@@ -389,6 +409,16 @@ useAdminEvents((event) => {
 
 .time-text { font-size: 13px; color: var(--color-text-secondary); }
 .no-code { color: var(--color-text-placeholder); }
+
+/* 「判定」标签与「重复 N 次」并排：两者是并列的信息（一条短信可以既被忽略又被重复投递），
+   挤在一行放不下时换行，而不是把后面那个顶掉。 */
+.verdict-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  justify-content: center;
+}
 
 /*
  * 窄屏：筛选控件各占一行，动作区（开关 + 按钮）自成一行。

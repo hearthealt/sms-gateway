@@ -16,6 +16,12 @@ const props = defineProps<{
  * 颜色一律指向 App.vue 的令牌，不再在 JS 里复制一份十六进制 ——
  * var() 在内联样式里是会解析的（浏览器按 :root 求值）。
  * 代价是写错令牌名时 var() 静默失败、圆点变透明，改这张表请到页面上看一眼。
+ *
+ * 只留**真的会传进来**的两类：设备状态（DeviceList / DeviceDetail / Dashboard 传
+ * device.status）和采集规则的动作（RuleManagement 传 row.action）。
+ * 曾经这里还有 RECEIVED / DUPLICATE / PROCESSED 三条短信状态 —— 短信列表早就不用
+ * 这个组件了，而且 DUPLICATE 在库里根本不存在（重复到达不新插行，见 SmsList.vue
+ * 「采集」列那句注释），留着只会让人以为短信状态里有「重复」这一档。已删。
  */
 const statusMap: Record<string, { color: string; text: string }> = {
   online: { color: 'var(--color-success)', text: '在线' },
@@ -25,9 +31,6 @@ const statusMap: Record<string, { color: string; text: string }> = {
   DISABLED: { color: 'var(--color-danger)', text: '已禁用' },
   enabled: { color: 'var(--color-success)', text: '已启用' },
   disabled: { color: 'var(--color-danger)', text: '已禁用' },
-  RECEIVED: { color: 'var(--color-primary)', text: '已接收' },
-  DUPLICATE: { color: 'var(--color-warning)', text: '重复' },
-  PROCESSED: { color: 'var(--color-success)', text: '已处理' },
   collect: { color: 'var(--color-primary)', text: '采集' },
   ignore: { color: 'var(--color-info)', text: '忽略' },
 }
@@ -35,8 +38,8 @@ const statusMap: Record<string, { color: string; text: string }> = {
 const info = computed(() => statusMap[props.status] || { color: 'var(--color-info)', text: props.status })
 const dotColor = computed(() => info.value.color)
 const displayText = computed(() => info.value.text)
-// 「还在动」的状态才呼吸：绿色的那几种，加上蓝色的已接收
-const isOnline = computed(() => ['online', 'ACTIVE', 'enabled', 'RECEIVED', 'PROCESSED'].includes(props.status))
+// 「还在动」的状态才呼吸：绿色的那几种
+const isOnline = computed(() => ['online', 'ACTIVE', 'enabled'].includes(props.status))
 </script>
 
 <style scoped>
