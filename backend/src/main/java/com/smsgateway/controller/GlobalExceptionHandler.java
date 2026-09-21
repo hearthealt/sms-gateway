@@ -11,6 +11,7 @@ import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestTimeoutException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -122,6 +123,26 @@ public class GlobalExceptionHandler {
         log.warn("Notify not configured: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(ApiResult.error(503, e.getMessage()));
+    }
+
+    /**
+     * 异步请求超时。实际只会在一种情况下出现：停机时 Tomcat 关连接器，会把还挂着的
+     * 异步请求逐个强制置为超时（AbstractProtocol.stop 里对 waitingProcessors
+     * 逐个 timeoutAsync(-1)），管理后台那条 SSE 事件流因此每次重启都撞上一发。
+     *
+     * <p>必须单独接住，不能掉进下面那个兜底：兜底返回 500 + ApiResult，可这条响应的
+     * Content-Type 已经写死 text/event-stream，没有转换器能写 ApiResult
+     * （HttpMessageNotWritableException: No converter for [...] with preset Content-Type
+     * 'text/event-stream'）—— 于是一次正常收线在日志里变成两坨 ERROR 栈，把真错误淹掉。
+     *
+     * <p>不返回 body：连接那头要么已经走了，要么流已经结束，写了也没人收；而且带 body
+     * 会原样撞上上面那个转换器问题。状态码仍按 Spring 自己的约定给 503
+     * （DefaultHandlerExceptionResolver 处理这个异常就是 503），响应若已提交它会被忽略。
+     */
+    @ExceptionHandler(AsyncRequestTimeoutException.class)
+    public ResponseEntity<Void> handleAsyncTimeout(AsyncRequestTimeoutException e) {
+        log.debug("Async request timed out (client gone, or server shutting down)");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
     }
 
     @ExceptionHandler(Exception.class)

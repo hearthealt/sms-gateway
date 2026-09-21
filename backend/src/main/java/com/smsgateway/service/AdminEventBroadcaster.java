@@ -1,6 +1,8 @@
 package com.smsgateway.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -64,6 +66,43 @@ public class AdminEventBroadcaster {
 
         log.debug("Admin event stream subscribed, active={}", emitters.size());
         return emitter;
+    }
+
+    /**
+     * 停机前把还挂着的事件流收干净。
+     *
+     * <p>不收会怎样：Tomcat 关连接器时（{@code AbstractProtocol.stop}）会把
+     * waitingProcessors 里每个还挂着的异步请求逐个 {@code timeoutAsync(-1)} —— 也就是
+     * 强制置为超时。{@code SseEmitter(0L)} 在容器里存的 asyncTimeout 就是 0，而 0 只意味着
+     * 「不主动超时」，那发强制超时照样落到每一条流上，Spring 把它变成
+     * AsyncRequestTimeoutException（由 GlobalExceptionHandler 接住、debug 记一句）。
+     * 前端不觉得疼（流结束会走它本来那条退避重连），但每次重启都白刷一轮异常栈。
+     *
+     * <p>为什么监听 ContextClosedEvent 而不是 {@code @PreDestroy}：Boot 3.2 的
+     * {@code AbstractApplicationContext.doClose()} 顺序是「先发 ContextClosedEvent →
+     * 再停 Lifecycle（web server 就在其中）→ 最后销毁单例 bean」。@PreDestroy 落在最后
+     * 一步，那时连接器已经停完，来不及。
+     *
+     * <p>收流走 {@code complete()}：它会 flush，并让 DeferredResult 以 null 结束
+     * （见 ResponseBodyEmitterReturnValueHandler），请求随即正常完成 —— processor 不再留在
+     * waitingProcessors 里，那发强制的超时因此落空；前端看到的是流干净地结束。
+     */
+    @EventListener(ContextClosedEvent.class)
+    public void closeAllOnShutdown() {
+        if (emitters.isEmpty()) {
+            return;
+        }
+        log.info("Closing {} admin event stream(s) before shutdown", emitters.size());
+        for (SseEmitter emitter : emitters) {
+            try {
+                emitter.complete();
+            } catch (Exception e) {
+                // 对方已经走了（关了页面、断了网）。这里只是尽量让还活着的那几条干净收线，
+                // 收不掉就算了 —— 剩下的交给上面那个 AsyncRequestTimeoutException handler。
+                log.debug("Failed to complete admin event emitter on shutdown", e);
+            }
+        }
+        emitters.clear();
     }
 
     /**
