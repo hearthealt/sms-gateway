@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smsgateway.model.dto.NotifyChannelRequest;
 import com.smsgateway.model.dto.NotifyChannelView;
+import com.smsgateway.model.dto.NotifyTestResult;
 import com.smsgateway.model.entity.NotifyChannel;
 import com.smsgateway.model.entity.NotifyRoute;
 import com.smsgateway.model.entity.SmsMessage;
@@ -178,6 +179,30 @@ public class NotifyChannelService {
             log.warn("测试发送异常：channelId={}", id, e);
             return SendResult.failed(0, e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * 把所有**启用**的渠道各测一条，返回逐个结果。设备端的「一键测转发链路」用它。
+     *
+     * <p>为什么设备端要能自己发起：转发断掉是**静默**的 —— 手机照收、心跳照发、
+     * 管理端设备列表上一切正常，只是码再也送不到微信里。设备持有者（现场那个人）
+     * 没有任何别的界面能回答「码到底送出去了没有」，只能来问管理员。给一个按钮，
+     * 问题在十秒内定性。
+     *
+     * <p>返回逐个渠道的结果而不是一个总成败：坏了哪一个才是要处置的东西。
+     * 消息内容用 {@link #sampleMessage()}，**不含任何真实验证码**，且正文里写明是测试。
+     */
+    public List<NotifyTestResult> testAllEnabled() {
+        return channelRepository.findByEnabledTrue().stream()
+                .map(channel -> {
+                    SendResult result = test(channel.getId());
+                    return new NotifyTestResult(
+                            channel.getId(),
+                            channel.getName(),
+                            result.success(),
+                            result.success() ? null : result.describe());
+                })
+                .toList();
     }
 
     // ---------------------------------------------------------------- 内部

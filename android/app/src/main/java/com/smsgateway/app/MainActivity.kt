@@ -24,6 +24,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.smsgateway.app.qr.QrExportScreen
 import com.smsgateway.app.qr.QuickConnectScreen
+import com.smsgateway.app.ui.lock.LockScreen
 import com.smsgateway.app.ui.screens.home.DeviceChecks
 import com.smsgateway.app.ui.screens.home.HomeScreen
 import com.smsgateway.app.ui.screens.queue.QueueScreen
@@ -31,6 +32,8 @@ import com.smsgateway.app.ui.screens.selftest.SelfTestScreen
 import com.smsgateway.app.ui.screens.settings.SettingsScreen
 import com.smsgateway.app.ui.screens.sms.ServerSmsScreen
 import com.smsgateway.app.ui.theme.AppTheme
+import com.smsgateway.app.ui.utils.SystemSettings
+import com.smsgateway.app.util.AppLock
 import com.smsgateway.app.util.DevicePhone
 import kotlinx.coroutines.launch
 
@@ -38,6 +41,9 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
+
+        /** 从后台回来多久之后重新上锁，见 [backgroundedAt]。 */
+        private const val LOCK_AFTER_BACKGROUND_MS = 30_000L
     }
 
     private val viewModel: DashboardViewModel by viewModels()
@@ -62,10 +68,67 @@ class MainActivity : ComponentActivity() {
             checkAndRequestPermissions()
         }
 
+        // 上锁要赶在第一次组合之前：cold start 时若先渲染出主页再弹锁屏，
+        // 那一眼正好把验证码露给路过的人 —— 而这一眼就是要防的东西。
+        AppLock.lockIfEnabled(this)
+
         setContent {
             AppTheme {
-                GatewayApp(viewModel)
+                val locked by AppLock.locked.collectAsState()
+                val activity = this@MainActivity
+
+                if (locked) {
+                    LockScreen(
+                        canUseBiometric = canUseBiometric,
+                        onUnlockWithPin = { pin ->
+                            val ok = AppLock.verify(this, pin)
+                            if (ok) AppLock.unlock()
+                            ok
+                        },
+                        onUnlockWithBiometric = {
+                            AppLock.promptBiometric(
+                                activity = activity,
+                                onSuccess = {
+                                    biometricMessage = null
+                                    AppLock.unlock()
+                                },
+                                onFailure = { biometricMessage = it }
+                            )
+                        },
+                        biometricMessage = biometricMessage,
+                        onOpenAppSettings = { SystemSettings.openAppDetails(this) }
+                    )
+                } else {
+                    GatewayApp(viewModel)
+                }
             }
+        }
+    }
+
+    /**
+     * 从后台回来超过这个时长就重新上锁。
+     *
+     * 用一个宽松的阈值而不是「一离开就锁」：这个应用会被系统对话框、相机权限页、
+     * 电池白名单设置页打断，每次都要求重输 PIN 会让人把锁关掉 —— 而关掉的锁等于没有。
+     * 30 秒足够挡住「手机放桌上、有人拿起来看」这种场景。
+     */
+    private var backgroundedAt = 0L
+
+    private val canUseBiometric: Boolean by lazy { AppLock.canUseBiometric(this) }
+
+    private var biometricMessage: String? by mutableStateOf(null)
+
+    override fun onStop() {
+        super.onStop()
+        backgroundedAt = System.currentTimeMillis()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (backgroundedAt > 0 &&
+            System.currentTimeMillis() - backgroundedAt > LOCK_AFTER_BACKGROUND_MS
+        ) {
+            AppLock.lockIfEnabled(this)
         }
     }
 

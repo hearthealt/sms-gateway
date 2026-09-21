@@ -7,6 +7,7 @@ import com.smsgateway.app.model.DeviceTrend
 import com.smsgateway.app.model.DeviceTokenData
 import com.smsgateway.app.model.HeartbeatRequest
 import com.smsgateway.app.model.HeartbeatResponse
+import com.smsgateway.app.model.NotifyTestResult
 import com.smsgateway.app.model.PageResult
 import com.smsgateway.app.model.SmsRecord
 import com.smsgateway.app.model.SmsUploadRequest
@@ -59,6 +60,15 @@ interface ApiService {
      */
     @GET("api/device/sms/trend")
     suspend fun smsTrend(@Query("days") days: Int): Response<ApiResponse<DeviceTrend>>
+
+    /**
+     * 测一次转发链路：服务端会给每个启用的转发渠道各发一条测试消息，返回逐个结果。
+     *
+     * 这条请求**有外发副作用**（真的会往微信/钉钉发消息），所以服务端按设备限流
+     * （5 分钟一次），界面上也要挡住连点。
+     */
+    @POST("api/device/notify/test")
+    suspend fun testNotify(): Response<ApiResponse<List<NotifyTestResult>>>
 
     @POST("api/sms/receive")
     suspend fun uploadSms(

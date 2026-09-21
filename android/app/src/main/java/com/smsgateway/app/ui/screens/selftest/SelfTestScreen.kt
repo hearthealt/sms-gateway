@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FactCheck
@@ -75,10 +77,14 @@ fun SelfTestScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
+                    .verticalScroll(rememberScrollState())
                     .padding(AppSpacing.md),
                 verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
             ) {
                 SelfTestCard(state.selfTest)
+
+                // 转发链路是**主动**才能测的（会给外部渠道真发消息），所以它不在那六项里
+                NotifyTestCard(state = state, onTest = { viewModel.testNotify() })
             }
         }
     }

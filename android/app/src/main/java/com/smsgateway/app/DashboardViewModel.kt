@@ -174,7 +174,18 @@ data class DashboardState(
 
     // 自检页
     val selfTest: List<SelfTestItem> = emptyList(),
-    val selfTestRunning: Boolean = false
+    val selfTestRunning: Boolean = false,
+
+    /**
+     * 转发链路测试：正在测 / 逐个渠道的结果 / 整条请求失败的原因。
+     *
+     * 三者并存而不是合成一个：一次测试里「请求本身失败」（服务器不可达）与
+     * 「请求成功但某个渠道发不出去」是两回事，前者该整块报错，后者要逐条列出来。
+     * [notifyTestResults] 为 null 表示还没测过。
+     */
+    val notifyTesting: Boolean = false,
+    val notifyTestResults: List<NotifyTestResult>? = null,
+    val notifyTestError: String? = null
 ) {
     /**
      * 派生量，判据与 DevicePrefs.isRegistered 完全一致。
@@ -997,6 +1008,57 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     /** 界面写完剪贴板后调用。 */
     fun clearCopyPayload() {
         _state.update { if (it.copyPayload == null) it else it.copy(copyPayload = null) }
+    }
+
+    // ---------- 自检页的「测转发链路」 ----------
+
+    /**
+     * 让服务端给每个启用的转发渠道各发一条测试消息。
+     *
+     * **这是这一整条链路里唯一能主动验证的一环**：手机照收、心跳照发、管理端设备列表上
+     * 一切正常，而码再也送不到微信里 —— 转发断掉是静默的，之前没有任何界面能回答
+     * 「码到底送出去了没有」。
+     *
+     * 服务端按设备限流（5 分钟一次），这里也挡一道连点：它真的会往外发消息。
+     */
+    fun testNotify() {
+        if (_state.value.notifyTesting) return
+
+        _state.update {
+            it.copy(notifyTesting = true, notifyTestError = null)
+        }
+
+        viewModelScope.launch {
+            try {
+                val response = RetrofitClient.getApiService().testNotify()
+                val body = response.body()
+                if (response.isSuccessful && body?.data != null) {
+                    _state.update {
+                        it.copy(notifyTesting = false, notifyTestResults = body.data)
+                    }
+                } else {
+                    // 与别的请求不同，这里的失败要**留在页面上**：限流提示、未配置渠道、
+                    // 服务器不可达，三种都要求人做点什么，一闪而过的话等于没说
+                    _state.update {
+                        it.copy(
+                            notifyTesting = false,
+                            notifyTestError = parseErrorMessage(response.errorBody()?.string())
+                                ?: "测试失败（HTTP ${response.code()}）"
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Notify test failed", e)
+                _state.update {
+                    it.copy(
+                        notifyTesting = false,
+                        notifyTestError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
+                    )
+                }
+            }
+        }
     }
 
     // ---------- 主页「最近收到」 ----------

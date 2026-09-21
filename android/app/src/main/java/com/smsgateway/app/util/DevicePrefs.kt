@@ -6,6 +6,8 @@ import android.provider.Settings
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 /**
  * 设备本地存储的统一定义。
@@ -83,6 +85,10 @@ object DevicePrefs {
 
     /** 一次性修复标记：早期版本把上传失败的行错标成 failed，需要扫回 pending 一次。 */
     const val KEY_STRANDED_SWEPT = "stranded_rows_swept"
+
+    /** 应用锁的 PIN：只存派生物（见 [setLockPin]），不存明文。 */
+    const val KEY_LOCK_PIN_SALT = "lock_pin_salt"
+    const val KEY_LOCK_PIN_HASH = "lock_pin_hash"
 
     /** 模拟器访问宿主机 localhost 的地址。 */
     const val DEFAULT_SERVER_URL = "http://10.0.2.2:8080"
@@ -283,6 +289,58 @@ object DevicePrefs {
 
     fun markStrandedRowsSwept(context: Context) =
         get(context).edit().putBoolean(KEY_STRANDED_SWEPT, true).apply()
+
+    // ---------- 应用锁的 PIN ----------
+
+    /** PIN 的派生物，null 表示没设过锁。 */
+    fun lockPinHash(context: Context): String? =
+        get(context).getString(KEY_LOCK_PIN_HASH, null)?.takeIf { it.isNotBlank() }
+
+    /**
+     * 设 PIN：每次换一个随机 salt，只存 `PBKDF2(pin, salt)`。
+     *
+     * 为什么不是裸 SHA-256：6 位数字只有一百万种，手机上裸 SHA-256 几秒就跑完了。
+     * 迭代次数见 [AppLock]，把离线爆破拉到有意义的一档。
+     * 用 commit()：这是「锁生效了没有」，不能异步写完就被杀进程 —— 那会留下一个
+     * 「设了锁但没锁」的状态。
+     */
+    fun setLockPin(context: Context, pin: String) {
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }.toHex()
+        get(context).edit()
+            .putString(KEY_LOCK_PIN_SALT, salt)
+            .putString(KEY_LOCK_PIN_HASH, derivePinHash(pin, salt))
+            .commit()
+    }
+
+    fun verifyLockPin(context: Context, pin: String): Boolean {
+        val salt = get(context).getString(KEY_LOCK_PIN_SALT, null) ?: return false
+        val stored = lockPinHash(context) ?: return false
+        return stored == derivePinHash(pin, salt)
+    }
+
+    fun clearLockPin(context: Context) {
+        get(context).edit()
+            .remove(KEY_LOCK_PIN_SALT)
+            .remove(KEY_LOCK_PIN_HASH)
+            .commit()
+    }
+
+    private fun derivePinHash(pin: String, salt: String): String {
+        val spec = PBEKeySpec(pin.toCharArray(), salt.toByteArray(), PIN_ITERATIONS, PIN_KEY_BITS)
+        return try {
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1")
+                .generateSecret(spec)
+                .encoded
+                .toHex()
+        } finally {
+            spec.clearPassword()
+        }
+    }
+
+    private const val PIN_ITERATIONS = 60_000
+    private const val PIN_KEY_BITS = 256
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     /** 最近一次心跳成功的时间，从未成功过返回 null。 */
     fun lastHeartbeatAt(context: Context): Long? =

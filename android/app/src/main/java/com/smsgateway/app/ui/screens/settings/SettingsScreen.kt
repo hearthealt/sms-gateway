@@ -290,6 +290,10 @@ fun SettingsScreen(
                 }
             }
 
+            // 应用锁放在设备信息之后、其他之前：它改的是「这台设备怎么被使用」，
+            // 与设备身份同属一类，而「其他」里是清理记录这类维护动作
+            AppLockCard()
+
             SettingsCard(title = "其他") {
                 OutlinedButton(
                     onClick = { viewModel.clearUploadedRecords() },

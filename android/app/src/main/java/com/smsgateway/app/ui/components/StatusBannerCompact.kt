@@ -1,9 +1,6 @@
 package com.smsgateway.app.ui.components
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
+import com.smsgateway.app.ui.utils.SystemSettings
 
 /**
  * 简化的警告横幅 - 浮动提示条样式。
@@ -108,7 +106,7 @@ fun PermissionBannerCompact() {
         actionLabel = "去开启",
         backgroundColor = AppColor.DangerBg,
         contentColor = AppColor.Danger,
-        onClick = { openAppDetailsSettings(context) }
+        onClick = { SystemSettings.openAppDetails(context) }
     )
 }
 
@@ -148,25 +146,6 @@ fun BatteryBannerCompact() {
         actionLabel = "去设置",
         backgroundColor = AppColor.WarningBg,
         contentColor = AppColor.Warning,
-        onClick = { openBatterySettings(context) }
+        onClick = { SystemSettings.openBatteryOptimization(context) }
     )
-}
-
-// ==================== 辅助函数 ====================
-
-private fun openBatterySettings(context: Context) {
-    val intent = Intent(
-        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-        Uri.parse("package:${context.packageName}")
-    )
-    runCatching { context.startActivity(intent) }
-        .onFailure { openAppDetailsSettings(context) }
-}
-
-private fun openAppDetailsSettings(context: Context) {
-    val intent = Intent(
-        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-        Uri.parse("package:${context.packageName}")
-    )
-    runCatching { context.startActivity(intent) }
 }

@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 应用锁用指纹/人脸代打 PIN。平台 BiometricPrompt 要求它；都是普通权限，不弹框。 -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <!-- 读取本机号码用于预填。多数 SIM 卡并不写入该号码，读不到属常态，
          设置页里手填的值才是权威来源。API 33 起用 READ_PHONE_NUMBERS。 -->

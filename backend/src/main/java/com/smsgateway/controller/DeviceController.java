@@ -3,6 +3,7 @@ package com.smsgateway.controller;
 import com.smsgateway.model.dto.*;
 import com.smsgateway.service.AdminSmsService;
 import com.smsgateway.service.DeviceService;
+import com.smsgateway.service.notify.NotifyChannelService;
 import com.smsgateway.util.PageUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -10,6 +11,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @RestController
@@ -19,6 +24,7 @@ public class DeviceController {
 
     private final DeviceService deviceService;
     private final AdminSmsService adminSmsService;
+    private final NotifyChannelService notifyChannelService;
 
     @PostMapping("/register")
     public ResponseEntity<ApiResult<DeviceRegisterResponse>> register(@Valid @RequestBody DeviceRegisterRequest request) {
@@ -99,6 +105,40 @@ public class DeviceController {
      * 缺数据的天/小时由服务端补 0（见 DeviceService.trend）—— 柱状图里的空柱子
      * 本身就是信息（那天一条都没收到），跳过去会把 7 天画成 3 天而读者不会发现。
      */
+    /**
+     * 「一键测转发链路」：把所有启用的转发渠道各发一条测试消息。
+     *
+     * <p><b>限流是必需的，不是为了省资源</b>：这个接口会让服务端往微信/钉钉这类外部渠道
+     * 真发消息，而设备令牌是能被窃取的。同一台设备 {@value #NOTIFY_TEST_INTERVAL_SECONDS}
+     * 秒只放一次。
+     *
+     * <p>限流只在进程内存里，**重启会清空** —— 这是刻意接受的：重启不是攻击者能触发的动作，
+     * 而为一个「按钮不能连点」的需求在设备表上加一列、多一次写库，代价更大。
+     *
+     * <p>顺带说明这个口子并不是新开的：拿着设备令牌同样能调 {@code /api/sms/receive}
+     * 上报一条假短信，而假短信本来就会走转发规则发出去。限流挡住的是「连点刷屏」，
+     * 不是「令牌被偷」—— 后者要换令牌，那是另一件事。
+     */
+    @PostMapping("/notify/test")
+    public ResponseEntity<ApiResult<List<NotifyTestResult>>> testNotify(HttpServletRequest httpRequest) {
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
+
+        long now = System.currentTimeMillis();
+        Long last = lastNotifyTestAt.get(deviceId);
+        if (last != null && now - last < NOTIFY_TEST_INTERVAL_SECONDS * 1000L) {
+            long wait = (NOTIFY_TEST_INTERVAL_SECONDS * 1000L - (now - last) + 999) / 1000;
+            throw new IllegalArgumentException("测试过于频繁，请 " + wait + " 秒后再试。");
+        }
+        lastNotifyTestAt.put(deviceId, now);
+
+        return ResponseEntity.ok(ApiResult.success(notifyChannelService.testAllEnabled()));
+    }
+
+    /** 每台设备上次测转发的时间。进程内，重启清空 —— 理由见 testNotify。 */
+    private final Map<String, Long> lastNotifyTestAt = new ConcurrentHashMap<>();
+
+    private static final int NOTIFY_TEST_INTERVAL_SECONDS = 300;
+
     @GetMapping("/sms/trend")
     public ResponseEntity<ApiResult<DeviceTrend>> smsTrend(
             @RequestParam(defaultValue = "7") int days,
