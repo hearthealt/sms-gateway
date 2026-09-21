@@ -100,6 +100,17 @@ sms-gateway/
 
 前后端 + MySQL + Redis 都在 `docker/docker-compose.yml` 里，**本机不需要装 JDK / Maven / Node**。
 
+数据库和缓存有两种用法，**按需选一种**：
+
+| | 起服务命令 | 库和缓存 |
+| --- | --- | --- |
+| **A. 用外部 MySQL / Redis**（默认） | `docker compose up -d --build` | 你自己的实例，地址填在 `.env` 里 |
+| **B. 用自带的容器** | `docker compose --profile local-db up -d --build` | compose 里那两个容器 |
+
+自带的两个容器挂在 `local-db` 这个 profile 上，**不带 `--profile` 就不会启动**。
+选 A 要注意两件事：库得自己先建好（容器版才会自动灌 `schema.sql`），
+以及 Redis 里明文存着管理员令牌和调用方 API Key —— 别让它裸奔在内网。
+
 **1. 准备配置**
 
 ```bash
@@ -111,16 +122,35 @@ cp .env.example .env
 
 | 变量 | 说明 |
 | --- | --- |
-| `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` | MySQL 口令 |
-| `REDIS_PASSWORD` | Redis 口令（里面明文存着管理员令牌与调用方 API Key）|
+| `MYSQL_PASSWORD` | 数据库账号口令（两种模式都要：A 是连外部实例用的，B 是给容器初始化账号用的）|
+| `REDIS_PASSWORD` | Redis 口令（里面明文存着管理员令牌与调用方 API Key）。**B 模式必填**（留空容器直接拒绝启动）；A 模式可留空 —— 外部 Redis 常常没设 `requirepass` —— 但那句话对你也成立，别把没口令的 Redis 放在内网里 |
 | `APP_SECRET_KEY` | **系统主密钥**：设备令牌 = HMAC-SHA256(deviceId, 它)，泄漏等于可冒充任意设备。用 `openssl rand -hex 32` 生成 |
 | `APP_ADMIN_DEFAULT_PASSWORD` | 首次建库时创建管理员账号用的口令 |
 | `VITE_DEVICE_SERVER_URL` | 设备要访问的**后端**地址（会写进恢复码二维码）。**不能填 localhost** —— 对手机而言那是指向它自己 |
 
+选 A 的话，还要填外部实例在哪（B 模式留空即用自带容器）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `SPRING_DATASOURCE_URL` | 完整 JDBC 地址，`.env.example` 里有可照抄的一行 |
+| `SPRING_DATASOURCE_USERNAME` | 数据库账号（B 模式下同时也用它建容器里的账号，默认 `smsuser`）|
+| `SPRING_REDIS_HOST` / `SPRING_REDIS_PORT` | Redis 地址 |
+
+`MYSQL_ROOT_PASSWORD` 只有 B 模式用得到（初始化自带容器的 root 账号）。
+
+> A 模式跑之前，先把库建好（这条命令 B 模式用不上，容器会自动灌）：
+> `mysql --default-character-set=utf8mb4 -u root -p sms_gateway < backend/sql/schema.sql`
+> 库和表必须是 **utf8mb4** —— 容器那条路靠 MySQL 的 `--character-set-server=utf8mb4` 保证，
+> 换成外部实例就没人替你保证了。
+
 **2. 起服务**
 
 ```bash
+# A. 用外部 MySQL / Redis（.env 里已填好外部地址）
 docker compose up -d --build
+
+# B. 用自带的 MySQL / Redis 容器
+docker compose --profile local-db up -d --build
 ```
 
 首次要构建前后端镜像（几分钟）。起来后：
@@ -129,14 +159,19 @@ docker compose up -d --build
 | --- | --- | --- |
 | 管理后台 | `http://<主机>:8081` | `FRONTEND_PORT` |
 | 后端 | `http://<主机>:8080` | `BACKEND_PORT` |
-| MySQL | `127.0.0.1:3306` | `MYSQL_PORT` |
-| Redis | `127.0.0.1:6379` | `REDIS_PORT` |
+| MySQL（仅 B 模式）| `127.0.0.1:3306` | `MYSQL_PORT` |
+| Redis（仅 B 模式）| `127.0.0.1:6379` | `REDIS_PORT` |
 
-MySQL 与 Redis 只绑回环（`127.0.0.1`），不发布到网卡上。
+自带的 MySQL 与 Redis 只绑回环（`127.0.0.1`），不发布到网卡上。
 
-初始账号 `admin` / `APP_ADMIN_DEFAULT_PASSWORD`。首次启动时后端会自己建库灌种子数据。
+初始账号 `admin` / `APP_ADMIN_DEFAULT_PASSWORD`。B 模式下首次启动会自动建库灌种子数据；
+A 模式的库是你自己的，得先手工跑一次建表脚本（上面「准备配置」里那条）。
 
-**本机已经跑着后端 / MySQL / Redis 时**，把上面四个端口变量改成别的值就能两套并存。端口改了 `docker compose up -d` 即可生效；但 **`VITE_DEVICE_SERVER_URL` 是构建期变量**（Vite 在 build 时就把它内联进产物），改了必须 `docker compose build frontend`，只重启容器不会生效。另外 `BACKEND_PORT` 改了就同步改它，否则手机会被指到另一个后端上去。
+**本机已经跑着后端 / MySQL / Redis 时**有两种做法：把上面四个端口变量改成别的值让两套并存；
+或者干脆走 A 模式，把 `.env` 里那几项指向你已有的实例（B 模式那两个容器就不再起了）。
+端口改了 `docker compose up -d` 即可生效；但 **`VITE_DEVICE_SERVER_URL` 是构建期变量**
+（Vite 在 build 时就把它内联进产物），改了必须 `docker compose build frontend`，
+只重启容器不会生效。另外 `BACKEND_PORT` 改了就同步改它，否则手机会被指到另一个后端上去。
 
 **3. 数据与清理**
 
@@ -146,6 +181,11 @@ MySQL 与 Redis 只绑回环（`127.0.0.1`），不发布到网卡上。
 docker compose down        # 停掉，保留数据
 docker compose down -v     # 连数据卷一起删（下次启动会重新建库并灌种子数据）
 ```
+
+> **从 B 模式切到 A 模式时**：原来自带的那两个容器会变成 orphan —— 它们所在的服务已被
+> profile 排除，compose 不再管它们，既不停也不删。收尾用
+> `docker rm -f sms-gateway-mysql sms-gateway-redis`（数据都在 `mysql_data` 卷里，
+> 删容器不丢数据），或者起服务时加 `--remove-orphans`。
 
 **4. 前面还有反向代理时（重要）**
 
@@ -164,10 +204,13 @@ docker compose down -v     # 连数据卷一起删（下次启动会重新建库
 
 ```bash
 cd docker
-docker compose up -d mysql redis
+docker compose --profile local-db up -d mysql redis
 ```
 
-`docker-compose.yml` 会自动挂载 `backend/sql/schema.sql` 完成建库建表和种子规则写入。若使用已有的 MySQL 实例，手工执行：
+这两个服务挂在 `local-db` 这个 profile 上，所以带上 `--profile local-db`（不加也行 ——
+compose 对命令行显式点到的服务不看 profile —— 但写出来意图更清楚）。
+`docker-compose.yml` 会自动挂载 `backend/sql/schema.sql` 完成建库建表和
+种子规则写入。若使用已有的 MySQL 实例，手工执行：
 
 ```bash
 mysql --default-character-set=utf8mb4 -u root -p sms_gateway < backend/sql/schema.sql

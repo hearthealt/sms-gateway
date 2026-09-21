@@ -1,6 +1,20 @@
-version: '3.8'
-
 # 所有密钥都从 docker/.env 读（见 .env.example）。
+#
+# ── 库和缓存：两种跑法，按需选一种 ──
+#
+#   A. 用外部 MySQL / Redis（默认）：在 .env 里把 SPRING_DATASOURCE_URL /
+#      SPRING_REDIS_HOST 等填成外部实例，然后 `docker compose up -d --build`。
+#      下面那两个自带容器挂着 profiles: ["local-db"]，不带 --profile 不会启动。
+#
+#   B. 用自带的 MySQL / Redis 容器：
+#      `docker compose --profile local-db up -d --build`。
+#
+# **插值先于 profile 过滤。** compose 会把整份文件里的 ${...} 先解析一遍，再看哪个
+# service 被 profile 排除掉。所以上面那两个容器的变量必须是 ${VAR:-}（可空）——
+# 写成 ${VAR:?} 的话，只跑 A 模式的人会被一个他根本不启动的容器卡住，报错还指向
+# 一个跟他无关的变量。反过来，连库用的那几项（口令、主密钥）两种模式都要，照旧 :?。
+#
+# 需要 Docker Compose >= 2.20（depends_on 的 required 是 2.20 引入的；profiles 更早）。
 #
 # 用 ${VAR:?} 而不是 ${VAR:-默认值} 是刻意的：没配就直接拒绝启动。
 # 这个文件原先只注入了数据源和 Redis 的变量，**没有**注入 APP_SECRET_KEY，
@@ -10,42 +24,63 @@ version: '3.8'
 
 services:
   mysql:
+    # 只在 `--profile local-db` 下启动（用外部库时不启动它，见文件头）。
+    profiles: ["local-db"]
     image: mysql:8.0
     container_name: sms-gateway-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 docker/.env 中设置}
+      # 可空：用外部库的人不需要它。真留空又跑了 --profile local-db 时，MySQL 镜像
+      # 自己会拒绝初始化并报 "Database is uninitialized and password option is not
+      # specified" —— 停在那一刻，而不是悄悄起一个没口令的库。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
       MYSQL_DATABASE: sms_gateway
-      MYSQL_USER: smsuser
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 docker/.env 中设置}
+      # 与后端连库用同一组账号：外部模式改 .env 里的值，这里跟着走，不必改两处。
+      # :? 意味着「连库必须有口令」—— 后端那边也是这个要求。真遇到没有口令的库
+      # （不建议，尤其它多半能被局域网里别的东西连上），把这两处一起改成 ${MYSQL_PASSWORD:-}。
+      MYSQL_USER: ${SPRING_DATASOURCE_USERNAME:-smsuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 docker/.env 中设置数据库口令}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       # 只绑回环：以前是 "3306:3306"，等于把数据库端口发布到所有网卡上。
-      # 左侧可用 MYSQL_PORT 覆盖：本机已有 MySQL 时（开发环境），
-      # 把这一套挪到别的端口上并存，不必停掉任何一个。
+      # 左侧可用 MYSQL_PORT 覆盖：本机已有 MySQL 时，把这一套挪到别的端口上并存，
+      # 不必停掉任何一个。注意这只影响「从宿主机怎么连这个容器」，
+      # 后端容器连的是服务名 mysql:3306，跟它无关。
       - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ../backend/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:?}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   redis:
+    # 同 mysql：只在 `--profile local-db` 下启动。
+    profiles: ["local-db"]
     image: redis:7-alpine
     container_name: sms-gateway-redis
-    # 必须设密码：Redis 里明文存着管理员令牌（sms:admin:token:*）和调用方 API Key
-    # （key 名本身就是密钥），无密码 + 端口外放等于把管理后台拱手让人。
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?请在 docker/.env 中设置}"]
+    # 自带容器这条路上口令必须非空：Redis 里明文存着管理员令牌（sms:admin:token:*）
+    # 和调用方 API Key（key 名本身就是密钥），没口令 + 端口外放等于把管理后台拱手让人。
+    #
+    # 但这个「必须」只能在这里强求，不能写成 ${REDIS_PASSWORD:?} —— REDIS_PASSWORD
+    # 本身允许留空（外部 Redis 常常没设 requirepass），而整份文件都会先插值，
+    # 写成 :? 连用外部 Redis 的人一起卡住。所以空口令在这里直接拒绝启动。
+    command:
+      - sh
+      - -c
+      - |
+        [ -n "$$REDIS_PASSWORD" ] || { echo '自带 Redis 必须设 REDIS_PASSWORD（见 docker/.env.example）'; exit 1; }
+        exec redis-server --requirepass "$$REDIS_PASSWORD"
     environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      # 同 MySQL：本机已跑着 Redis 时用 REDIS_PORT 挪开
+      # 同 MySQL：本机已跑着 Redis 时用 REDIS_PORT 挪开。同样只影响宿主机怎么连它。
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -67,12 +102,17 @@ services:
       # 表现是容器起来几秒就 Exited，日志里只有一句 Hibernate 的「Unable to determine
       # Dialect」，跟真正的病因隔了好几层。库表字符集由 MySQL 那侧的
       # --character-set-server=utf8mb4 保证，这里只负责连接编码。
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
-      SPRING_DATASOURCE_USERNAME: smsuser
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?请在 docker/.env 中设置}
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:?请在 docker/.env 中设置}
+      #
+      # 默认值指向文件里那两个自带容器 —— 服务名 mysql / redis 只在容器网络里解析得到，
+      # 所以用外部实例时必须覆盖成 IP / 域名（.env.example 里有完整示例）。
+      # 上面这四项留空即回落到默认值。
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:mysql://mysql:3306/sms_gateway?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:-smsuser}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?请在 docker/.env 中设置数据库口令}
+      SPRING_REDIS_HOST: ${SPRING_REDIS_HOST:-redis}
+      SPRING_REDIS_PORT: ${SPRING_REDIS_PORT:-6379}
+      # 可空：外部 Redis 常常没设 requirepass（自带容器那边则强制非空，见 redis 服务）
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
 
       # 系统主密钥：设备令牌 = HMAC-SHA256(deviceId, 它)。
       # 换了它，所有已签发的设备令牌立即失效，每台设备都要重新注册。
@@ -99,10 +139,16 @@ services:
 
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
+      # required: false —— 这两个服务挂在 local-db profile 上，A 模式下它们压根不在
+      # 本次启动范围内：不加这句，compose 会因为「依赖的服务没启用」直接失败。
+      # 加了之后两条路都对：B 模式（profile 开着）照旧按依赖顺序等它们健康再起后端，
+      # A 模式只留一句警告，不阻塞启动。
       mysql:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
 
   frontend:
     build:
