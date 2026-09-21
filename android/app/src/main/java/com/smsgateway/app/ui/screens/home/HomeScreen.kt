@@ -29,9 +29,12 @@ import com.smsgateway.app.ui.theme.AppSpacing
  *
  * 顶部蓝色渐变头 + 圆角白色内容区，内容区包含：
  * - HomeBanners（权限/禁用/电池横幅，按需显示）
- * - StatusControlCard（状态 + 启停开关）
- * - MetricGrid（三指标块）
+ * - HeroCard（状态 + 启停开关 + 今日概览一处）
  * - IdentityRow（设备信息）
+ *
+ * 页面只有两块内容：**要盯的**（HeroCard）和**配好就不动的**（IdentityRow）。
+ * 原先夹在中间的三张指标卡已经并进 HeroCard —— 竖排三张卡把内容顶到上半屏、
+ * 下半屏全空，而它们只表达三个数字（见 HeroCard 的说明）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,14 +83,11 @@ fun HomeScreen(
                         onCheckStatus = onCheckStatus
                     )
 
-                    // 合并状态展示和启停控制
-                    StatusControlCard(
+                    // 状态 + 启停 + 今日概览合成一张主角卡：状态区上色、指标压成一行。
+                    // 理由见 HeroCard 的说明（原先四块平铺、没有视觉重心）。
+                    HeroCard(
                         state = state,
-                        onToggleService = onToggleService
-                    )
-
-                    MetricGrid(
-                        state = state,
+                        onToggleService = onToggleService,
                         onOpenQueue = onOpenQueue,
                         onOpenServerSms = onOpenServerSms
                     )

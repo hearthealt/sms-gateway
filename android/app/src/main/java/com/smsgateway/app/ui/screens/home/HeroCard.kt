@@ -1,6 +1,7 @@
 package com.smsgateway.app.ui.screens.home
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -41,18 +43,30 @@ import com.smsgateway.app.ui.utils.rememberNow
 private const val HEARTBEAT_STALE_MS = 90_000L
 
 /**
- * 状态控制卡 - 合并状态展示和启停控制。
+ * 主页的主角卡片：网关状态 + 启停开关 + 今日概览。
  *
- * 将原来的 HeroStatusCard 和 GatewayActionButton 合并为一个扁平化组件：
- * - 左侧：图标 + 状态文字
- * - 右侧：启停开关
+ * ## 为什么把状态和指标合成一张
  *
- * 视觉效果从原来的 ~200dp（状态卡 + 大圆钮）压缩到 ~72dp。
+ * 之前是「状态卡 + 三张指标卡」四块平铺竖排，四块同宽、同圆角、同 0 投影、只差底色 ——
+ * 于是页面**没有视觉重心**：「网关在不在跑」和「今天收了几条」看起来一样重要，
+ * 而前者才是这个应用存在的理由。同时三张指标卡只表达三个数字，却占了全页最贵的地方
+ * （约 200dp），把内容顶到上半屏、下半屏全空。
+ *
+ * 合成一张之后：状态区上色、字号抬到 h2，成为唯一的主角；指标压成一条，
+ * 整块高度比原来省约 130dp。**这个顺序也对应「先看状态，再看数字」的阅读顺序。**
+ *
+ * ## 不靠阴影，靠底色和字号分层
+ *
+ * 沿用全应用的原则（见 AppStyle 的说明：层级靠底色与留白拉开，不靠阴影），
+ * 所以这里没有加 elevation，而是把状态区整块上色、指标行留在白底上 —— 一张卡两种面，
+ * 颜色只染状态那一半，指标不会被误读成「状态的一部分」。
  */
 @Composable
-fun StatusControlCard(
+fun HeroCard(
     state: DashboardState,
-    onToggleService: () -> Unit
+    onToggleService: () -> Unit,
+    onOpenQueue: () -> Unit,
+    onOpenServerSms: () -> Unit
 ) {
     // 必须是会自己走的「现在」，不能是组合期取一次的快照：心跳一停就没有任何状态
     // 发射了，下面那个 90 秒的超时判断会永远停在最后一次求值的结果上，
@@ -76,64 +90,74 @@ fun StatusControlCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = AppColor.CardShape,
-        colors = CardDefaults.cardColors(containerColor = background),
+        colors = CardDefaults.cardColors(containerColor = AppColor.Card),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(AppSpacing.md),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 左侧：图标 + 状态文字
-            Icon(
-                imageVector = status.icon,
-                contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(AppSpacing.sm))
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(AppSpacing.xxs)
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(background)
+                    .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.lg),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = status.title,
-                    style = AppTypography.h3,
-                    color = accent
+                Icon(
+                    imageVector = status.icon,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(28.dp)
                 )
-                Text(
-                    text = status.subtitle,
-                    style = AppTypography.caption,
-                    color = accent.copy(alpha = 0.7f)
-                )
-                // 如果未注册，显示提示
-                if (!state.isRegistered && !state.isRunning) {
+                Spacer(modifier = Modifier.width(AppSpacing.sm))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.xxs)
+                ) {
                     Text(
-                        text = "点顶部「扫一扫」扫码连接",
-                        style = AppTypography.hint,
-                        color = accent.copy(alpha = 0.6f)
+                        text = status.title,
+                        style = AppTypography.h2,
+                        color = accent
                     )
+                    Text(
+                        text = status.subtitle,
+                        style = AppTypography.caption,
+                        color = accent.copy(alpha = 0.75f)
+                    )
+                    // 如果未注册，显示提示
+                    if (!state.isRegistered && !state.isRunning) {
+                        Text(
+                            text = "点顶部「扫一扫」扫码连接",
+                            style = AppTypography.hint,
+                            color = accent.copy(alpha = 0.6f)
+                        )
+                    }
                 }
+
+                // 右侧：启停开关
+                Switch(
+                    checked = state.isRunning,
+                    onCheckedChange = {
+                        haptic.medium()
+                        onToggleService()
+                    },
+                    // 未注册不许启动。**被禁用时仍然允许启动** —— 心跳是设备唯一能
+                    // 发现自己被恢复的通道，禁掉它就会造出「不可启动 → 不轮询 →
+                    // 永远学不到已恢复」的死锁。
+                    enabled = state.isRegistered || state.isRunning,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = accent,
+                        checkedTrackColor = accent.copy(alpha = 0.5f),
+                        uncheckedThumbColor = AppColor.SwitchOffThumb,
+                        uncheckedTrackColor = AppColor.SwitchOffTrack
+                    )
+                )
             }
 
-            // 右侧：启停开关
-            Switch(
-                checked = state.isRunning,
-                onCheckedChange = {
-                    haptic.medium()
-                    onToggleService()
-                },
-                // 未注册不许启动。**被禁用时仍然允许启动** —— 心跳是设备唯一能
-                // 发现自己被恢复的通道，禁掉它就会造出「不可启动 → 不轮询 →
-                // 永远学不到已恢复」的死锁。
-                enabled = state.isRegistered || state.isRunning,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = accent,
-                    checkedTrackColor = accent.copy(alpha = 0.5f),
-                    uncheckedThumbColor = AppColor.SwitchOffThumb,
-                    uncheckedTrackColor = AppColor.SwitchOffTrack
-                )
+            HorizontalDivider(color = AppColor.Divider)
+
+            MetricsRow(
+                state = state,
+                onOpenQueue = onOpenQueue,
+                onOpenServerSms = onOpenServerSms
             )
         }
     }
