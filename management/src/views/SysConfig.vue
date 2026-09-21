@@ -11,7 +11,10 @@
           <span v-else class="head-hint">改完立即生效，不用重启后端</span>
         </div>
         <div class="head-actions">
-          <el-button @click="loadData" :loading="loading" :disabled="saving">刷新</el-button>
+          <!-- 用 disabled 而不是 :loading：转圈图标会让按钮变宽、加载完再缩回去，
+               整页刷新时看着像样式坏了。进度改由下面内容区的 v-loading 表达
+               （与设备列表、投递记录那几页一致）。 -->
+          <el-button @click="loadData" :disabled="loading || saving">刷新</el-button>
           <el-button v-if="dirtyCount" :disabled="saving" @click="discard">放弃修改</el-button>
           <el-button type="primary" :disabled="!dirtyCount" :loading="saving" @click="saveAll">
             保存
@@ -19,8 +22,11 @@
         </div>
       </div>
 
-      <div v-for="group in groups" :key="group.name" class="group">
-        <div class="group-title">{{ group.name }}</div>
+      <!-- 读配置时的进度放在这一层：按钮上不再转圈（那会让按钮变宽），
+           而这一页的反馈不能缺 —— 刷新是一次真实的往返 -->
+      <div v-loading="loading">
+        <div v-for="group in groups" :key="group.name" class="group">
+          <div class="group-title">{{ group.name }}</div>
 
         <div v-for="item in group.items" :key="item.key" class="config-row">
           <div class="config-info">
@@ -71,6 +77,7 @@
               恢复默认
             </el-button>
           </div>
+        </div>
         </div>
       </div>
 

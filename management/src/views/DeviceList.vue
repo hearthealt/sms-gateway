@@ -34,7 +34,14 @@
           <el-button @click="handleReset">
             <el-icon><Refresh /></el-icon> 重置
           </el-button>
-          <el-button @click="handleRefresh" :loading="loading">
+          <!--
+            这个按钮**不能**用 :loading：Element Plus 会在文字前插一个转圈图标，
+            而这里本来就有一个 RefreshRight 图标 —— 加载中会并排出现两个图标、
+            按钮跟着变宽，加载完再缩回去。整页刷新时最明显，看着像样式坏了。
+            表格本身已经有 v-loading 遮罩，转圈是多余的反馈；这里用 disabled 表达
+            「正在读，别重复点」，宽度就不会跳。
+          -->
+          <el-button @click="handleRefresh" :disabled="loading">
             <el-icon><RefreshRight /></el-icon> 刷新
           </el-button>
         </div>

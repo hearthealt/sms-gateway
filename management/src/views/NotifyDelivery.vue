@@ -18,7 +18,9 @@
         <div class="filter-actions">
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
-          <el-button @click="loadData" :loading="loading">刷新</el-button>
+          <!-- 用 disabled 而不是 :loading：转圈图标会让按钮变宽、加载完再缩回去，
+               整页刷新时看着像样式坏了。表格上有 v-loading 遮罩，反馈并不缺。 -->
+          <el-button @click="loadData" :disabled="loading">刷新</el-button>
         </div>
       </div>
 
