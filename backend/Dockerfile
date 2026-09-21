@@ -9,7 +9,9 @@ ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
-COPY target/sms-gateway-backend-1.0.0.jar app.jar
+# 改名要跟 backend/pom.xml 里的 <version> 同步（jar 名由它决定），
+# 顺带 .github/workflows/release.yml 里挂 Release 那步也是同一个名字。
+COPY target/sms-gateway-backend-1.0.2.jar app.jar
 
 EXPOSE 8080
 

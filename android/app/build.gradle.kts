@@ -27,8 +27,11 @@ android {
         applicationId = "com.yunyi.smshub"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // 版本号与主版本（backend/pom.xml、management/package.json、git tag）保持一致。
+        // versionCode 是给系统看的整数、必须单调递增，按 major*10000 + minor*100 + patch 算：
+        // 1.0.2 → 10002、1.1.0 → 10100、2.0.0 → 20000。
+        versionCode = 10002
+        versionName = "1.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

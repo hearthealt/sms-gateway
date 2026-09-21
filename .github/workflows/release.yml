@@ -84,7 +84,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: backend/target/sms-gateway-backend-1.0.0.jar
+          files: backend/target/sms-gateway-backend-1.0.2.jar
 
 # ── 换个仓库（比如服务器拉不动 ghcr.io 时改用 Docker Hub）──
 # docker.io 那侧你已经验证过能拉（node/nginx/temurin 都是从那拉的）。要换的话：
