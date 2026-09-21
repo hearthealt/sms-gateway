@@ -1,6 +1,7 @@
 package com.smsgateway.service;
 
 import com.smsgateway.model.enums.SysConfigKey;
+import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.service.SysConfigService;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +16,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 短信历史的保留策略。
@@ -35,6 +37,7 @@ import java.time.LocalDateTime;
 public class SmsRetentionJob {
 
     private final SmsMessageRepository smsMessageRepository;
+    private final NotifyDeliveryRepository notifyDeliveryRepository;
     private final TransactionTemplate transactionTemplate;
     private final SysConfigService sysConfigService;
 
@@ -74,8 +77,7 @@ public class SmsRetentionJob {
         // 每批一个独立事务：一次删完会把锁持有到天荒地老，
         // 而分批之后每批提交即释放，同库的短信写入不会被长时间堵住。
         while (true) {
-            Integer removed = transactionTemplate.execute(
-                    status -> smsMessageRepository.deleteBatchByReceiveTimeBefore(cutoff, batchSize));
+            Integer removed = transactionTemplate.execute(status -> purgeBatch(cutoff));
 
             if (removed == null || removed == 0) {
                 break;
@@ -90,6 +92,25 @@ public class SmsRetentionJob {
             log.info("Purged {} sms_message rows older than {} days (before {})",
                     total, retentionDays, cutoff);
         }
+    }
+
+    /**
+     * 清一批：先删这批短信的投递记录，再删短信本身。返回删掉的短信条数。
+     *
+     * <p>顺序不能反，也不能漏。投递记录只存 {@code sms_message_id}、不自带 device_id，
+     * 而那张表上**没有外键** —— 短信一删，转发记录就永远悬空，控制台上一行行全是空白
+     * （发送方是「-」、内容空白），看着像数据坏了。
+     *
+     * <p>两件事必须在**同一个事务**里：中间挂掉会留下一批孤儿，而清理任务下次只会按
+     * {@code receive_time} 找待删的短信 —— 那些短信已经删了，找不回来，孤儿就永久留下。
+     */
+    private int purgeBatch(LocalDateTime cutoff) {
+        List<Long> ids = smsMessageRepository.findIdsByReceiveTimeBefore(cutoff, batchSize);
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        notifyDeliveryRepository.deleteBySmsMessageIdIn(ids);
+        return smsMessageRepository.deleteByIdIn(ids);
     }
 
     /** 今天是否已经跑过。进程内标记，重启会重置 —— 见 {@link #purgeOldMessages()} 的说明。 */

@@ -6,6 +6,7 @@ import com.smsgateway.model.dto.RecoveryCodeView;
 import com.smsgateway.model.dto.StatsView;
 import com.smsgateway.model.entity.SmsDevice;
 import com.smsgateway.repository.DeviceRepository;
+import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.util.HashUtil;
 import com.smsgateway.util.SecretGenerator;
@@ -28,6 +29,7 @@ public class AdminDeviceService {
 
     private final DeviceRepository deviceRepository;
     private final SmsMessageRepository smsMessageRepository;
+    private final NotifyDeliveryRepository notifyDeliveryRepository;
     private final DeviceService deviceService;
 
     public static final String STATUS_DISABLED = "DISABLED";
@@ -102,10 +104,18 @@ public class AdminDeviceService {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new IllegalArgumentException("设备不存在: " + deviceId));
 
+        // 顺序不能反，投递记录必须赶在短信前面删。
+        //
+        // 它只存 sms_message_id、不自带 device_id，而那张表上**没有外键**（建的只是普通
+        // 索引），所以删短信既不会被挡住、也不会连带删。短信一没，这些投递记录就再也
+        // 认不回属于谁 —— 它们会一直挂在「投递记录」页上，渲染成一行发送方是「-」、
+        // 内容是空白的孤儿（见 NotifyDeliveryService.toView）。
+        int removedDeliveries = notifyDeliveryRepository.deleteByDeviceId(device.getId());
         int removedSms = smsMessageRepository.deleteByDeviceId(device.getId());
         deviceRepository.delete(device);
 
-        log.warn("Admin deleted device {}, together with {} sms rows", deviceId, removedSms);
+        log.warn("Admin deleted device {}, together with {} sms rows and {} notify deliveries",
+                deviceId, removedSms, removedDeliveries);
         return removedSms;
     }
 

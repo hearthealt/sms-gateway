@@ -12,6 +12,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 @Repository
@@ -107,6 +108,30 @@ public interface NotifyDeliveryRepository extends JpaRepository<NotifyDelivery, 
 
     /** 某条短信的投递情况，用于短信详情页显示「已转发到：运维群 ✓ / 我的微信 ✗」。 */
     List<NotifyDelivery> findBySmsMessageId(Long smsMessageId);
+
+    /**
+     * 删除某台设备的全部投递记录。
+     *
+     * <p>投递记录只存 {@code sms_message_id}、**不自带 device_id**，所以必须在短信被删
+     * 之前调用：短信一没就再也认不回它们（这张表上也没有外键，数据库不会连带删、也不挡）。
+     * 调用方见 {@code AdminDeviceService.delete}。
+     *
+     * <p>用原生 SQL 是因为要 join 到 sms_message —— JPQL 的 delete 不支持 join。
+     */
+    @Modifying
+    @Query(value = "delete d from notify_delivery d join sms_message m on m.id = d.sms_message_id "
+            + "where m.device_id = :deviceId", nativeQuery = true)
+    int deleteByDeviceId(@Param("deviceId") Long deviceId);
+
+    /**
+     * 删除这批短信的投递记录。保留策略清旧短信时调用（见 {@code SmsRetentionJob}），
+     * 同样必须在短信被删之前。
+     *
+     * <p>调用方要保证集合非空：JPQL 的 {@code in ()} 是非法语法。
+     */
+    @Modifying
+    @Query("delete from NotifyDelivery d where d.smsMessageId in :smsMessageIds")
+    int deleteBySmsMessageIdIn(@Param("smsMessageIds") Collection<Long> smsMessageIds);
 
     /**
      * 一个渠道积压了多少条还没发出去的。

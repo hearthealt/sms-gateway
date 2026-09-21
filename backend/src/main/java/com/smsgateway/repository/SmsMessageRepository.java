@@ -11,6 +11,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -104,19 +105,30 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
                                    @Param("ignoredStatus") SmsStatus ignoredStatus);
 
     /**
-     * 删除一批早于给定时刻的记录，返回实际删除行数。
+     * 取一批早于给定时刻的短信 id，最多 {@code batchSize} 条。
      *
-     * <p><b>用原生 SQL 是因为要带 LIMIT</b> —— JPQL 的 delete 不支持它。
-     * 必须分批：一次删几百万行会形成单个巨型事务，长时间持有锁、把 undo log 撑爆，
+     * <p><b>清理必须先取 id 再删</b>，不能直接 {@code delete ... limit}：投递记录只存
+     * {@code sms_message_id}（那张表上还没有外键），短信一删就再也找不出哪些投递记录
+     * 属于它们，控制台上会留下一行行空白。所以顺序是「取 id → 删投递记录 → 删短信」。
+     *
+     * <p>用原生 SQL 是因为要带 LIMIT。
+     */
+    @Query(value = "select id from sms_message where receive_time < :before order by id limit :batchSize",
+            nativeQuery = true)
+    List<Long> findIdsByReceiveTimeBefore(@Param("before") LocalDateTime before,
+                                         @Param("batchSize") int batchSize);
+
+    /**
+     * 按 id 批量删，返回实际删除行数。
+     *
+     * <p>必须分批：一次删几百万行会形成单个巨型事务，长时间持有锁、把 undo log 撑爆，
      * 期间同库的短信写入都会被拖住。
      *
      * <p>调用方见 {@code SmsRetentionJob}，它循环调用直到返回 0。
      */
     @Modifying
-    @Query(value = "delete from sms_message where receive_time < :before limit :batchSize",
-            nativeQuery = true)
-    int deleteBatchByReceiveTimeBefore(@Param("before") LocalDateTime before,
-                                       @Param("batchSize") int batchSize);
+    @Query("delete from SmsMessage m where m.id in :ids")
+    int deleteByIdIn(@Param("ids") Collection<Long> ids);
 
     /**
      * 删除某台设备的全部短信。管理端删设备时一并调用（见 AdminDeviceService.delete）。

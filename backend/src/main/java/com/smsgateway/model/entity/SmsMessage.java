@@ -47,11 +47,18 @@ public class SmsMessage {
     private LocalDateTime receiveTime;
 
     /**
-     * 这段内容又收到过几次。**只有正本行（首次那条）会累加**，重复行恒为 0。
+     * 这段内容又收到过几次。
      *
-     * 重复到达本身也各存一行（status=DUPLICATE，见 SmsService），这个计数是为了让列表上
-     * 一眼看到「重复 3 次 · 最后 15:20」—— 否则要按 source_hash 去 count 一遍，
-     * 列表每行都查一次。
+     * <p><b>重复到达不新插行</b>：撞上 {@code uk_device_source_hash} 之后是在这一行上
+     * 加一（见 {@code SmsService} 的去重分支），所以「重复」不是一种 status，
+     * 而是这一行的一个属性 —— 它的 status 仍然是 RECEIVED 或 IGNORED。
+     * 曾经这里写着「重复到达本身也各存一行（status=DUPLICATE）」，那是错的：
+     * 唯一索引压根不允许同一台设备存两条同 hash 的行。
+     *
+     * <p>这个计数是为了让列表上一眼看到「重复 3 次 · 最后 15:20」—— 否则要按
+     * source_hash 去 count 一遍，列表每行都查一次。管理端的「采集」列与展开行
+     * 就是读它（见 SmsList.vue）；{@code SmsStatus.DUPLICATE} 只是回给设备端的
+     * 上报响应，不会落到这一列上。
      */
     @Column(name = "duplicate_count", nullable = false)
     private int duplicateCount = 0;

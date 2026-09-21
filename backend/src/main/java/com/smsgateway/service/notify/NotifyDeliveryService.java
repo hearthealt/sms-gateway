@@ -30,6 +30,14 @@ public class NotifyDeliveryService {
     /** 列表里的正文预览长度。够看清是哪条短信，又不至于把整篇搬上来。 */
     private static final int PREVIEW_LENGTH = 60;
 
+    /**
+     * 原短信已被删掉时，正文预览的位置显示这句话。
+     *
+     * <p>不做成空白：控制台渲染的是 {@code contentPreview || ''}，空白既看不出
+     * 「已删除」也看不出「内容为空」，只会被当成数据坏了。
+     */
+    private static final String SMS_DELETED_PREVIEW = "（原短信已删除）";
+
     private final NotifyDeliveryRepository deliveryRepository;
     private final SmsMessageRepository smsMessageRepository;
     /**
@@ -143,6 +151,14 @@ public class NotifyDeliveryService {
             // 「投递记录不存渲染后的正文」这条设计仍然成立，理由与打码无关：
             // 存了等于把验证码写两遍，而第二遍没有 TTL。
             view.setContentPreview(NotifyRedactor.truncate(sms.getContent(), PREVIEW_LENGTH));
+        } else {
+            // 原短信已经不在了。现在删设备的短信时会连带删掉投递记录（见
+            // AdminDeviceService.delete），保留策略也一样（SmsRetentionJob），
+            // 但**历史上留下的孤儿行还在**，而且这两条路将来也可能漏。
+            // 不写这一句的话，这种行渲染出来是「发送方 - 、内容空白」—— 控制台那边
+            // 只是 `contentPreview || ''`，分辨不出「已删除」和「内容本来就是空的」，
+            // 只能被当成数据坏了。
+            view.setContentPreview(SMS_DELETED_PREVIEW);
         }
 
         return view;
