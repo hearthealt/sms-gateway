@@ -79,29 +79,30 @@ export function setEnrollTokenEnabled(enabled: boolean): Promise<EnrollToken> {
  *
  * 取**当前后台的 origin**：后端只监听回环、前端那层 nginx 是这套系统对外的唯一入口，
  * 所以「你此刻访问后台用的地址」就是设备要用的地址（设备的 /api/... 也由它转发给后端）。
- * 以后上域名也是自动的：用域名打开后台，二维码里就是域名。
+ * 以后上域名也是自动的 —— 用域名打开后台，二维码里就是域名。**这里没有任何要配的东西。**
  *
- * 开发环境除外 —— 那里 vite 跑在 localhost:5173，而 localhost 对手机来说指向它自己，
- * 所以**开发时**仍读 management/.env 里的 VITE_DEVICE_SERVER_URL（局域网地址）。
+ * 什么时候返回 null（调用方会明确报错）：当前地址是 localhost / 127.0.0.1。
+ * 那种地址对手机来说指向它自己，写进二维码只会让现场懵 —— 早先的版本就是这么坑的
+ * （开发时控制台跑在 localhost:5173，扫出来的二维码把设备指到了它自己）。
+ * 开发时想看二维码，用 `npm run dev -- --host`，再从局域网 IP 访问即可。
  *
- * ⚠️ 用 origin 的代价，现场排查时记得这一条：二维码里写的就是「你访问后台用的地址」，
- * 所以**用 SSH 隧道 / VPN 从 localhost 或内网 IP 打开后台时，生成的二维码是错的** ——
- * 手机连不上，而二维码看起来一切正常。生成二维码请用设备能访问到的那个地址打开后台。
- * 弹窗里会把地址显示出来，生成完扫之前看一眼。
+ * ⚠️ 有一种情况这里**认不出来**，现场排查时记得：用 SSH 隧道 / VPN 从别的内网地址打开后台，
+ * origin 会是个手机访问不到的地址，而二维码照样生成得出来、看起来一切正常。
+ * 生成前弹窗里会把地址显示出来，扫之前看一眼。
  */
-export function deviceServerUrl(): string | null {
-  // 开发时用 .env 里配的局域网地址（镜像里没有这个值：management/.dockerignore 排掉了 .env）
-  const configured = import.meta.env.VITE_DEVICE_SERVER_URL
-  if (typeof configured === 'string' && configured.trim()) {
-    return configured.trim().replace(/\/+$/, '')
-  }
-
-  // 开发环境没配就返回 null，让调用方明确报错 —— 这时候 origin 是 localhost:5173，
-  // 写进二维码只会让现场懵（早先的版本就是这么坑的）。
-  if (import.meta.env.DEV) {
-    return null
-  }
-
-  // 正经部署：后台就是唯一入口，用它的 origin。
+export function deviceServerUrl(): string {
   return window.location.origin
+}
+
+/**
+ * 这个地址是不是只有本机能访问（localhost / 127.0.0.1 / ::1）。
+ *
+ * 二维码里写这种地址，手机扫了会连到它自己 —— 所以两个二维码弹窗都会就此**显式警告**
+ * （见 QuickConnectDialog / RecoveryCodeDialog 里的警告条）。
+ *
+ * 早先这里是直接拒绝生成，结果本地 `npm run dev` 调试时连弹窗都打不开，什么也测不了。
+ * 改成「只警告、不拦」：风险照样摆在眼前，但不挡人做事。
+ */
+export function isLocalOnlyAddress(url: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/i.test(url)
 }

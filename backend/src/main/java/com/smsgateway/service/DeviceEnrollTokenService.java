@@ -37,32 +37,46 @@ public class DeviceEnrollTokenService {
         return repository.findById(DeviceEnrollToken.SINGLETON_ID);
     }
 
-    /** 给管理后台的状态视图。未生成时返回一个 token 为 null 的空视图。 */
+    /**
+     * 给管理后台的状态视图。
+     *
+     * <p>未生成时返回的不是 null，而是一个 **token 为 null 的空视图** ——
+     * 判断「有没有生成过」要看 {@code token} 字段，别看这个对象在不在
+     * （控制台原先就是拿对象当判据，于是把「没生成过」显示成了「已停用」，
+     * 点「启用」后端只能回 400）。
+     */
     public EnrollTokenView view() {
         return current().map(this::toView).orElseGet(EnrollTokenView::new);
     }
 
     /**
-     * 生成一张新口令并**启用**准入校验。已有口令时即轮换，旧口令立即失效。
+     * 生成一张新口令。已有口令时即轮换，旧口令立即失效。
      *
-     * <p>生成时顺手置 enabled=true 是刻意的：换一张口令的唯一目的就是拿它去用，
-     * 若沿用上一次的停用状态，管理员会看到一张新码、扫了却被拒，而界面上没有任何
-     * 地方提示「你还得再点一下启用」。控制台在这次调用返回后会把启用状态一并显示出来。
+     * <p><b>启用状态沿用上一次</b>：第一次生成必然是启用（否则这张码没有用处），
+     * 轮换则保持原状 —— 刚停用过的人，不该因为「换一张码」而被动把它改回启用。
+     *
+     * <p>早先这里是无条件 {@code setEnabled(true)}，理由写的是「怕管理员看到一张新码、
+     * 扫了却被拒」。这个理由其实不成立：**停用期间注册接口本来就是放行的**（见
+     * {@link #verify}），而二维码里照样带着口令，所以沿用停用状态也扫得进去。
+     * 反倒是原来那种做法会在管理员刚做了「停用」这个决定之后，悄悄把安全边界改回去。
+     * 控制台那边也会把停用状态连同「立即启用」摆在二维码上方，不会让人对着新码发懵。
      */
     @Transactional
     public EnrollTokenView rotate() {
-        DeviceEnrollToken entity = current().orElseGet(() -> {
-            DeviceEnrollToken created = new DeviceEnrollToken();
+        DeviceEnrollToken existing = current().orElse(null);
+        DeviceEnrollToken entity = existing != null ? existing : new DeviceEnrollToken();
+        if (existing == null) {
             // 单行表的固定主键，不用自增（理由见实体注释）
-            created.setId(DeviceEnrollToken.SINGLETON_ID);
-            return created;
-        });
+            entity.setId(DeviceEnrollToken.SINGLETON_ID);
+        }
 
+        // 先读旧状态再改口令：下面这两行都会写同一个实体
+        boolean wasEnabled = existing == null || existing.isEnabled();
         entity.setToken(SecretGenerator.randomSecret());
-        entity.setEnabled(true);
+        entity.setEnabled(wasEnabled);
         repository.save(entity);
 
-        log.warn("设备接入口令已生成/轮换，旧口令立即失效");
+        log.warn("设备接入口令已生成/轮换，旧口令立即失效；启用状态={}", wasEnabled ? "启用" : "仍停用");
         return toView(entity);
     }
 

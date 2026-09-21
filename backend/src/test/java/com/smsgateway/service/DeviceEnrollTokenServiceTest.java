@@ -135,7 +135,7 @@ class DeviceEnrollTokenServiceTest {
     }
 
     @Test
-    @DisplayName("再次生成即轮换：仍是同一行，口令换掉且重新启用")
+    @DisplayName("再次生成即轮换：仍是同一行，口令换掉，且**沿用**原来的停用状态")
     void rotateReplacesExistingRow() {
         DeviceEnrollToken existing = stored(TOKEN, false);
         when(repository.findById(DeviceEnrollToken.SINGLETON_ID)).thenReturn(Optional.of(existing));
@@ -143,9 +143,22 @@ class DeviceEnrollTokenServiceTest {
         EnrollTokenView view = service.rotate();
 
         assertThat(view.getToken()).isNotEqualTo(TOKEN);
-        assertThat(view.isEnabled()).isTrue();
+        // 停用状态要保持：换一张码不该顺手把管理员刚做的「停用」改回启用。
+        // （停用期间注册本来就是放行的，所以新码不会「扫了被拒」—— 见 rotate 的注释）
+        assertThat(view.isEnabled()).isFalse();
         // 没有新开一行
         verify(repository).save(existing);
+    }
+
+    @Test
+    @DisplayName("轮换不改变「已启用」状态：换一张码不会把准入关掉")
+    void rotateKeepsEnabledState() {
+        DeviceEnrollToken existing = stored(TOKEN, true);
+        when(repository.findById(DeviceEnrollToken.SINGLETON_ID)).thenReturn(Optional.of(existing));
+
+        EnrollTokenView view = service.rotate();
+
+        assertThat(view.isEnabled()).isTrue();
     }
 
     @Test

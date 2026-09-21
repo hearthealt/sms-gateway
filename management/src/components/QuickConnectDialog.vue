@@ -19,36 +19,35 @@
     @closed="clear"
   >
     <!--
-      安全状态放最上面，一行说清。**只有出问题时才升级成整块 el-alert** ——
-      一切正常时也用 alert 报「已启用」，等于拿一个占三行的框去说一件不需要
-      处置的事，真正需要看见的那两种（没口令 / 已停用）反而被稀释。
+      安全状态一行说清，三种状态同一套样式（`.qc-status`）：
+        · 已启用 —— 绿底一行，不需要处置
+        · 未生成 / 已停用 —— 黄底一行，把后果写在同行里
+      这两种问题态原先各自是一整块 el-alert（标题 + 图标 + 三行描述），加上地址警告
+      之后弹窗顶部堆了三块大色块，占的比二维码还高。状态条只占一行，动作就地给出。
     -->
-    <div v-if="token?.enabled" class="qc-status">
+    <div v-if="hasToken && token?.enabled" class="qc-status">
       <el-icon><CircleCheck /></el-icon>
-      <span>接入口令已启用 —— 新设备必须扫下面这张码才能接入。</span>
+      <span>接入口令已启用 · 新设备需扫码接入</span>
     </div>
     <!--
-      未生成：注册接口是**开放**的。这不是一个可以轻描淡写带过的状态 ——
-      任何知道下面这个地址的人都能注册一台设备进来，所以这里显式警告，
-      并且把口令的生成做成一个明确的按钮，不自动生成：静默改变安全边界
-      比多点一次更糟。
+      未生成：注册接口是**开放**的 —— 任何知道下面这个地址的人都能注册一台设备进来。
+      生成按钮不自动点，留在页脚（静默改变安全边界比多点一次更糟）。
     -->
-    <el-alert
-      v-else-if="!token"
-      type="warning"
-      :closable="false"
-      show-icon
-      title="尚未启用接入口令"
-      description="此刻任何知道下面这个地址的人都能注册一台设备进来。生成一张口令后，新设备必须扫这张码才能接入。"
-    />
-    <el-alert
-      v-else
-      type="warning"
-      :closable="false"
-      show-icon
-      title="接入口令已停用"
-      description="注册接口现在是开放的，任何知道该地址的人都能注册设备。口令本身还留着，重新启用即可，不必换一张。"
-    />
+    <div v-else-if="!hasToken" class="qc-status qc-status--warn">
+      <el-icon><WarningFilled /></el-icon>
+      <span>尚未启用接入口令 · 注册接口对任何人开放</span>
+    </div>
+    <!--
+      已停用：口令还在、只是校验关着 —— 注册接口此刻同样是**开放**的。
+      处置只要一次点击，所以按钮就摆在这一行里。
+    -->
+    <div v-else class="qc-status qc-status--warn">
+      <el-icon><WarningFilled /></el-icon>
+      <span>接入口令已停用 · 注册接口对任何人开放（口令还留着，启用不必换一张）</span>
+      <el-button size="small" type="warning" plain :loading="busy" @click="handleToggleEnabled">
+        启用
+      </el-button>
+    </div>
 
     <!--
       左右两栏：二维码在左、要读要复制的信息在右。
@@ -70,12 +69,19 @@
 
       <div class="qc-info-col">
         <!--
-          服务器地址是整个功能的**前提** —— 码里要写设备能访问的地址，而控制台
-          自己只知道「从哪个 origin 取数据」，不知道设备该连哪台机器（开发时 origin
-          是 localhost，对手机毫无意义）。没配就直接不给开这个弹窗，见 open()。
+          服务器地址就是当前后台的 origin —— 后台是这套系统对外的唯一入口，
+          设备的请求也由它转给后端。地址若只有本机能访问（本地调试），下面会警告一句。
         -->
         <div class="qc-label">服务器地址</div>
         <div class="mono qc-url-text">{{ serverUrl }}</div>
+        <!--
+          地址只有本机能访问时（本地调试）就在这里说一句，不另开一块警告框 ——
+          它说的就是上面这个地址的事，贴着它读最顺；顶部那一行留给安全状态。
+        -->
+        <div v-if="localOnlyAddress" class="qc-addr-warn">
+          <el-icon><WarningFilled /></el-icon>
+          <span>手机访问不到此地址（扫了连的是它自己）</span>
+        </div>
         <div class="qc-actions">
           <el-button size="small" @click="handleCopyUrl">复制地址</el-button>
           <!--
@@ -88,11 +94,11 @@
           </el-button>
         </div>
 
-        <template v-if="token">
+        <template v-if="hasToken">
           <div class="qc-label qc-label--spaced">接入口令</div>
           <div class="qc-token">
             <span class="mono qc-token-text">
-              {{ revealed ? token.token : maskToken(token.token) }}
+              {{ revealed ? token?.token : maskToken(token?.token ?? '') }}
             </span>
             <el-button link type="primary" size="small" @click="revealed = !revealed">
               {{ revealed ? '隐藏' : '显示' }}
@@ -105,7 +111,7 @@
           -->
           <div class="qc-actions">
             <el-button size="small" :loading="busy" @click="handleToggleEnabled">
-              {{ token.enabled ? '停用' : '启用' }}
+              {{ token?.enabled ? '停用' : '启用' }}
             </el-button>
             <el-button size="small" type="primary" :loading="busy" @click="handleRotate">
               重新生成
@@ -120,13 +126,12 @@
       弹窗底部是参差的，而它本来是两个栏目共用的旁注。
     -->
     <p class="qc-hint qc-hint--foot">
-      手机 App 主页点「扫码连接服务器」对准二维码；已配置过的手机走
-      「设置 → 配置二维码 → 扫码导入」。
+      App 主页点「扫码连接服务器」；已配置过的手机走「设置 → 配置二维码 → 扫码导入」。
     </p>
 
     <template #footer>
       <!-- 还没有口令时，「生成」是这个弹窗当前唯一该做的事，所以留在页脚 -->
-      <el-button v-if="!token" type="primary" :loading="busy" @click="handleRotate">
+      <el-button v-if="!hasToken" type="primary" :loading="busy" @click="handleRotate">
         生成接入口令
       </el-button>
       <el-button @click="visible = false">关闭</el-button>
@@ -135,13 +140,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, WarningFilled } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import {
   deviceServerUrl,
   getEnrollToken,
+  isLocalOnlyAddress,
   rotateEnrollToken,
   setEnrollTokenEnabled,
 } from '../api/device'
@@ -151,6 +157,20 @@ import type { EnrollToken } from '../types'
 const visible = ref(false)
 const serverUrl = ref('')
 const token = ref<EnrollToken | null>(null)
+
+/**
+ * 「有没有生成过口令」的**唯一**判据是 token 字符串，不是那个对象。
+ *
+ * 后端在未生成时返回的是一个 token 为 null 的**空视图**（不是 null），所以拿
+ * `if (token.value)` 判断会把「没生成过」当成「已停用」：界面上给出一个「启用」按钮，
+ * 点下去后端只能回 400「尚未生成接入口令，无法启用或停用」。
+ * 原先这个文件里两种判据混着用（拼二维码那里看的是字符串，模板里看的是对象），
+ * 于是同一个状态在两处是两个样子 —— 统一到这里。
+ */
+const hasToken = computed(() => !!token.value?.token)
+
+/** 当前地址只有本机能访问（localhost 之类）—— 那种地址写进二维码，手机扫了连不上。 */
+const localOnlyAddress = computed(() => isLocalOnlyAddress(serverUrl.value))
 const qr = ref('')
 /** 口令默认打码，与 API 密钥列表一致：截图和投屏时不会顺手把口令带出去。 */
 const revealed = ref(false)
@@ -163,18 +183,10 @@ const busy = ref(false)
  * 拦截器给出，父组件不必再处理返回值。
  */
 async function open() {
-  // 先要地址再拉口令。顺序与 RecoveryCodeDialog 一致：地址拿不到就没有继续的意义，
-  // 猜一个写进二维码只会让设备连到错的地方。
-  const url = deviceServerUrl()
-  if (!url) {
-    ElMessage.error(
-      '未配置 VITE_DEVICE_SERVER_URL，无法生成快速连接二维码：二维码里要写设备能访问的' +
-        '服务器地址，这个值没配时猜不出来（开发时控制台的 origin 是 localhost，对手机没有意义）。'
-    )
-    return
-  }
-
-  serverUrl.value = url
+  // 地址就是当前 origin（后端只监听回环，前端是唯一入口）。
+  // 它若是 localhost 这种手机访问不到的地址，弹窗里会有警告条 —— 但不拦着不放，
+  // 本地调试要看这个界面是刚需。
+  serverUrl.value = deviceServerUrl()
   token.value = null
   qr.value = ''
   revealed.value = false
@@ -254,11 +266,11 @@ async function handleCopyToken() {
 async function handleRotate() {
   // 轮换会让现场那张旧二维码立刻失效，所以只在「已经有口令」时才确认 ——
   // 首次生成没有可作废的东西，多一次确认只是多一次点击。
-  if (token.value) {
+  if (hasToken.value) {
     try {
       await ElMessageBox.confirm(
-        '重新生成会让现有二维码立刻失效：还没扫过的设备将无法再接入，需要拿新二维码重扫。' +
-          '已注册的设备不受影响（它们认的是自己的设备密钥，不看这张口令）。',
+        '重新生成会让现有二维码立刻失效，还没扫过的设备需要重扫（已注册设备不受影响）。' +
+          '启用状态保持不变。',
         '确认重新生成接入口令？',
         { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' }
       )
@@ -280,14 +292,16 @@ async function handleRotate() {
 
 async function handleToggleEnabled() {
   const current = token.value
-  if (!current) return
+  // 注意判据是 hasToken（字符串），不是 current 这个对象：未生成时后端返回的是空视图，
+  // 用对象判据会走到下面去调 setEnabled，后端只能回 400。
+  if (!hasToken.value || !current) return
 
   const next = !current.enabled
   if (!next) {
     try {
       await ElMessageBox.confirm(
-        '停用后注册接口会退回开放状态：任何知道服务器地址的人都能注册设备进来。' +
-          '口令本身会留着，随时可以重新启用，不必换一张。',
+        '停用后注册接口对任何人开放：任何知道地址的人都能注册设备进来。' +
+          '口令会留着，随时可启用，不必换一张。',
         '确认停用接入口令？',
         { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' }
       )
@@ -319,7 +333,11 @@ defineExpose({ open })
 </script>
 
 <style scoped>
-/* 顶部那行安全状态。用成功色的浅底而不是 el-alert：一行能说清的事不该占三行 */
+/*
+ * 顶部那行安全状态：一行一句，三种状态共用这一套样式。
+ * 用浅底 + 图标的「状态条」，而不是 el-alert —— 后者是标题 + 图标 + 三行描述的大色块，
+ * 两种问题态叠在一起比二维码还高，真正要看的码被挤到下面去了。
+ */
 .qc-status {
   display: flex;
   align-items: center;
@@ -330,6 +348,30 @@ defineExpose({ open })
   font-size: 13px;
   background: var(--el-color-success-light-9);
   color: var(--el-color-success);
+}
+/* 需要处置的两种状态（没口令 / 停用）—— 同一套版式，换个颜色 */
+.qc-status--warn {
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+}
+/* 文字占满整行，行尾的动作按钮因此总能贴在右边；窄屏自动换行 */
+.qc-status > span {
+  flex: 1 1 auto;
+}
+
+/*
+ * 地址只有本机能访问时，跟在地址下面说一句（本地调试会看到）。
+ * 用小字 + 警示色，不加边框不加底：它是一条旁注，不是一块要处置的区域 ——
+ * 顶部那行状态条已经承担了「需要动作」的表达。
+ */
+.qc-addr-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-warning);
 }
 
 /*

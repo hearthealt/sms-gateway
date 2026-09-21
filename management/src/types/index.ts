@@ -133,6 +133,11 @@ export interface RecoveryCode {
  * `token` 是**明文**（与 API 密钥同理：要显示进二维码，哈希回读不出来），
  * 界面上默认打码，点「显示」才展开。`token` 为 null 表示从未生成过，
  * 此时准入校验未启用、注册接口是开放的。
+ *
+ * ⚠️ 判断「有没有生成过」**只能看 `token` 字段**：未生成时后端返回的仍然是这个对象
+ * （三个字段分别是 null / false / null），不是 null。拿对象本身当判据会把「没生成过」
+ * 当成「已停用」—— 界面上于是给出一个「启用」按钮，点下去后端只能回 400
+ * 「尚未生成接入口令，无法启用或停用」。
  */
 export interface EnrollToken {
   token: string | null

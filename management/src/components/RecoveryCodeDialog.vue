@@ -22,8 +22,18 @@
       :closable="false"
       show-icon
       title="明文密钥只显示这一次"
-      description="关闭后就取不回来了（服务端只保存它的哈希）。没记下就重新生成一张，旧密钥随之作废。"
+      description="关闭后取不回来（服务端只存哈希）。没记下就重新生成，旧密钥随之作废。"
     />
+    <!--
+      与「快速连接」同一条：地址只有本机能访问时（本地调试会看到）照旧能用，
+      但要说清二维码里写的就是这个地址 —— 那台设备扫了会连到它自己。
+      写成一小行旁注而不是 el-alert：它是一条提醒，不是一块要处置的区域，
+      上面那块「明文密钥只显示这一次」才是这块弹窗真正要人看的。
+    -->
+    <div v-if="localOnlyAddress" class="recovery-addr-warn">
+      <el-icon><WarningFilled /></el-icon>
+      <span>地址是本机地址（localhost），手机扫了连的是它自己</span>
+    </div>
     <div v-if="recoveryQr" class="recovery-qr">
       <img :src="recoveryQr" alt="设备恢复码" />
     </div>
@@ -48,17 +58,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, WarningFilled } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
-import { deviceServerUrl, issueRecoveryCode } from '../api/device'
+import { deviceServerUrl, isLocalOnlyAddress, issueRecoveryCode } from '../api/device'
 import { copyText } from '../utils/clipboard'
 import type { RecoveryCode } from '../types'
 
 const visible = ref(false)
 const recovery = ref<RecoveryCode | null>(null)
 const recoveryQr = ref('')
+const serverUrl = ref('')
+
+/** 与「快速连接」同一条：只有本机能访问的地址会被写进二维码，必须显式警告一下。 */
+const localOnlyAddress = computed(() => isLocalOnlyAddress(serverUrl.value))
 
 /**
  * 为某台设备签发一张恢复码并弹窗。由父组件通过 ref 调用。
@@ -67,16 +81,9 @@ const recoveryQr = ref('')
  * 父组件不必再处理返回值。
  */
 async function open(deviceId: string) {
-  // 先要地址再签发。顺序很重要：不能先把服务端的密钥轮换了、再发现二维码没地址可写 ——
-  // 那样这台设备的旧密钥已经被作废，而现场什么都没拿到。
-  const serverUrl = deviceServerUrl()
-  if (!serverUrl) {
-    ElMessage.error(
-      '未配置 VITE_DEVICE_SERVER_URL，无法生成恢复码：二维码里要写设备能访问的服务器地址，' +
-        '这个值没配时猜不出来（开发时控制台的 origin 是 localhost，对手机没有意义）。'
-    )
-    return
-  }
+  // 地址就是当前 origin（后端只监听回环，前端是唯一入口）。它若是 localhost 这种
+  // 手机访问不到的地址，弹窗里会有警告条 —— 但不拦着不放，本地调试要看这个界面。
+  serverUrl.value = deviceServerUrl()
 
   // 先弹窗再签发：签发是一次网络往返，期间弹窗里显示加载态，点下去立刻有反馈。
   recovery.value = null
@@ -92,7 +99,7 @@ async function open(deviceId: string) {
     // 带着它只会让人以为扫码能把名字带过去。
     recoveryQr.value = await QRCode.toDataURL(
       JSON.stringify({
-        url: serverUrl,
+        url: serverUrl.value,
         deviceId: code.deviceId,
         enrollSecret: code.enrollSecret,
       }),
@@ -125,6 +132,15 @@ defineExpose({ open })
 </script>
 
 <style scoped>
+/* 地址只有本机能访问时的一行旁注（见模板里的说明）：小字 + 警示色，不做成大色块 */
+.recovery-addr-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-warning);
+}
 .recovery-qr {
   display: flex;
   justify-content: center;

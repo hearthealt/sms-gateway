@@ -282,9 +282,12 @@ npm run build     # 产物在 management/dist/
 
 自己拿 `dist/` 挂到别的服务器上时，注意**方式一 · 4** 里那两条反向代理配置。
 
-**这两个 `.env` 都已加入 `.gitignore`，只有 `.env.example` 入库**：
-后端读 `docker/.env`（见 `docker/.env.example`），前端开发时读 `management/.env`
-（见 `management/.env.example`，只有 `VITE_` 前缀的变量会进前端代码）。
+**部署用的 `.env` 已加入 `.gitignore`，入库的只有模板 `docker/.env.example`** ——
+后端与前端容器都从它读配置（库和缓存地址、各种密钥、两个端口）。
+
+> 前端**开发时**没有需要配的环境变量：设备要访问的地址取「你访问后台用的那个 origin」，
+> 见 `management/src/api/device.ts`。用 localhost 打开开发服务器时那两个二维码功能会
+> 明确报错（回环地址对手机没意义），想看二维码就用 `npm run dev -- --host` 再从局域网 IP 访问。
 
 ### 4. 构建 Android 客户端
 
