@@ -182,6 +182,22 @@ public class NotifyChannelService {
     }
 
     /**
+     * 当前**启用**的渠道名，供设备端在被问「测了会发去哪」时先回答。
+     *
+     * <p>只有名字，不带任何配置：设备的持有者要判断的是「点下去会打扰到谁」，
+     * 而不是这些渠道怎么配的 —— 配置里有 webhook 地址与 token，那是管理端的范围。
+     *
+     * <p>存在的理由：一个渠道都没启用时，按钮点下去只会返回一个空列表，
+     * 而人看到的是「测试通过了但什么都没发生」。把「会发给谁」提前摆出来，
+     * 这种情况在点之前就说得清。
+     */
+    public List<String> enabledChannelNames() {
+        return channelRepository.findByEnabledTrue().stream()
+                .map(NotifyChannel::getName)
+                .toList();
+    }
+
+    /**
      * 把所有**启用**的渠道各测一条，返回逐个结果。设备端的「一键测转发链路」用它。
      *
      * <p>为什么设备端要能自己发起：转发断掉是**静默**的 —— 手机照收、心跳照发、

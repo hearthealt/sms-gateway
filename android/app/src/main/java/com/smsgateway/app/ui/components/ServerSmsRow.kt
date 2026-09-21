@@ -1,5 +1,6 @@
 package com.smsgateway.app.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,7 +14,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import com.smsgateway.app.model.SmsRecord
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
@@ -25,7 +28,7 @@ import com.smsgateway.app.ui.theme.AppTypography
  * @param record 短信记录
  */
 @Composable
-fun ServerSmsRow(record: SmsRecord) {
+fun ServerSmsRow(record: SmsRecord, onCopyCode: (String) -> Unit = {}) {
     // 服务端的判定：这是本地数据看不到的信息
     //
     // **不判 DUPLICATE**：库里不会有这个状态 —— 重复到达不新插行，服务端撞上
@@ -79,8 +82,19 @@ fun ServerSmsRow(record: SmsRecord) {
 
             // 验证码与收到时间并成一行：一行记录省下一行高度
             Row(verticalAlignment = Alignment.CenterVertically) {
-                record.code?.takeIf { it.isNotBlank() }?.let {
-                    Text("验证码 $it", style = AppTypography.bodySmall, color = AppColor.Ink)
+                // 验证码**点一下复制这一条**（不是整页的码）。
+                // 原先这一格不可点，而整页只有顶栏那个「复制今日验证码」——
+                // 想拿走眼前这一条的人点下去会复制到几十条，然后一脸问号。
+                record.code?.takeIf { it.isNotBlank() }?.let { code ->
+                    Text(
+                        text = "验证码 $code",
+                        style = AppTypography.bodySmall,
+                        color = AppColor.Ink,
+                        modifier = Modifier
+                            .clip(AppColor.BadgeShape)
+                            .clickable { onCopyCode(code) }
+                            .padding(horizontal = AppSpacing.xxs, vertical = 2.dp)
+                    )
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 record.receiveTime?.let {

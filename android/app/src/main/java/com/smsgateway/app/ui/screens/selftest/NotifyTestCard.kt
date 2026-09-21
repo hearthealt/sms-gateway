@@ -59,16 +59,29 @@ fun NotifyTestCard(state: DashboardState, onTest: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
         ) {
             Text(text = "转发链路", style = AppTypography.h3, color = AppColor.Ink)
+
+            // 先说清「会发给谁」，再让人点。原先只有一句「给每个启用的转发渠道各发一条」，
+            // 而实际一个渠道都没启用时，点下去只返回一个空列表 —— 人看到的是
+            // 「测过了，什么都没发生」，比什么都不知道更糟。
+            val channels = state.notifyChannels
+            val hasChannels = channels?.isNotEmpty() == true
+
             Text(
-                text = "转发断掉是静默的：手机照收、心跳照发，只是码送不到微信里。" +
-                    "点一下会给每个启用的转发渠道各发一条测试消息（5 分钟内只能测一次）。",
+                text = when {
+                    channels == null -> "转发断掉是静默的：手机照收、心跳照发，只是码送不到微信里。"
+                    hasChannels -> "会发给：${channels.joinToString("、")}"
+                    else -> "当前**没有启用**的转发渠道 —— 点了也不会发到任何地方。" +
+                        "短信只会存在服务端，需要管理员在控制台启用渠道。"
+                },
                 style = AppTypography.caption,
-                color = AppColor.InkMuted
+                color = if (channels != null && !hasChannels) AppColor.Warning else AppColor.InkMuted
             )
 
             Button(
                 onClick = onTest,
-                enabled = !state.notifyTesting,
+                // 一个渠道都没有时按钮置灰：点下去只会返回空列表，
+                // 那不是「测试失败」，但看起来像
+                enabled = !state.notifyTesting && channels?.isNotEmpty() != false,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (state.notifyTesting) {

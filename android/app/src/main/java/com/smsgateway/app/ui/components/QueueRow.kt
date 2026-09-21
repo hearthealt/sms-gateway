@@ -1,5 +1,6 @@
 package com.smsgateway.app.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -21,6 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.database.SmsQueueEntity
@@ -53,7 +55,8 @@ fun QueueRow(
     row: SmsQueueEntity,
     now: Long,
     onRetry: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onCopyCode: (String) -> Unit = {}
 ) {
     val failed = row.status == "failed"
     // 这两个按钮都会立刻改变眼前的列表（重试会挪位置、删除会让它消失），
@@ -114,13 +117,20 @@ fun QueueRow(
                 overflow = TextOverflow.Ellipsis
             )
 
-            // 验证码（如果有）
+            // 验证码（如果有）。整块可点 → 复制这一条 ——
+            // 与服务端记录页同一套交互，两页来回看不会一个能点一个不能点
             row.code.takeIf { it.isNotBlank() }?.let { code ->
                 Spacer(modifier = Modifier.height(AppSpacing.xxs))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(AppColor.BadgeShape)
+                        .clickable { onCopyCode(code) }
+                        .padding(horizontal = AppSpacing.xxs, vertical = 2.dp)
+                ) {
                     Icon(
                         imageVector = Icons.Default.Key,
-                        contentDescription = "验证码",
+                        contentDescription = "验证码，点一下复制",
                         tint = AppColor.InkSecondary,
                         modifier = Modifier.size(16.dp)
                     )

@@ -1,6 +1,10 @@
 package com.smsgateway.app.ui.screens.queue
 
 import androidx.compose.animation.AnimatedVisibility
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,6 +18,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
@@ -21,10 +27,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppScreen
@@ -35,6 +45,7 @@ import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.utils.rememberNow
+import kotlinx.coroutines.launch
 
 /**
  * 队列页。
@@ -50,6 +61,9 @@ fun QueueScreen(
     onBack: () -> Unit
 ) {
     val pullState = rememberPullToRefreshState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     // 一秒钟走一次，只为「还有多久重试」那个倒计时 —— 队列不动的时候没有任何状态
     // 发射，倒计时会一直停在那儿，到点了也不会消失。整个列表共用这一个走针，
@@ -75,13 +89,17 @@ fun QueueScreen(
     }
 
     AppScreen(
-        title = "待上传（${state.queue.size}）",
+        // 条数放标题右边，与服务端记录页同一个样式（原先写成「待上传（N）」，
+        // 同一个数字两种写法，两页来回看会觉得别扭）
+        title = "待上传",
+        subtitle = "共 ${state.queue.size} 条",
         onBack = onBack,
         actions = {
             IconButton(onClick = { viewModel.refreshQueue() }) {
                 Icon(Icons.Default.Refresh, "刷新", tint = AppColor.onBrand)
             }
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Box(
             modifier = Modifier
@@ -121,7 +139,13 @@ fun QueueScreen(
                                 row = row,
                                 now = now,
                                 onRetry = { viewModel.retrySms(row.id) },
-                                onDelete = { viewModel.deleteSms(row.id) }
+                                onDelete = { viewModel.deleteSms(row.id) },
+                                onCopyCode = { code ->
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as? ClipboardManager
+                                    clipboard?.setPrimaryClip(ClipData.newPlainText("验证码", code))
+                                    scope.launch { snackbarHostState.showSnackbar("已复制 $code") }
+                                }
                             )
                         }
                     }

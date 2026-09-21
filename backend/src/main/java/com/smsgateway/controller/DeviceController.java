@@ -119,6 +119,18 @@ public class DeviceController {
      * 上报一条假短信，而假短信本来就会走转发规则发出去。限流挡住的是「连点刷屏」，
      * 不是「令牌被偷」—— 后者要换令牌，那是另一件事。
      */
+    /**
+     * 当前启用的转发渠道名。
+     *
+     * <p>给自检页在按钮旁边先摆出「会发给谁」用 —— 一个渠道都没启用时，
+     * 点「测转发」只会返回空列表，而人看到的是「测过了，什么都没发生」。
+     * 只回名字，不回配置（那里面有 webhook 地址与 token）。
+     */
+    @GetMapping("/notify/channels")
+    public ResponseEntity<ApiResult<List<String>>> notifyChannels() {
+        return ResponseEntity.ok(ApiResult.success(notifyChannelService.enabledChannelNames()));
+    }
+
     @PostMapping("/notify/test")
     public ResponseEntity<ApiResult<List<NotifyTestResult>>> testNotify(HttpServletRequest httpRequest) {
         String deviceId = (String) httpRequest.getAttribute("deviceId");

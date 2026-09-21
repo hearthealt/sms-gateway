@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
@@ -34,6 +35,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,6 +54,7 @@ import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
+import kotlinx.coroutines.launch
 
 /**
  * 服务端记录页。
@@ -65,8 +69,24 @@ fun ServerSmsScreen(
     onBack: () -> Unit
 ) {
     val pullState = rememberPullToRefreshState()
+    val listState = rememberLazyListState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // 滚到底就续下一页。不摆「加载更多」按钮：那种按钮在列表末尾，而要看更多
+    // 恰恰是在滚到末尾的时候 —— 让「继续滚」本身把它带回来，比多一次点击顺
+    // （下拉刷新保持它本来的意思：回到最新那一页）。
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .collect { lastVisible ->
+                if (lastVisible != null &&
+                    lastVisible >= state.smsRecords.size - LOAD_MORE_THRESHOLD
+                ) {
+                    viewModel.loadMoreServerSms()
+                }
+            }
+    }
 
     LaunchedEffect(Unit) { viewModel.loadServerSmsNow() }
 
@@ -84,29 +104,16 @@ fun ServerSmsScreen(
         }
     }
 
-    // 「复制今日验证码」：整页的码一次拿走（联调、客服常用）。
-    // 放在这一页而不是主页 —— 码就列在这页上，而主页现在只回答「在跑吗 / 正在变坏吗」。
-    LaunchedEffect(state.copyPayload) {
-        val payload = state.copyPayload ?: return@LaunchedEffect
-        if (payload.isBlank()) {
-            snackbarHostState.showSnackbar("今天还没有提取到验证码")
-        } else {
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                as? ClipboardManager
-            clipboard?.setPrimaryClip(ClipData.newPlainText("验证码", payload))
-            // Android 13 起系统自己会弹「已复制」，但不说几条 —— 条数才是这里要交代的
-            snackbarHostState.showSnackbar("已复制 ${payload.lines().size} 条验证码")
-        }
-        viewModel.clearCopyPayload()
-    }
-
+    // 原先这里还有一个「复制今日验证码」（整页的码一次拿走）。删掉了：
+    // 一格点一下复制眼前这条才是常态，而顶栏那个看不出范围的图标只会让人
+    // 以为点下去是复制眼前这条 —— 结果拿到几十条。见 ServerSmsRow 里的单条复制。
     AppScreen(
         title = "服务端记录",
         onBack = onBack,
+        // 条数放在标题右边：它是一眼扫过的量，占一行不如贴着标题。
+        // 还没读到时不显示 —— 「共 0 条」在加载中是个假话。
+        subtitle = if (state.smsTotal > 0) "共 ${state.smsTotal} 条" else null,
         actions = {
-            IconButton(onClick = { viewModel.requestCopyTodayCodes() }) {
-                Icon(Icons.Default.ContentCopy, "复制今日验证码", tint = AppColor.onBrand)
-            }
             IconButton(onClick = { viewModel.loadServerSms() }) {
                 Icon(Icons.Default.Refresh, "刷新", tint = AppColor.onBrand)
             }
@@ -152,16 +159,13 @@ fun ServerSmsScreen(
                 }
 
                 else -> LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(AppSpacing.md),
                     verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
                     item {
-                        ListHeader(
-                            error = state.smsError,
-                            total = state.smsTotal,
-                            shown = state.smsRecords.size
-                        )
+                        ListHeader(error = state.smsError)
                     }
 
                     itemsIndexed(
@@ -180,19 +184,14 @@ fun ServerSmsScreen(
                             visible = shown,
                             enter = AppAnimations.listItemEnter(index)
                         ) {
-                            ServerSmsRow(record)
-                        }
-                    }
-
-                    // 还有没加载完的就给一个入口。放在列表末尾而不是自动触发：
-                    // 现场多数时候只看最近几条，不该为了「可能要看」把流量和等待
-                    // 都提前花掉；而列表只有 20 条时，滚到底就是一次点击的距离。
-                    if (state.smsRecords.size < state.smsTotal) {
-                        item {
-                            LoadMoreRow(
-                                loading = state.smsLoading,
-                                remaining = state.smsTotal - state.smsRecords.size,
-                                onLoadMore = { viewModel.loadMoreServerSms() }
+                            ServerSmsRow(
+                                record = record,
+                                onCopyCode = { code ->
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as? ClipboardManager
+                                    clipboard?.setPrimaryClip(ClipData.newPlainText("验证码", code))
+                                    scope.launch { snackbarHostState.showSnackbar("已复制 $code") }
+                                }
                             )
                         }
                     }
@@ -208,52 +207,27 @@ fun ServerSmsScreen(
 }
 
 /**
- * 列表顶部的一行说明：刷新失败的原因（有的话）+ 加载进度。
+ * 列表顶部一行：刷新失败的原因（有的话）+ 总数。
  *
- * 计数不是装饰：一页只有 20 条，这个上限原先在界面上是**看不见**的 ——
- * 用户数了 20 条，会以为服务端只有 20 条。说清楚「已加载 20 / 共 57 条」，
- * 才知道列表下面还有东西、该往下滚。
+ * 条数已经挪到顶栏标题右边（见 AppScreen 的 subtitle）—— 同一个数字摆两处，
+ * 一处在滚动区里会跟着滚走，不如只在头部说一次。这里只剩失败提示。
  */
 @Composable
-private fun ListHeader(error: String?, total: Long, shown: Int) {
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.xxs)) {
-        if (error != null) {
-            Text(
-                text = "刷新失败：$error —— 下面是上次读到的记录。",
-                style = AppTypography.caption,
-                color = AppColor.Danger
-            )
-        }
-        val count = if (total > shown) {
-            "已加载 $shown / 共 $total 条"
-        } else {
-            "共 $total 条"
-        }
-        Text(text = count, style = AppTypography.caption, color = AppColor.InkMuted)
-    }
+private fun ListHeader(error: String?) {
+    if (error == null) return
+
+    Text(
+        text = "刷新失败：$error —— 下面是上次读到的记录。",
+        style = AppTypography.caption,
+        color = AppColor.Danger,
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 /**
- * 列表末尾的「加载更多」。
+ * 离列表末尾还有几项就开始续下一页。
  *
- * 正在读的时候换成一个小转圈：按钮本身不能表达「上一次还没回来」，
- * 而连点会把同一页请求发好几遍（DashboardViewModel.loadMoreServerSms 会挡，
- * 但按钮得让这件事看得出来）。
+ * 留 3 项而不是「到最后一项才加载」：到顶了再请求，用户会看到一片空白等一秒。
+ * 提前一点，下一页通常在他滚到那儿时已经到了。
  */
-@Composable
-private fun LoadMoreRow(loading: Boolean, remaining: Long, onLoadMore: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = AppSpacing.xs),
-        contentAlignment = Alignment.Center
-    ) {
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-        } else {
-            TextButton(onClick = onLoadMore) {
-                Text("加载更多（还有 $remaining 条）", style = AppTypography.bodySmall)
-            }
-        }
-    }
-}
+private const val LOAD_MORE_THRESHOLD = 3

@@ -155,15 +155,6 @@ data class DashboardState(
      */
     val trend: DeviceTrend? = null,
 
-    /**
-     * 待写入剪贴板的内容（一次性的）。
-     *
-     * 剪贴板要 Context，而这里走「ViewModel 备好内容 → 界面写剪贴板并清空」这条路，
-     * 与 registerMessage / settingsMessage 同一套一次性通道。
-     * 空串是有效值：表示「今天一条验证码都没有」，界面据此提示而不是复制一段空白。
-     */
-    val copyPayload: String? = null,
-
     // 服务端记录页
     val smsRecords: List<SmsRecord> = emptyList(),
     val smsTotal: Long = 0,
@@ -185,7 +176,15 @@ data class DashboardState(
      */
     val notifyTesting: Boolean = false,
     val notifyTestResults: List<NotifyTestResult>? = null,
-    val notifyTestError: String? = null
+    val notifyTestError: String? = null,
+
+    /**
+     * 当前启用的转发渠道名；null = 还没问过。
+     *
+     * 用来在按钮旁边先摆出「会发给谁」：一个渠道都没启用时，点下去只会返回空列表，
+     * 而人看到的是「测过了，什么都没发生」—— 那比什么都不知道更糟。
+     */
+    val notifyChannels: List<String>? = null
 ) {
     /**
      * 派生量，判据与 DevicePrefs.isRegistered 完全一致。
@@ -205,14 +204,6 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_SERVER_URL = DevicePrefs.KEY_SERVER_URL
 
         private const val SMS_PAGE_SIZE = 20
-
-        /**
-         * 「复制今日验证码」拉多少条。
-         *
-         * 设备接口没有日期筛选参数，只能取一页再按日期过滤 —— 100 条够一天的量，
-         * 今天超过 100 条时会少几个（现场联调够用，要全量有服务端记录页）。
-         */
-        private const val COPY_CODES_PAGE_SIZE = 100
 
         /** 趋势图看几天。 */
         private const val TREND_DAYS = 7
@@ -967,50 +958,25 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // ---------- 主页「复制今日验证码」 ----------
-
     /**
-     * 备好「今日全部验证码」的文本，交给界面写剪贴板。
+     * 拉一次「当前有哪些启用的转发渠道」。进自检页时调，用来在按钮旁边说清会发给谁。
      *
-     * 走服务端记录接口而不是本地库：本地库里只有**还没传上去**的行，传上去就删了，
-     * 拿它拼「今日验证码」只会拼出一个几乎为空的列表。
-     *
-     * 只取第一页 100 条再按日期过滤（设备接口没有日期筛选参数）。今天超过 100 条时
-     * 会少几个 —— 现场联调那种场景够用，真要全量有服务端记录页。宁可这样，
-     * 也不为了「凑满」去翻页：那会把一个「点一下给我码」的动作变成拉几十个请求。
+     * 失败就静默留着上一次的结果：这只是个提示，为它报错不值当 —— 真要测，点按钮
+     * 那一下会给出准确得多的结论。
      */
-    fun requestCopyTodayCodes() {
+    fun refreshNotifyChannels() {
         viewModelScope.launch {
-            val lines = try {
-                val response = RetrofitClient.getApiService()
-                    .mySms(page = 1, pageSize = COPY_CODES_PAGE_SIZE, includeIgnored = false)
-                val records = response.body()?.data?.records.orEmpty()
-                val today = LocalDate.now()
-                records
-                    .filter { record ->
-                        !record.code.isNullOrBlank() &&
-                            ServerTime.toLocalDate(record.receiveTime) == today
-                    }
-                    .map { "${it.sender.orEmpty().ifBlank { "未知" }} ${it.code}" }
+            try {
+                val response = RetrofitClient.getApiService().notifyChannels()
+                val names = response.body()?.data ?: return@launch
+                _state.update { it.copy(notifyChannels = names) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Load today codes failed", e)
-                emptyList()
+                Log.w(TAG, "Load notify channels failed", e)
             }
-
-            // 空列表也要把 copyPayload 置上（空串）：界面据此说「今天还没有验证码」，
-            // 而不是静默什么都不发生 —— 那种「点了没反应」最难查。
-            _state.update { it.copy(copyPayload = lines.joinToString("\n")) }
         }
     }
-
-    /** 界面写完剪贴板后调用。 */
-    fun clearCopyPayload() {
-        _state.update { if (it.copyPayload == null) it else it.copy(copyPayload = null) }
-    }
-
-    // ---------- 自检页的「测转发链路」 ----------
 
     /**
      * 让服务端给每个启用的转发渠道各发一条测试消息。
@@ -1143,6 +1109,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     fun runSelfTest() {
         if (_state.value.selfTestRunning) return
         _state.update { it.copy(selfTestRunning = true, selfTest = emptyList()) }
+
+        // 顺手把「有哪些启用的转发渠道」也问一遍：自检页那块「测转发」要拿它
+        // 在按钮旁边说清会发给谁（一个都没有时，点了也只会返回空列表）
+        refreshNotifyChannels()
 
         viewModelScope.launch {
             val app = getApplication<Application>()

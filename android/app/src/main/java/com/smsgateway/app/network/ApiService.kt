@@ -62,6 +62,15 @@ interface ApiService {
     suspend fun smsTrend(@Query("days") days: Int): Response<ApiResponse<DeviceTrend>>
 
     /**
+     * 当前启用的转发渠道名（只有名字，没有配置）。
+     *
+     * 自检页在按钮旁边先摆出「会发给谁」：一个渠道都没启用时，点测试只会返回空列表，
+     * 而人看到的是「测过了，什么都没发生」。
+     */
+    @GET("api/device/notify/channels")
+    suspend fun notifyChannels(): Response<ApiResponse<List<String>>>
+
+    /**
      * 测一次转发链路：服务端会给每个启用的转发渠道各发一条测试消息，返回逐个结果。
      *
      * 这条请求**有外发副作用**（真的会往微信/钉钉发消息），所以服务端按设备限流

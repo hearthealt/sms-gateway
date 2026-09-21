@@ -42,12 +42,13 @@ import com.smsgateway.app.ui.theme.AppTypography
 fun AppScreen(
     title: String,
     onBack: (() -> Unit)? = null,
+    subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {},
     snackbarHost: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit
 ) {
     Scaffold(
-        topBar = { AppTopBar(title = title, onBack = onBack, actions = actions) },
+        topBar = { AppTopBar(title = title, onBack = onBack, subtitle = subtitle, actions = actions) },
         snackbarHost = snackbarHost,
         containerColor = AppColor.Screen,
         content = content
@@ -58,6 +59,13 @@ fun AppScreen(
 fun AppTopBar(
     title: String,
     onBack: (() -> Unit)? = null,
+    /**
+     * 标题右侧的小字，如「共 64 条」。
+     *
+     * 单独一个参数而不是拼进 [title]：标题是 20sp 粗体，把「共 64 条」拼进去
+     * 它也跟着变成 20sp 粗体 —— 那是标题的字重，不是一个计数该有的样子。
+     */
+    subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {}
 ) {
     Row(
@@ -85,9 +93,21 @@ fun AppTopBar(
         Text(
             text = title,
             style = AppTypography.h2,
-            color = AppColor.onBrand,
-            modifier = Modifier.weight(1f)
+            color = AppColor.onBrand
         )
+
+        subtitle?.let {
+            Spacer(modifier = Modifier.width(AppSpacing.xs))
+            Text(
+                text = it,
+                style = AppTypography.caption,
+                // 压在品牌蓝上，用同色降透明度而不是换一种灰：换灰会在蓝底上发脏
+                color = AppColor.onBrand.copy(alpha = 0.75f)
+            )
+        }
+
+        // 撑开剩余空间，让 actions 贴右 —— 与有没有 subtitle 无关
+        Spacer(modifier = Modifier.weight(1f))
 
         actions()
     }
