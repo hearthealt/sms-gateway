@@ -41,10 +41,15 @@ fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
         colors = CardDefaults.cardColors(containerColor = AppColor.Card)
     ) {
         Column(modifier = Modifier.padding(vertical = 2.dp)) {
+            // 完整展示，不截断。原先取前 8 位再补省略号，而设备标识的形态是
+            // 「android- + 16 位十六进制」，前 8 位恰好就是 `android-` ——
+            // 每台设备都长这样，截完等于什么都没显示。
+            // 这一行也放得下：24 字符等宽在 12sp 下约 173dp，行内留给值的有 270dp 上下。
             IdentityLine(
                 icon = Icons.Default.Smartphone,
                 label = "设备",
-                value = state.deviceId.abbreviateId(),
+                value = state.deviceId.ifBlank { "未设置" },
+                mono = true,
                 onClick = onOpenSettings
             )
             HorizontalDivider(
@@ -63,7 +68,14 @@ fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
 }
 
 @Composable
-private fun IdentityLine(icon: ImageVector, label: String, value: String, onClick: () -> Unit) {
+private fun IdentityLine(
+    icon: ImageVector,
+    label: String,
+    value: String,
+    onClick: () -> Unit,
+    /** 等宽显示。给设备标识这类要逐位核对的値用：比例字体里 0/O、1/l 分不清。 */
+    mono: Boolean = false
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -80,7 +92,11 @@ private fun IdentityLine(icon: ImageVector, label: String, value: String, onClic
         Spacer(modifier = Modifier.width(AppSpacing.sm))
         Text(text = label, style = AppTypography.bodyMedium, color = AppColor.InkSecondary)
         Spacer(modifier = Modifier.weight(1f))
-        Text(text = value, style = AppTypography.bodySmall, color = AppColor.InkStrong)
+        Text(
+            text = value,
+            style = if (mono) AppTypography.mono(AppTypography.bodySmall) else AppTypography.bodySmall,
+            color = AppColor.InkStrong
+        )
         Icon(
             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = null,
@@ -89,6 +105,3 @@ private fun IdentityLine(icon: ImageVector, label: String, value: String, onClic
         )
     }
 }
-
-private fun String.abbreviateId(): String =
-    if (isBlank()) "未设置" else if (length <= 12) this else "${take(8)}…"
