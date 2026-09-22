@@ -68,6 +68,15 @@ class DeviceServiceTest {
     private AdminEventBroadcaster adminEvents;
 
     /**
+     * 运行事件记录。同样是「没声明就注入成 null」的那类依赖 ——
+     * 而它被包在 recordQuietly 的 try/catch 里，null 的表现**不是失败**，
+     * 而是每个用例都往日志里吐一大段 NPE 栈（CI 日志因此上千行，
+     * 真正要看的东西被埋掉），打点路径也一次都没被走到。
+     */
+    @Mock
+    private EventLogService eventLogService;
+
+    /**
      * 准入校验本身在 {@link DeviceEnrollTokenServiceTest} 里测；这里只关心
      * DeviceService **在什么时机调用它**，所以给一个 mock。
      * mock 的 verify 默认什么也不做，于是下面那些与口令无关的老用例不受影响。

@@ -79,6 +79,13 @@ class SmsServiceTest {
     private AdminEventBroadcaster adminEvents;
 
     /**
+     * 运行事件记录。与上面同一个理由 —— 缺了它不会让用例失败（服务里那段
+     * 吞掉了异常），只会让每个用例吐一段 NPE 栈把 CI 日志刷满。
+     */
+    @Mock
+    private EventLogService eventLogService;
+
+    /**
      * 转发发件箱。服务里新加的依赖没在这里声明的话会被注入成 null ——
      * 而它是在保存短信之后调的，null 会直接 NPE，把整条上报路径打断。
      */

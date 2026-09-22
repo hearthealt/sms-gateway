@@ -10,6 +10,8 @@ import com.smsgateway.repository.NotifyChannelRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.model.enums.SysConfigKey;
+import com.smsgateway.service.AdminEventBroadcaster;
+import com.smsgateway.service.EventLogService;
 import com.smsgateway.service.SysConfigService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -53,6 +55,17 @@ class NotifyDispatcherTest {
     @Mock private NotifyRateLimiter rateLimiter;
     @Mock private ObjectMapper objectMapper;
     @Mock private Executor executor;
+
+    /*
+     * 运行事件与它的推送通道：applyResult 在投递成功或判死时会经它们记一条、推一条。
+     *
+     * **这两个 mock 是必需的**：@InjectMocks 挑选那个参数最多的构造器，但只会注入
+     * 「有对应 @Mock 的」参数 —— 缺了它们，字段就是 null，而生产里那两个由 Spring 注入、
+     * 从来不会是 null。漏掉的表现是这两个用例 NPE（CI 上正是这样挂的），
+     * 而不是某个断言失败 —— 因为它们压根没走到断言。
+     */
+    @Mock private AdminEventBroadcaster adminEvents;
+    @Mock private EventLogService eventLogService;
 
     /**
      * 分类器用**真实实现**（无依赖、纯逻辑）：它决定了失败该重试还是判死，
