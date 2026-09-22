@@ -20,6 +20,17 @@ export function useAdminEvents(onEvent: (event: string) => void) {
   let retry = 0
   let pending: ReturnType<typeof setTimeout> | null = null
 
+  /** 本次挂载后是否已经**成功连上过**。用来识别「首次连接」，见 schedule。 */
+  let connectedOnce = false
+
+  /**
+   * 这一次连接之后到达的 `hello` 要不要丢掉。
+   *
+   * 在**连接成功那一刻**定，而不是在收到 hello 时定：万一某次连接在 hello 到达之前
+   * 就断了，靠「收到过 hello」来记状态会把下一次（真正的重连）也一并误伤。
+   */
+  let dropNextHello = false
+
   /**
    * 合并短时间内的多次事件：**一个窗口只回调一次**。
    *
@@ -37,6 +48,22 @@ export function useAdminEvents(onEvent: (event: string) => void) {
    * 同样的请求，而收益只是让一个本来就不该存在的窄分支能工作。
    */
   function schedule(event: string) {
+    // **首次连接时服务端立刻推的那条 hello 要丢掉。**
+    //
+    // hello 的用途是「补齐断线期间漏掉的事件」，而首次连接压根没有断线期 ——
+    // 页面刚在 onMounted 里拉过一次，这条 hello 只是让它再拉一遍。
+    // 不丢的话每个页面进来都白打一次接口（现场看到的就是「每个页面请求两次」）。
+    //
+    // 第二次之后的 hello 照常放行：那才是真的断线重连，那时确实漏了东西。
+    //
+    // 代价：连接如果建得很慢，「mount 时那次加载完成」到「首连成功」之间发生的变更
+    // 要等下一个事件才补得上。这个窗口在本机是几十毫秒（同源 fetch 拿到响应头就算连上），
+    // 而且**最坏情况也只是退回加推送之前的形态** —— 那 7 个页面以前本来就只在
+    // mount 时拉一次。用「每个页面少打一次接口」换它，划算。
+    if (event === 'hello' && dropNextHello) {
+      dropNextHello = false
+      return
+    }
     if (pending) clearTimeout(pending)
     pending = setTimeout(() => {
       pending = null
@@ -71,9 +98,14 @@ export function useAdminEvents(onEvent: (event: string) => void) {
         throw new Error(`events stream failed: ${res.status}`)
       }
 
-      // 连上了：退避计数归零，并立刻对齐一次数据 —— 断线期间漏掉的事件靠这一下补上
-      // （服务端订阅成功时会先发一条 hello）。
+      // 连上了：退避计数归零。
+      //
+      // 服务端订阅成功时会先推一条 hello，前端拿它对齐一次数据。但**首次连接那条要丢掉**：
+      // 页面刚在 onMounted 里拉过一次，没有断线期需要补，留着就是每个页面白打一次接口。
+      // 见 schedule。标记在这一刻打，理由见 dropNextHello 的声明处。
       retry = 0
+      dropNextHello = !connectedOnce
+      connectedOnce = true
       await readStream(res.body)
       // 流正常结束（服务端重启/网关断开）也走重连
     } catch (e) {
