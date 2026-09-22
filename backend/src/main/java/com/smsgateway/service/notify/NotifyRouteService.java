@@ -13,6 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import com.smsgateway.service.AdminEventBroadcaster;
+
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -24,6 +26,20 @@ import java.util.stream.Collectors;
 public class NotifyRouteService {
 
     private final NotifyRouteRepository routeRepository;
+    private final AdminEventBroadcaster adminEvents;
+
+    /**
+     * 转发规则页的「该刷新了」信号。
+     *
+     * <p>这一页**没有服务端自变源**（变化只来自管理员自己，而本地操作已是即时更新的），
+     * 所以推它只覆盖「另一个管理员改了」。说清楚这一点，别把它当成实时性承诺。
+     *
+     * <p>例外是渠道被删时那条连带路径：那时规则会被**自动停用**，
+     * 那不是任何人的操作，见 {@code NotifyChannelService.delete}。
+     */
+    private void notifyChanged() {
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_ROUTES, Map.of());
+    }
     private final NotifyChannelRepository channelRepository;
 
     public List<NotifyRouteView> list() {
@@ -39,6 +55,7 @@ public class NotifyRouteService {
         applyFields(route, request, true);
         routeRepository.save(route);
         log.info("新建转发规则：{} → {} 个渠道", route.getRouteName(), route.getChannelIds().size());
+        notifyChanged();
         return toView(route, channelMap());
     }
 
@@ -47,12 +64,14 @@ public class NotifyRouteService {
         NotifyRoute route = require(id);
         applyFields(route, request, false);
         routeRepository.save(route);
+        notifyChanged();
         return toView(route, channelMap());
     }
 
     @Transactional
     public void delete(Long id) {
         routeRepository.delete(require(id));
+        notifyChanged();
     }
 
     @Transactional
@@ -73,6 +92,7 @@ public class NotifyRouteService {
 
         route.setEnabled(enabled);
         routeRepository.save(route);
+        notifyChanged();
         return toView(route, channelMap());
     }
 

@@ -35,6 +35,54 @@ object HeartbeatSender {
     private var hydrated = false
 
     /**
+     * 连续失败次数。
+     *
+     * 心跳 30 秒一次，逐次记日志会让断网几分钟就把整页刷满，而真正重要的事件被埋掉。
+     * 更关键的是「刚断 30 秒」和「已经断了十分钟」在排查时是完全不同的事 ——
+     * 所以只在**连续失败跨过阈值**时记一条，恢复时再记一条形成闭环。
+     *
+     * 「未注册」不算失败：那是稳态，不是故障，记它只会制造噪音。
+     */
+    private var failStreak = 0
+
+    /**
+     * 这一轮连续失败是否已经记过。
+     *
+     * <p>用它而不是只看计数：{@link #send} 会被服务心跳循环与界面上的「检查状态」
+     * 并发调用，而 `failStreak++` 不是原子操作 —— 丢一次自增就会让计数从 2 跳到 4，
+     * 于是「恰好等于 3」那种判定永远不成立，事件一条都记不下来。
+     * 改成「跨过阈值且还没记过」，丢几次自增也不影响。
+     */
+    private var failureReported = false
+
+    /** 3 次 ≈ 90 秒。跨过它才说明这不是一次抖动，而是真的连不上。 */
+    private const val FAIL_STREAK_THRESHOLD = 3
+
+    private fun recordHeartbeatFailure(context: Context, reason: String) {
+        failStreak++
+        if (!failureReported && failStreak >= FAIL_STREAK_THRESHOLD) {
+            failureReported = true
+            EventLog.write(
+                context, EventLog.HEARTBEAT_FAILED, EventLog.LEVEL_WARN,
+                reason = "连续 $failStreak 次失败（$reason）"
+            )
+        }
+    }
+
+    private fun recordHeartbeatSuccess(context: Context) {
+        // 判 failureReported 而不是计数：只有真的记过「中断」才需要一条「恢复」，
+        // 否则偶发丢一次自增就会凭空冒出一条恢复事件。
+        if (failureReported) {
+            failureReported = false
+            EventLog.write(
+                context, EventLog.HEARTBEAT_RECOVERED, EventLog.LEVEL_INFO,
+                reason = "连续失败 $failStreak 次后恢复"
+            )
+        }
+        failStreak = 0
+    }
+
+    /**
      * 首次访问时从 prefs 水合上一次的心跳时间。幂等，可从任意线程调用。
      *
      * 与 [GatewayState.ensureLoaded] 同一套写法、同一个理由：这个时间戳原本只活在
@@ -88,6 +136,7 @@ object HeartbeatSender {
                     AuthState.markTokenRejected(app)
                 }
                 Log.w(TAG, "Heartbeat rejected: HTTP ${response.code()}")
+                recordHeartbeatFailure(app, "HTTP ${response.code()}")
                 return false
             }
 
@@ -95,9 +144,11 @@ object HeartbeatSender {
             val at = System.currentTimeMillis()
             DevicePrefs.setLastHeartbeatAt(app, at)
             _lastSuccessAt.value = at
+            recordHeartbeatSuccess(app)
             true
         } catch (e: Exception) {
             Log.w(TAG, "Heartbeat failed", e)
+            recordHeartbeatFailure(app, e.javaClass.simpleName)
             false
         }
     }

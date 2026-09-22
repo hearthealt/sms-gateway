@@ -1,6 +1,7 @@
 package com.smsgateway.service;
 
 import com.smsgateway.model.enums.SysConfigKey;
+import com.smsgateway.repository.EventLogRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.service.SysConfigService;
@@ -38,6 +39,7 @@ public class SmsRetentionJob {
 
     private final SmsMessageRepository smsMessageRepository;
     private final NotifyDeliveryRepository notifyDeliveryRepository;
+    private final EventLogRepository eventLogRepository;
     private final TransactionTemplate transactionTemplate;
     private final SysConfigService sysConfigService;
 
@@ -110,6 +112,18 @@ public class SmsRetentionJob {
             return 0;
         }
         notifyDeliveryRepository.deleteBySmsMessageIdIn(ids);
+
+        // 运行日志里指向这些短信的引用也要清掉。事件行本身留着（它记的是「当时发生了什么」，
+        // 与短信在不在无关），但那个 sms_message_id 会变成悬空引用 —— 管理端点进去 404。
+        // 同样**没有外键**，不清就永远没人管。
+        //
+        // 这里是置空而不是删行，与上面删投递记录不同：投递记录脱离短信就没有意义，
+        // 而事件脱离短信仍然有信息量（发送方、原因、时刻都在行上）。
+        //
+        // 必须在**同一个事务**里：中途挂掉会留下一批悬空引用，而清理任务下次只会按
+        // receive_time 找待删的短信 —— 那些短信已经删了，找不回来。与上面那段是同一个道理。
+        eventLogRepository.clearSmsMessageIds(ids);
+
         return smsMessageRepository.deleteByIdIn(ids);
     }
 

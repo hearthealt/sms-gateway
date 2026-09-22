@@ -11,6 +11,7 @@ import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.UploadEvents
 import kotlinx.coroutines.CancellationException
@@ -134,18 +135,33 @@ class SmsUploadWorker(
 
                 var allSuccess = true
                 for (sms in pendingSms) {
-                    when (uploadSingleSms(sms)) {
+                    // 用 attempt.detail 而不是各写一句笼统的话：日志里「网络异常」这四个字
+                    // 对排查没有任何帮助 —— 500、502、超时、DNS 失败要处理的事完全不同，
+                    // 而这张表存在的全部目的就是事后能说清「当时到底怎么了」。
+                    val attempt = uploadSingleSms(sms)
+                    when (attempt.outcome) {
                         Outcome.SUCCESS -> {
                             dao.updateStatus(sms.id, "uploaded")
                             // 通知界面立刻重算「待上传」与「今日短信/验证码」：
                             // 上传只要几秒，等下一个 5 秒/30 秒轮询的话，现场看到的是
                             // 「验证码进来了，界面上什么都没发生」。
                             UploadEvents.notifyUploaded()
+                            EventLog.writeNow(
+                                context, EventLog.UPLOAD_OK, EventLog.LEVEL_INFO,
+                                sender = sms.sender, phone = sms.phone, reason = attempt.detail, smsId = sms.id
+                            )
                             Log.d(TAG, "Uploaded SMS: ${sms.id}")
                         }
 
                         Outcome.DISABLED -> {
                             DeviceStatus.set(context, true)
+                            EventLog.writeNow(
+                                context, EventLog.UPLOAD_DEVICE_DISABLED, EventLog.LEVEL_WARN,
+                                sender = sms.sender,
+                                phone = sms.phone,
+                                reason = "${attempt.detail}：设备已被管理员禁用",
+                                smsId = sms.id
+                            )
                             Log.w(TAG, "Server reports device disabled, parking queue")
                             return@withContext Result.success()
                         }
@@ -157,6 +173,13 @@ class SmsUploadWorker(
                             // isRegistered 仍是 true、界面一直显示「已注册」，
                             // 而设备其实静默地什么都传不上去。提示由界面消费该事件后发出。
                             Log.w(TAG, "Token rejected, parking queue until re-register")
+                            EventLog.writeNow(
+                                context, EventLog.UPLOAD_TOKEN_REJECTED, EventLog.LEVEL_ERROR,
+                                sender = sms.sender,
+                                phone = sms.phone,
+                                reason = "${attempt.detail}：令牌被拒，已停止上报",
+                                smsId = sms.id
+                            )
                             AuthState.markTokenRejected(context)
                             return@withContext Result.success()
                         }
@@ -165,6 +188,13 @@ class SmsUploadWorker(
                             // 服务端明确拒绝这条内容（400/422），重试多少次结果都一样，标终态。
                             // 这是 failed 唯一该出现的地方。
                             dao.updateRetry(sms.id, "failed", sms.retryCount + 1, 0)
+                            EventLog.writeNow(
+                                context, EventLog.UPLOAD_REJECTED, EventLog.LEVEL_ERROR,
+                                sender = sms.sender,
+                                phone = sms.phone,
+                                reason = "${attempt.detail}：服务端拒绝这条内容",
+                                smsId = sms.id
+                            )
                             Log.w(TAG, "SMS ${sms.id} rejected by server, marked terminal")
                         }
 
@@ -178,12 +208,26 @@ class SmsUploadWorker(
                                 retryCount = sms.retryCount + 1,
                                 nextRetryAt = calculateNextRetry(sms.retryCount)
                             )
+                            // 只在**首次**失败时记一条。逐次记的话，一条卡住的短信会按
+                            // 10s/30s/1m/5m/15m 的退避节奏把整页日志刷满，真正重要的事件
+                            // 反而被埋掉 —— 而「它失败过几次」队列行上本来就有 retryCount。
+                            if (sms.retryCount == 0) {
+                                EventLog.writeNow(
+                                    context, EventLog.UPLOAD_RETRYING, EventLog.LEVEL_WARN,
+                                    sender = sms.sender, phone = sms.phone, reason = attempt.detail, smsId = sms.id
+                                )
+                            }
                             Log.w(TAG, "Failed to upload SMS: ${sms.id}, retry ${sms.retryCount + 1}")
                         }
                     }
                 }
 
                 pruneOldUploads(dao)
+
+                // 事件日志的剪枝挂在同一个落点上，理由与 pruneOldUploads 相同：
+                // 这里是唯一「有短信就会跑起来」的周期路径。网关心跳循环里另有一处，
+                // 两者互为兜底（长期不收短信的机器由心跳那边负责清）。
+                EventLog.prune(context)
 
                 when {
                     allSuccess -> Result.success()
@@ -195,6 +239,13 @@ class SmsUploadWorker(
                     // 放弃的是**这一轮**，不是这条数据：失败的行写回的是 pending，
                     // 仍留在队列里，下次有新短信进来重新 enqueue 时会再带上它。
                     runAttemptCount >= MAX_ATTEMPTS -> {
+                        // 收手是「这一轮放弃了」，不是「这些短信没了」—— 但仍然值得留痕：
+                        // 它意味着有一批短信在退避里卡了很久，而界面上只看得到一个静态的
+                        // 「待上传 N」，看不出已经停滞。
+                        EventLog.writeNow(
+                            context, EventLog.UPLOAD_ROUND_GAVE_UP, EventLog.LEVEL_WARN,
+                            reason = "本轮放弃，仍有 ${dao.getOutstandingCountSync()} 条待上传"
+                        )
                         Log.w(
                             TAG,
                             "Reached max attempts ($runAttemptCount), stopping this run; " +
@@ -214,7 +265,19 @@ class SmsUploadWorker(
         }
     }
 
-    private suspend fun uploadSingleSms(sms: SmsQueueEntity): Outcome {
+    /**
+     * 一次上传的结果，外加**一句能拿去排查的细节**。
+     *
+     * 光有枚举不够：同样是 TRANSIENT，`HTTP 502`（对面网关挂了）和
+     * `SocketTimeoutException`（网络不通）要做的事完全不同，而日志里只写
+     * 「网络异常」等于什么都没说。所以把状态码 / 异常类名一路带到事件表里。
+     *
+     * detail 一律是**受控文案**（`HTTP NNN` 或异常类名），绝不拼 errorBody ——
+     * 那是一段不可控的字节流，而事件表要留 7 天。
+     */
+    private data class UploadAttempt(val outcome: Outcome, val detail: String)
+
+    private suspend fun uploadSingleSms(sms: SmsQueueEntity): UploadAttempt {
         return try {
             val api = RetrofitClient.getApiService()
 
@@ -234,18 +297,22 @@ class SmsUploadWorker(
             val idempotencyKey = "$deviceId:${sms.localMessageId}"
             val response = api.uploadSms(idempotencyKey, request)
 
-            when {
+            val detail = "HTTP ${response.code()}"
+            val outcome = when {
                 response.isSuccessful -> Outcome.SUCCESS
                 response.code() == 403 -> Outcome.DISABLED
                 response.code() == 401 -> Outcome.UNAUTHORIZED
                 response.code() == 400 || response.code() == 422 -> Outcome.INVALID
                 else -> Outcome.TRANSIENT
             }
+            UploadAttempt(outcome, detail)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Upload error for SMS ${sms.id}", e)
-            Outcome.TRANSIENT
+            // 异常不带 message：IOException 的 message 里可能带完整 URL 或对端响应片段，
+            // 而类名已经足够区分「超时 / DNS / 连接被拒」这几类。
+            UploadAttempt(Outcome.TRANSIENT, e.javaClass.simpleName)
         }
     }
 

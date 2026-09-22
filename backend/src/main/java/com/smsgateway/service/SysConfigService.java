@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SysConfigService {
 
     private final SysConfigRepository repository;
+    private final AdminEventBroadcaster adminEvents;
 
     /** 进程内缓存。缺某个键时表示「用默认值」，而不是「这个键不存在」。 */
     private final Map<SysConfigKey, String> cache = new ConcurrentHashMap<>();
@@ -116,6 +118,12 @@ public class SysConfigService {
 
         // 写穿：改完立刻生效，不必等重启 —— 这正是把这些配置从 yml 搬过来的全部目的
         cache.put(key, value);
+
+        // 推一条：另一个管理员的页面上如果还显示着旧值，他据此做的判断就是错的
+        // （「短信保留天数」尤其 —— 以为已经关掉了清理，实际没有）。
+        // 前端接这条事件时会跳过有未保存改动的页面，见 SysConfig.vue。
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_SYS_CONFIG,
+                Collections.singletonMap("key", key.key()));
 
         log.warn("系统设置已更改：{} = {}（{}）", key.key(), value, key.label());
     }

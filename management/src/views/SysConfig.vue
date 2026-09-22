@@ -95,6 +95,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getSysConfigList, updateSysConfig } from '../api/sysconfig'
@@ -155,6 +156,22 @@ async function loadData() {
 }
 
 onMounted(loadData)
+
+/*
+ * 另一个管理员改了配置时自动重拉。
+ *
+ * **这一页不能无条件 reload**：本页有本地编辑态（drafts），静默覆盖会把用户
+ * 正在改的内容吞掉 —— 而其中一项是「短信保留天数」，一个被吞掉的改动
+ * 可能意味着以为已经关掉了清理，实际没有。所以有未保存改动时只提示、不覆盖。
+ */
+useAdminEvents((event) => {
+  if (event !== 'sysconfig' && event !== 'hello') return
+  if (dirtyCount.value) {
+    ElMessage.warning('服务端配置已被他人修改。你本地有未保存的改动，请先保存或放弃后再刷新。')
+    return
+  }
+  loadData()
+})
 
 function discard() {
   items.value.forEach((item) => {

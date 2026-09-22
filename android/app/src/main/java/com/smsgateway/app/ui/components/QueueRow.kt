@@ -29,11 +29,8 @@ import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
+import com.smsgateway.app.ui.utils.formatClockTime
 import com.smsgateway.app.ui.utils.rememberHapticFeedback
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 /**
  * 队列页的单条记录展示 - 优化版。
@@ -102,7 +99,7 @@ fun QueueRow(
                 // 收信时刻放这里而不是底部：扫一眼就知道「这条是什么时候的」，
                 // 底部留给「接下来会怎样」（重试次数与倒计时）
                 Text(
-                    text = formatReceiveTime(row.receiveTime),
+                    text = formatClockTime(row.receiveTime),
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
@@ -207,22 +204,6 @@ fun QueueRow(
             }
         }
     }
-}
-
-/**
- * 收信时刻。当天只给时刻，更早的带上日期。
- *
- * 队列里绝大多数是刚收到的短信，「07:42」比「09-20 07:42」少一半字，而信息量一样；
- * 跨天的那几条才需要日期来区分。
- */
-private fun formatReceiveTime(at: Long): String {
-    if (at <= 0L) return ""
-    val now = Calendar.getInstance()
-    val then = Calendar.getInstance().apply { timeInMillis = at }
-    val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
-        now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
-    return SimpleDateFormat(if (sameDay) "HH:mm" else "MM-dd HH:mm", Locale.getDefault())
-        .format(Date(at))
 }
 
 /** 队列页显示「还有多久重试」，与「多久之前」方向相反，所以单独一个函数。 */

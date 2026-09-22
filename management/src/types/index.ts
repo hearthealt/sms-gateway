@@ -101,6 +101,43 @@ export interface LoginResult {
   expiresIn: number
 }
 
+/**
+ * 一条运行事件（`GET /api/admin/eventlog/list`）。
+ *
+ * **这里没有 content，也没有 code** —— 不是漏了，是后端那张表本来就不存正文与验证码
+ * （它保留 7 天，比短信本身活得久）。要看内容按 smsMessageId 去「短信记录」页查。
+ */
+export interface EventLogItem {
+  id: number
+  /** 枚举名，如 SMS_STORED。筛选与逻辑判断用它。 */
+  eventType: string
+  /** 中文标签，直接渲染。来自后端枚举，前端不硬编码。 */
+  typeLabel: string
+  /** INFO / WARN / ERROR。 */
+  level: string
+  /** 业务设备标识；设备已删时为 null，此时看 deviceCode 兜底的值也不会有。 */
+  deviceId: string | null
+  deviceName: string | null
+  sender: string | null
+  phone: string | null
+  /** 判定结果 / 原因码 / HTTP 状态。 */
+  reason: string | null
+  /**
+   * 关联的短信主键。**可能已被保留策略清掉**，只能当作「可跳转的线索」，
+   * 不能假定一定查得到。
+   */
+  smsMessageId: number | null
+  createdAt: string
+}
+
+/** 事件类型的下拉选项，来自后端枚举（`GET /api/admin/eventlog/types`）。 */
+export interface EventTypeOption {
+  value: string
+  label: string
+  /** 该类型默认的级别，用于给选项上色。 */
+  level: string
+}
+
 export interface PaginatedResponse<T> {
   records: T[]
   total: number

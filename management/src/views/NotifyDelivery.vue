@@ -120,6 +120,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import { getChannelList, getDeliveryList, retryDelivery } from '../api/notify'
@@ -227,6 +228,18 @@ async function loadData() {
 onMounted(async () => {
   channels.value = await getChannelList()
   await loadData()
+})
+
+/*
+ * 投递状态是**持续推进会自己变**的那种数据：一批发送结束、卡在 SENDING 的行被回收、
+ * 重试成功或彻底失败，全都不是任何人的操作。这一页原来只能手动点「刷新」——
+ * 而它恰恰是最需要自动更新的一页（看投递记录的人通常正在等一条验证码发出去）。
+ *
+ * `sms` 也要订阅：新来的短信会产生新的 PENDING 行，那同样应该立刻出现在列表里。
+ */
+useAdminEvents((event) => {
+  if (event !== 'deliveries' && event !== 'sms' && event !== 'hello') return
+  loadData()
 })
 
 function handleSearch() {

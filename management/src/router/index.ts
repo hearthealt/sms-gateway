@@ -81,6 +81,13 @@ const router = createRouter({
           component: () => import('../views/ApiDocs.vue'),
           meta: { title: '接口文档' },
         },
+        // 运行日志与接口文档同属「平时不看、出事了才翻」，挨着放
+        {
+          path: 'eventlog',
+          name: 'EventLog',
+          component: () => import('../views/EventLog.vue'),
+          meta: { title: '运行日志' },
+        },
         // 放最后：配置项改得最少，而列表页天天要看
         {
           path: 'sysconfig',

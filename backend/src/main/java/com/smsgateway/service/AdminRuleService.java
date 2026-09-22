@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -16,6 +17,19 @@ import java.util.List;
 public class AdminRuleService {
 
     private final CollectRuleRepository collectRuleRepository;
+    private final AdminEventBroadcaster adminEvents;
+
+    /**
+     * 规则页的「该刷新了」信号。
+     *
+     * <p>采集规则是**数据入口策略**：另一个管理员改一条，正在看这一页的人如果不知道，
+     * 会以为「短信被吞了」。这是这一页唯一需要实时的理由 —— 它自己没有服务端自变源。
+     *
+     * <p>只作信号，前端不解析内容；重复调用无副作用，所以增删改四处都发。
+     */
+    private void notifyChanged() {
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_RULES, Map.of());
+    }
 
     public List<SmsCollectRule> list() {
         return collectRuleRepository.findAllByOrderByPriorityDesc();
@@ -27,6 +41,7 @@ public class AdminRuleService {
         apply(rule, request);
         collectRuleRepository.save(rule);
         log.info("Collect rule created: id={}, name={}", rule.getId(), rule.getRuleName());
+        notifyChanged();
         return rule;
     }
 
@@ -36,6 +51,7 @@ public class AdminRuleService {
         apply(rule, request);
         collectRuleRepository.save(rule);
         log.info("Collect rule updated: id={}", id);
+        notifyChanged();
         return rule;
     }
 
@@ -46,6 +62,7 @@ public class AdminRuleService {
         }
         collectRuleRepository.deleteById(id);
         log.info("Collect rule deleted: id={}", id);
+        notifyChanged();
     }
 
     @Transactional
@@ -54,6 +71,7 @@ public class AdminRuleService {
         rule.setEnabled(enabled);
         collectRuleRepository.save(rule);
         log.info("Collect rule {} {}", id, enabled ? "enabled" : "disabled");
+        notifyChanged();
         return rule;
     }
 

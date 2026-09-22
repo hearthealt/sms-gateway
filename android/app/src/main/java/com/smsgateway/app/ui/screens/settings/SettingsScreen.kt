@@ -77,7 +77,8 @@ fun SettingsScreen(
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
     onOpenQuickConnect: () -> Unit,
-    onOpenQrExport: () -> Unit
+    onOpenQrExport: () -> Unit,
+    onOpenEventLog: () -> Unit
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -296,11 +297,32 @@ fun SettingsScreen(
 
             SettingsCard(title = "其他") {
                 OutlinedButton(
+                    onClick = onOpenEventLog,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("查看重要日志") }
+                Text(
+                    text = "短信采集、上传与设备状态的重要事件，保留 7 天。" +
+                        "「短信为什么没转发」这类问题看这里。",
+                    style = AppTypography.caption,
+                    color = AppColor.InkMuted
+                )
+
+                OutlinedButton(
                     onClick = { viewModel.clearUploadedRecords() },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("清理本地已上传记录") }
                 Text(
                     text = "只删本地已上传成功的历史，不影响服务端数据。",
+                    style = AppTypography.caption,
+                    color = AppColor.InkMuted
+                )
+
+                OutlinedButton(
+                    onClick = { viewModel.clearEventLog() },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("清理重要日志") }
+                Text(
+                    text = "只删本地这份日志，不影响待上传的短信。",
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )

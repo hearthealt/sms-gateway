@@ -3,7 +3,10 @@ package com.smsgateway.service.notify;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smsgateway.config.NotifyProperties;
+import com.smsgateway.model.enums.EventType;
 import com.smsgateway.model.enums.SysConfigKey;
+import com.smsgateway.service.AdminEventBroadcaster;
+import com.smsgateway.service.EventLogService;
 import com.smsgateway.service.SysConfigService;
 import com.smsgateway.model.entity.NotifyChannel;
 import com.smsgateway.model.entity.NotifyDelivery;
@@ -21,6 +24,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +68,8 @@ public class NotifyDispatcher {
     private final NotifyErrorClassifier errorClassifier;
     private final ObjectMapper objectMapper;
     private final Executor executor;
+    private final AdminEventBroadcaster adminEvents;
+    private final EventLogService eventLogService;
 
     /**
      * 正在发送中的渠道。挡的是「同一渠道同时跑两批」—— 见类注释。
@@ -91,7 +97,9 @@ public class NotifyDispatcher {
                             NotifyRateLimiter rateLimiter,
                             NotifyErrorClassifier errorClassifier,
                             ObjectMapper objectMapper,
-                            @Qualifier("notifyExecutor") Executor executor) {
+                            @Qualifier("notifyExecutor") Executor executor,
+                            AdminEventBroadcaster adminEvents,
+                            EventLogService eventLogService) {
         this.properties = properties;
         this.sysConfigService = sysConfigService;
         this.deliveryRepository = deliveryRepository;
@@ -105,6 +113,8 @@ public class NotifyDispatcher {
         this.errorClassifier = errorClassifier;
         this.objectMapper = objectMapper;
         this.executor = executor;
+        this.adminEvents = adminEvents;
+        this.eventLogService = eventLogService;
     }
 
     /**
@@ -350,6 +360,7 @@ public class NotifyDispatcher {
             // 留着会让这条记录看起来「成功了但仍然报错」。
             delivery.setLastError(null);
             deliveryRepository.save(delivery);
+            notifyDeliveriesChanged(delivery.getId());
 
             channel.setLastSuccessAt(LocalDateTime.now());
             channel.setLastError(null);
@@ -426,6 +437,7 @@ public class NotifyDispatcher {
         delivery.setStatus(NotifyDeliveryStatus.DEAD);
         delivery.setLastError(NotifyRedactor.forStorage(reason, ERROR_COLUMN_LENGTH));
         deliveryRepository.save(delivery);
+        notifyDeliveriesChanged(delivery.getId());
 
         registerFailure(channel, reason);
         log.warn("投递放弃：channelId={}, deliveryId={}, 原因：{}",
@@ -456,6 +468,33 @@ public class NotifyDispatcher {
         // 用日志而不是往别的渠道发告警：一个挂掉的渠道不该尝试通过可能同样挂掉的
         // 转发通道去报警 —— 一个挂掉的渠道不该尝试通过可能同样挂掉的通道去报警。
         log.error("【转发渠道已自动停用】{}（id={}）：{}", channel.getName(), channel.getId(), reason);
+
+        // 除了日志，还要**推到管理后台**：这是一次没有任何人操作的、服务端自己的状态变更，
+        // 正在看渠道页的人不刷新就看不到它已经关了 —— 而这恰恰是最该立刻知道的一件事。
+        // reason 已经过 NotifyRedactor.forStorage，落库与入日志用的是同一份脱敏文本。
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_CHANNELS,
+                Collections.singletonMap("id", channel.getId()));
+        try {
+            // 渠道名写进 reason 而不是单开一列：事件表是**围绕设备上报**建的，
+            // 没有渠道维度，为这一条事件加一列不划算。列表上靠类型 + 原因就能读出来。
+            eventLogService.record(EventType.CHANNEL_AUTO_DISABLED,
+                    "渠道「" + channel.getName() + "」连续失败达阈值自动停用：" + reason);
+        } catch (Exception e) {
+            // 记事件失败不能把调度线程带走（这是个 @Scheduled 路径上的方法）
+            log.warn("Failed to record channel auto-disable event for channel={}", channel.getId(), e);
+        }
+    }
+
+    /**
+     * 投递记录页的「该刷新了」信号。
+     *
+     * <p>逐条推而不是按批推：前端的 {@code useAdminEvents} 有 300ms 合并窗口，
+     * 一批里连着的几条会在那里合成一次刷新；而在服务端按批合并反而更麻烦 ——
+     * 得先界定「一批」从哪到哪，而调度是并行的。
+     */
+    private void notifyDeliveriesChanged(Long deliveryId) {
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_DELIVERIES,
+                Collections.singletonMap("id", deliveryId));
     }
 
     private Map<String, Object> decryptConfig(NotifyChannel channel) {

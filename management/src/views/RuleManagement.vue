@@ -127,6 +127,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { ElMessage } from 'element-plus'
 import StatusBadge from '../components/StatusBadge.vue'
 import { getRuleList, createRule, updateRule, deleteRule, toggleRule } from '../api/rule'
@@ -255,6 +256,19 @@ async function handleToggle(rule: CollectRule, val: boolean) {
 }
 
 onMounted(loadRules)
+
+/*
+ * 另一个管理员改了采集规则时自动重拉。规则决定「哪些短信进系统」，
+ * 别人改了而这边不知道，现场看到的现象是「短信被吞了」。
+ *
+ * **弹窗开着时跳过**：用户正在填的那份表单不能被静默覆盖 —— 下拉和输入框里的值
+ * 会被刷新后的数据顶掉，而他可能已经填了一半。
+ */
+useAdminEvents((event) => {
+  if (event !== 'rules' && event !== 'hello') return
+  if (dialogVisible.value) return
+  loadRules()
+})
 </script>
 
 <style scoped>

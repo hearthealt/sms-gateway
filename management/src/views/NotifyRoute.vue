@@ -164,6 +164,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { ElMessage } from 'element-plus'
 import {
   createRoute,
@@ -203,6 +204,19 @@ async function loadData() {
 }
 
 onMounted(loadData)
+
+/*
+ * 转发规则有**一个服务端自变源**：渠道被删时，因此变成「无目标」的规则会被自动停用
+ * （见 NotifyChannelService.delete）。那不是任何人的操作，不推的话这边看不到开关自己关了。
+ * 其余变化只来自管理员自己，而本地操作已经是即时更新的 —— 这一页的订阅主要覆盖前者。
+ *
+ * **弹窗开着时跳过**：编辑中的表单不能被静默覆盖。
+ */
+useAdminEvents((event) => {
+  if (event !== 'routes' && event !== 'hello') return
+  if (dialogVisible.value) return
+  loadData()
+})
 
 function showAddDialog() {
   editing.value = null

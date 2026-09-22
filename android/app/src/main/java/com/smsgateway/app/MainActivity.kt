@@ -25,6 +25,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.smsgateway.app.qr.QrExportScreen
 import com.smsgateway.app.qr.QuickConnectScreen
 import com.smsgateway.app.ui.lock.LockScreen
+import com.smsgateway.app.ui.screens.eventlog.EventLogScreen
 import com.smsgateway.app.ui.screens.home.DeviceChecks
 import com.smsgateway.app.ui.screens.home.HomeScreen
 import com.smsgateway.app.ui.screens.queue.QueueScreen
@@ -175,7 +176,9 @@ class MainActivity : ComponentActivity() {
 
 // ==================== 路由 ====================
 
-private enum class Screen { HOME, SETTINGS, QUEUE, SERVER_SMS, SELF_TEST, QR_EXPORT, QUICK_CONNECT }
+private enum class Screen {
+    HOME, SETTINGS, QUEUE, SERVER_SMS, SELF_TEST, QR_EXPORT, QUICK_CONNECT, EVENT_LOG
+}
 
 @Composable
 private fun GatewayApp(viewModel: DashboardViewModel) {
@@ -185,10 +188,43 @@ private fun GatewayApp(viewModel: DashboardViewModel) {
 
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
 
-    // 所有子页面点返回都回主页，主页点返回退出应用。
-    BackHandler(enabled = screen != Screen.HOME) {
-        screen = Screen.HOME
+    /*
+     * 返回栈：只记「从哪来的」。
+     *
+     * **为什么不能按页面类型推「上一层」**：扫码连接页有**两个入口** ——
+     * 主页顶部的「扫一扫」和设置页的「扫码连接服务器」。按类型推只能二选一，
+     * 从另一个入口进去就会返回错页（这正是上一版的做法，从设置页进去按返回会回主页）。
+     * 「回哪去」只取决于怎么来的，所以只能记下来。
+     *
+     * 用逗号拼的枚举名存，而不是存 List<Screen>：rememberSaveable 走 Bundle，
+     * String 一定存得下；存 List 要赌它认不认那个具体实现，赌错的表现是
+     * 进程被回收后恢复时崩在状态还原上。
+     *
+     * 最深的路径是 主页 → 设置 → 扫码连接，栈最多两级。
+     */
+    var backStackRaw by rememberSaveable { mutableStateOf("") }
+
+    fun backStack(): List<Screen> = backStackRaw
+        .split(',')
+        .mapNotNull { name -> Screen.entries.firstOrNull { it.name == name } }
+
+    /** 跳转。**所有导航都必须走它**，否则返回栈就是断的。 */
+    fun go(target: Screen) {
+        backStackRaw = (backStack() + screen).joinToString(",") { it.name }
+        screen = target
     }
+
+    /**
+     * 返回上一层。系统返回键与页面上方那个返回键**都调它**，两边不可能再分叉。
+     * 栈空了（在主页）才退出应用 —— 主页那一支由 BackHandler 的 enabled 挡着。
+     */
+    fun goBack() {
+        val stack = backStack()
+        screen = stack.lastOrNull() ?: Screen.HOME
+        backStackRaw = stack.dropLast(1).joinToString(",") { it.name }
+    }
+
+    BackHandler(enabled = screen != Screen.HOME) { goBack() }
 
     // 主页那条「扫完码自动回来」的通知弹窗，在这里统一处理。
     // 它来自 QuickConnectScreen 保存配置 / 注册设备时的成功/失败消息。
@@ -206,13 +242,13 @@ private fun GatewayApp(viewModel: DashboardViewModel) {
                 state = state,
                 snackbarHostState = snackbarHostState,
                 checks = checks,
-                onOpenSettings = { screen = Screen.SETTINGS },
+                onOpenSettings = { go(Screen.SETTINGS) },
                 // 队列页和服务端记录页各自在进入时加载自己的数据（含下拉刷新），
                 // 这里只管跳转 —— 原先由导航代劳，加一个入口就要多记得调一次。
-                onOpenQueue = { screen = Screen.QUEUE },
-                onOpenServerSms = { screen = Screen.SERVER_SMS },
-                onOpenSelfTest = { viewModel.runSelfTest(); screen = Screen.SELF_TEST },
-                onOpenQuickConnect = { screen = Screen.QUICK_CONNECT },
+                onOpenQueue = { go(Screen.QUEUE) },
+                onOpenServerSms = { go(Screen.SERVER_SMS) },
+                onOpenSelfTest = { viewModel.runSelfTest(); go(Screen.SELF_TEST) },
+                onOpenQuickConnect = { go(Screen.QUICK_CONNECT) },
                 onToggleService = { viewModel.toggleService() },
                 onCheckStatus = { viewModel.checkStatusNow() }
             )
@@ -222,39 +258,48 @@ private fun GatewayApp(viewModel: DashboardViewModel) {
             state = state,
             viewModel = viewModel,
             snackbarHostState = snackbarHostState,
-            onBack = { screen = Screen.HOME },
-            onOpenQuickConnect = { screen = Screen.QUICK_CONNECT },
-            onOpenQrExport = { screen = Screen.QR_EXPORT }
+            onBack = { goBack() },
+            onOpenQuickConnect = { go(Screen.QUICK_CONNECT) },
+            onOpenQrExport = { go(Screen.QR_EXPORT) },
+            onOpenEventLog = { go(Screen.EVENT_LOG) }
         )
 
         Screen.QUEUE -> QueueScreen(
             state = state,
             viewModel = viewModel,
-            onBack = { screen = Screen.HOME }
+            onBack = { goBack() }
         )
 
         Screen.SERVER_SMS -> ServerSmsScreen(
             state = state,
             viewModel = viewModel,
-            onBack = { screen = Screen.HOME }
+            onBack = { goBack() }
         )
 
         Screen.SELF_TEST -> SelfTestScreen(
             state = state,
             viewModel = viewModel,
-            onBack = { screen = Screen.HOME }
+            onBack = { goBack() }
         )
 
         Screen.QR_EXPORT -> QrExportScreen(
             state = state,
-            onBack = { screen = Screen.SETTINGS }
+            onBack = { goBack() }
         )
 
-        // 返回主页而不是设置页：入口在主页顶部，从哪进来的就回哪去。
+        // 「回哪去」由返回栈决定，这里一律 goBack()，不再逐页写去向 ——
+        // 逐页写的年代，这里和系统返回键分叉过，而且扫码连接页因为有两个入口，
+        // 按页面类型推根本推不对。
+        Screen.EVENT_LOG -> EventLogScreen(
+            state = state,
+            viewModel = viewModel,
+            onBack = { goBack() }
+        )
+
         Screen.QUICK_CONNECT -> QuickConnectScreen(
             state = state,
             viewModel = viewModel,
-            onBack = { screen = Screen.HOME }
+            onBack = { goBack() }
         )
     }
 }

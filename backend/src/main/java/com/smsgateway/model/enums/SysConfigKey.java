@@ -80,6 +80,23 @@ public enum SysConfigKey {
             "清理执行时间",
             "每天在这个时刻清理。仅在保留天数大于 0 时生效。"),
 
+    EVENT_RETENTION_DAYS(
+            "event.retention-days",
+            "7",
+            Type.INT,
+            Group.DATA,
+            "运行日志保留天数",
+            "0 表示不清理。运行日志只记「发生了什么事」，不含短信正文与验证码，体积可控，"
+                    + "所以默认给了一个值 —— 与短信保留天数默认 0 是刻意不同的。"),
+
+    EVENT_CLEANUP_TIME(
+            "event.cleanup-time",
+            "03:40",
+            Type.TIME,
+            Group.DATA,
+            "运行日志清理时间",
+            "每天在这个时刻清理。比短信清理晚 10 分钟，两批不在同一分钟抢锁。"),
+
     // ---------------------------------------------------------------- 安全与会话
 
     ADMIN_TOKEN_TTL_SECONDS(

@@ -21,10 +21,20 @@ export function useAdminEvents(onEvent: (event: string) => void) {
   let pending: ReturnType<typeof setTimeout> | null = null
 
   /**
-   * 合并短时间内的多次事件。
+   * 合并短时间内的多次事件：**一个窗口只回调一次**。
    *
    * 一批短信（例如双卡同时收到）会在几百毫秒内推来好几条，
    * 不做合并就是连着拉好几次列表 —— 前端这边抖，后端那边白跑。
+   *
+   * <b>由此产生一条必须遵守的契约：`onEvent` 拿到的那个名字，不代表这个窗口里
+   * 只发生了这一件事。</b>比如 300ms 内先来 `sms` 再来 `deliveries`，回调只会看到
+   * `deliveries`。所以**handler 不能按事件名做窄分支**（「是 A 才刷 A、是 B 才刷 B」），
+   * 那样被盖掉的那个名字对应的数据就永远不刷新了；必须「收到任何事件都把本页关心的
+   * 东西整体重拉一遍」。现有各页都是这个写法，加新页时照做。
+   *
+   * 之所以不改成「把窗口里所有名字逐个回调」：那会让同时订阅多个事件的页面
+   * （投递记录 `deliveries`+`sms`、设备详情 `devices`+`sms`）在一次抖动里连发两三次
+   * 同样的请求，而收益只是让一个本来就不该存在的窄分支能工作。
    */
   function schedule(event: string) {
     if (pending) clearTimeout(pending)

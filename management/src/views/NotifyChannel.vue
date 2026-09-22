@@ -215,6 +215,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createChannel,
@@ -490,6 +491,18 @@ onMounted(async () => {
   ready.value = status.ready
   channelTypes.value = types
   await loadData()
+})
+
+/*
+ * 这一页**真的有服务端自变源**：渠道连续失败到阈值会被自动停用，而那不是任何人的操作。
+ * 不推的话管理员看不到 —— 而这恰恰是最该立刻知道的一件事（渠道挂了，验证码就转发不出去了）。
+ *
+ * **弹窗开着时跳过**：编辑渠道的表单里有加密配置，被静默覆盖等于把刚填的东西丢了。
+ */
+useAdminEvents((event) => {
+  if (event !== 'channels' && event !== 'hello') return
+  if (dialogVisible.value) return
+  loadData()
 })
 
 function showAddDialog() {

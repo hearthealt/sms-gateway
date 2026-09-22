@@ -15,6 +15,7 @@ import com.smsgateway.app.MainActivity
 import com.smsgateway.app.R
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
 import com.smsgateway.app.worker.SmsUploadWorker
@@ -33,6 +34,12 @@ class GatewayForegroundService : Service() {
 
         /** 被禁用时降频：这个状态下没有时间敏感的事，但必须保持轮询才能发现「已恢复」。 */
         private const val DISABLED_HEARTBEAT_INTERVAL_MS = 60_000L
+
+        /**
+         * 事件日志剪枝的间隔。心跳循环本身 30 秒一轮，但删 7 天前的记录一小时做一次绰绰有余 ——
+         * 多删几次只是白耗电，而少删几次也不会让表涨到哪去。
+         */
+        private const val EVENT_LOG_PRUNE_INTERVAL_MS = 60 * 60 * 1000L
 
         /**
          * 当前活着的服务实例，用来把运行态绑定到**实例**而不是某个回调。
@@ -62,6 +69,11 @@ class GatewayForegroundService : Service() {
             // set(false) 只是幂等重复。
             GatewayState.set(context, false)
 
+            EventLog.write(
+                context, EventLog.GATEWAY_STOPPED, EventLog.LEVEL_INFO,
+                reason = "用户主动停止"
+            )
+
             val intent = Intent(context, GatewayForegroundService::class.java)
             context.stopService(intent)
         }
@@ -81,6 +93,13 @@ class GatewayForegroundService : Service() {
         // 它只在实例创建时执行一次，正好等于一条命的起点；onStartCommand 会重复来，
         // 放那儿就会被每次启动请求刷新（理由见 GatewayState.markStarted）。
         GatewayState.markStarted(this)
+
+        // 放在 onCreate 而不是 onStartCommand：这里才是「这条命从什么时候开始」的唯一写入点，
+        // 与 markStarted 同一个理由（onStartCommand 每次启动请求都会重复来）。
+        EventLog.write(
+            this, EventLog.GATEWAY_STARTED, EventLog.LEVEL_INFO,
+            reason = "前台服务启动"
+        )
 
         // 被「停止网关」拦在本地的那批短信，现在该重新排队了 —— 界面承诺的是
         // 「短信会留在本地，不会上报」，恢复上报的时机就是网关重新跑起来。
@@ -135,6 +154,28 @@ class GatewayForegroundService : Service() {
 
     private var heartbeatJob: Job? = null
 
+    /** 上次剪枝事件日志的时刻（进程内即可 —— 重启后多剪一次没有任何副作用）。 */
+    private var lastEventLogPruneAt = 0L
+
+    /**
+     * 事件日志的过期清理。
+     *
+     * 挂在这里是因为「网关在跑」是这个应用唯一无条件成立的周期路径 ——
+     * 上传 worker 只在有短信或网关启动时被排一次，而这台设备可能一整天没有短信。
+     * 心跳循环则只要服务活着就一定在转。
+     *
+     * 时段节流在进程内做：事件剪枝一小时一次足够，不必每 30 秒去删一次库。
+     */
+    private suspend fun pruneEventLogIfDue() {
+        val now = System.currentTimeMillis()
+        if (now - lastEventLogPruneAt < EVENT_LOG_PRUNE_INTERVAL_MS) return
+        lastEventLogPruneAt = now
+        val removed = EventLog.prune(this)
+        if (removed > 0) {
+            Log.i(TAG, "Pruned $removed event log rows older than ${EventLog.RETENTION_DAYS} days")
+        }
+    }
+
     private fun buildNotification(status: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -166,6 +207,8 @@ class GatewayForegroundService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Heartbeat round failed", e)
             }
+
+            pruneEventLogIfDue()
 
             delay(
                 if (DeviceStatus.isDisabled(this@GatewayForegroundService)) {
@@ -208,6 +251,12 @@ class GatewayForegroundService : Service() {
         if (liveInstance === this) {
             liveInstance = null
             GatewayState.set(this, false)
+            // 只记「当前实例被销毁」这一次。系统重建服务时旧实例的 onDestroy 可能迟到，
+            // 那种情况下 liveInstance 已经指向新实例，不该记成一次销毁。
+            EventLog.write(
+                this, EventLog.GATEWAY_DESTROYED, EventLog.LEVEL_WARN,
+                reason = "服务被系统销毁"
+            )
         }
 
         serviceScope.cancel()

@@ -41,6 +41,73 @@ private val BAR_GAP = 2.dp
 private val LABEL_HEIGHT = 16.dp
 
 /**
+ * 柱状图的占位骨架。
+ *
+ * **它存在的理由**：趋势数据没回来之前，主页那块原先**整块不渲染** —— 于是进来时
+ * 那儿是空的，几百毫秒后两张图凭空冒出来，整个页面往下弹一截。用户看到的不是
+ * 「正在加载」，而是「页面刚才是坏的，现在好了」。
+ *
+ * 复刻 [MiniBarChart] 的**几何尺寸**（标题行 / 绘图区 / 零基线 / 轴标签行），
+ * 所以数据回来时高度不跳。柱子一律是等高的浅灰块 + 「读取中」字样：
+ * **刻意不等高错落** —— 那看起来就是一组真实数据，会被人当真读。
+ *
+ * @param barCount 柱子根数，要与真图一致（近 7 天 7 根、今日 24 根），否则宽度对不上，
+ *                 数据回来时柱宽会变。
+ */
+@Composable
+fun MiniBarChartPlaceholder(
+    title: String,
+    barCount: Int,
+    modifier: Modifier = Modifier,
+    /** 占位时那句说明。加载中与读不到要说不同的话，见调用方。 */
+    hint: String,
+    plotHeight: Dp = 52.dp
+) {
+    Column(modifier = modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = title, style = AppTypography.hint, color = AppColor.InkMuted)
+            Spacer(modifier = Modifier.weight(1f))
+            Text(text = hint, style = AppTypography.caption, color = AppColor.InkMuted)
+        }
+
+        Spacer(modifier = Modifier.height(AppSpacing.sm))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(plotHeight),
+            horizontalArrangement = Arrangement.spacedBy(BAR_GAP),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            repeat(barCount) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(plotHeight * 0.45f)
+                            .background(
+                                color = AppColor.Divider,
+                                shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)
+                            )
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(thickness = 1.dp, color = AppColor.Divider)
+
+        // 轴标签那一行也占住：真图的高度包含它，不占的话数据回来仍会往下弹。
+        Spacer(modifier = Modifier.height(AppSpacing.xxs))
+        Spacer(modifier = Modifier.height(LABEL_HEIGHT))
+    }
+}
+
+/**
  * 极简柱状图（单序列）。
  *
  * 只做一件事：让「今天比昨天少了一半」这种形状一眼看得出来。

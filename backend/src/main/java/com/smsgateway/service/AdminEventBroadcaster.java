@@ -34,8 +34,36 @@ public class AdminEventBroadcaster {
     /** 短信有新增或重复计数变化。处置方：短信列表页。 */
     public static final String EVENT_SMS = "sms";
 
-    /** 设备在线集合变了（有人上线或掉线）。处置方：设备列表页、仪表盘。 */
+    /** 设备在线集合变了（有人上线或掉线）。处置方：设备列表页、仪表盘、设备详情页。 */
     public static final String EVENT_DEVICES = "devices";
+
+    /** 采集规则被增删改。处置方：采集规则页。 */
+    public static final String EVENT_RULES = "rules";
+
+    /** API 密钥被增删改或启用状态变化。处置方：API 密钥页。 */
+    public static final String EVENT_API_KEYS = "apikeys";
+
+    /** 转发渠道被增删改、启用状态变化，或被自动停用。处置方：通知渠道页。 */
+    public static final String EVENT_CHANNELS = "channels";
+
+    /** 转发路由被增删改。处置方：转发规则页。 */
+    public static final String EVENT_ROUTES = "routes";
+
+    /** 投递状态推进（一批发送结束、卡住的行被回收、手动重试）。处置方：投递记录页。 */
+    public static final String EVENT_DELIVERIES = "deliveries";
+
+    /** 运行期配置被改。处置方：系统设置页。 */
+    public static final String EVENT_SYS_CONFIG = "sysconfig";
+
+    /**
+     * 有新的运行事件落库。处置方：运行日志页。
+     *
+     * <p><b>这一条不做后端节流</b>：事件本身就是「只留重要的」，量很小，
+     * 而前端的 {@code useAdminEvents} 已经有 300ms 的合并窗口 ——
+     * 在那里合并比在这里丢事件好，因为合并是按连接做的，
+     * 而这里丢掉的那条对**所有**订阅者都丢了。
+     */
+    public static final String EVENT_EVENTS = "events";
 
     /**
      * 当前挂着的事件流。

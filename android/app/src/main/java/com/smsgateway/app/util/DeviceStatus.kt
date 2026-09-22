@@ -33,10 +33,26 @@ object DeviceStatus {
 
     /** 写入状态，同时回写 prefs。 */
     fun set(context: Context, disabled: Boolean) {
-        DevicePrefs.setDisabled(context.applicationContext, disabled)
+        val app = context.applicationContext
+
+        // 先水合再比较。不水合的话 _disabled 还是字段初始值 false，任何一次
+        // set(false) 都会被当成「从禁用恢复」，日志里凭空多出一条。
+        ensureLoaded(app)
+
+        val changed = _disabled.value != disabled
+        DevicePrefs.setDisabled(app, disabled)
         hydrated = true
-        if (_disabled.value != disabled) {
+        if (changed) {
             _disabled.value = disabled
+
+            // 只在**跃迁**时记。心跳每次收到服务端状态都会调它，稳态下每次都记会把表写爆，
+            // 而「一直是启用」这件事没有任何信息量。
+            EventLog.write(
+                app,
+                if (disabled) EventLog.DEVICE_DISABLED else EventLog.DEVICE_ENABLED,
+                if (disabled) EventLog.LEVEL_WARN else EventLog.LEVEL_INFO,
+                reason = if (disabled) "被管理员禁用" else "已恢复"
+            )
         }
     }
 

@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +36,18 @@ public class ApiKeyService {
     private final ApiKeyRepository apiKeyRepository;
     private final StringRedisTemplate redisTemplate;
     private final SysConfigService sysConfigService;
+    private final AdminEventBroadcaster adminEvents;
+
+    /**
+     * 密钥页的「该刷新了」信号。
+     *
+     * <p>**只在增删改后发，绝不在 {@link #validate} 里发** —— 校验每次外部调用都会走，
+     * 顺手把 {@code last_used_at} 顶一下，在那儿发等于每来一个请求就推一条，
+     * 与轮询没有区别，而且会把真正该看的事件刷没。
+     */
+    private void notifyChanged() {
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_API_KEYS, Map.of());
+    }
 
     /** 缓存键前缀。参照 AdminAuthService.ADMIN_TOKEN_PREFIX，常量放在服务类上。 */
     public static final String API_KEY_CACHE_PREFIX = "sms:apikey:";
@@ -69,6 +82,7 @@ public class ApiKeyService {
         apiKeyRepository.save(entity);
         // 只记 id 和用途，密钥明文不进日志
         log.info("API key issued: id={}, name={}", entity.getId(), entity.getName());
+        notifyChanged();
         return toView(entity);
     }
 
@@ -79,6 +93,7 @@ public class ApiKeyService {
         apiKeyRepository.save(entity);
         evictCache(entity.getApiKey());
         log.info("API key {} {}", id, enabled ? "enabled" : "disabled");
+        notifyChanged();
         return toView(entity);
     }
 
@@ -88,6 +103,7 @@ public class ApiKeyService {
         apiKeyRepository.delete(entity);
         evictCache(entity.getApiKey());
         log.info("API key deleted: id={}", id);
+        notifyChanged();
     }
 
     /**

@@ -4,6 +4,7 @@ import com.smsgateway.model.dto.SmsReceiveRequest;
 import com.smsgateway.model.dto.SmsReceiveResponse;
 import com.smsgateway.model.entity.SmsDevice;
 import com.smsgateway.model.entity.SmsMessage;
+import com.smsgateway.model.enums.EventType;
 import com.smsgateway.model.enums.SmsStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
@@ -22,7 +23,6 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Collections;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +35,12 @@ public class SmsService {
     private final DeviceRepository deviceRepository;
     private final StringRedisTemplate redisTemplate;
     private final CollectRuleEngine collectRuleEngine;
+
+    /**
+     * 运行事件。**只在业务事务之外调用** —— 它标着 REQUIRES_NEW，
+     * 在事务里调会让事件先于业务提交落库。理由见 {@link EventLogService} 的类注释。
+     */
+    private final EventLogService eventLogService;
 
     /**
      * 编程式事务。理由与 {@link DeviceService} 相同：需要「撞唯一约束后另起一次查询」的兜底，
@@ -57,14 +63,37 @@ public class SmsService {
     private static final long CODE_TTL_SECONDS = 300; // 5 min
 
     /**
+     * 一次上报在服务端这一侧的结果。
+     *
+     * <p>存在的唯一理由是**把「这条短信最后怎么了」带出事务**：原先 {@code doReceiveSms}
+     * 只返回给设备看的响应，而事件需要额外知道「命中了哪条采集规则」—— 那是排查
+     * 「为什么这条没进系统」时最关键的一句话，却只活在事务内的一个局部变量里。
+     *
+     * @param response  回给设备端的响应，内容与改动前完全一致
+     * @param eventType 这次上报该记成哪种运行事件（存下 / 重复 / 被规则忽略）
+     * @param reason    事件的原因文案；命中的规则名在这里面（那正是原先带不出事务的东西）
+     * @param sms       落库（或命中的既有）那条短信，供事件带上发送方与号码；可能为 null
+     */
+    private record ReceiveOutcome(SmsReceiveResponse response,
+                                  EventType eventType,
+                                  String reason,
+                                  SmsMessage sms) {
+    }
+
+    /**
      * 上报一条短信。
      *
      * <p>用编程式事务而不是 {@code @Transactional}，是为了能接住并发下的唯一约束冲突 ——
      * 见 catch 块里的说明。写法与 {@link DeviceService#register} 一致。
      */
     public SmsReceiveResponse receiveSms(String authenticatedDeviceId, SmsReceiveRequest request) {
+        // 先查设备：事件要带上「是哪台机器」。查不到时为 null（下面 doReceiveSms 会抛），
+        // 那种情况下事件仍然要记 —— 一条认不出设备的异常上报恰恰是最该看的。
+        SmsDevice device = deviceRepository.findByDeviceId(authenticatedDeviceId).orElse(null);
+
+        ReceiveOutcome outcome;
         try {
-            return transactionTemplate.execute(status -> doReceiveSms(authenticatedDeviceId, request));
+            outcome = transactionTemplate.execute(status -> doReceiveSms(authenticatedDeviceId, request));
         } catch (DataIntegrityViolationException e) {
             // 同一台设备**同时**上报内容相同的短信时，双方都会在判重那一步扑空、
             // 都走到插入，后落地的那个撞 uk_device_source_hash。
@@ -79,18 +108,48 @@ public class SmsService {
             // 否则并发时会把**别的设备**收到同一段内容的那条当成自己的重复返回。
             log.info("Concurrent duplicate detected, returning existing row as duplicate");
             Long devicePk = deviceRepository.findByDeviceId(authenticatedDeviceId)
-                    .map(device -> device.getId())
+                    .map(d -> d.getId())
                     .orElse(null);
-            return smsMessageRepository.findByDeviceIdAndSourceHash(
+            outcome = smsMessageRepository.findByDeviceIdAndSourceHash(
                             devicePk, HashUtil.sha256(request.getContent()))
-                    .map(existing -> new SmsReceiveResponse(
-                            existing.getId(), true, SmsStatus.DUPLICATE.name(), null))
+                    .map(existing -> new ReceiveOutcome(
+                            new SmsReceiveResponse(existing.getId(), true, SmsStatus.DUPLICATE.name(), null),
+                            EventType.SMS_DUPLICATE,
+                            "并发撞唯一约束，判定为同内容重复",
+                            existing))
                     .orElseThrow(() -> e);
+        }
+
+        recordReceiveEvent(device, outcome);
+        return outcome.response();
+    }
+
+    /**
+     * 把这次上报的结果记成一条运行事件。
+     *
+     * <p><b>位置很关键</b>：在 {@code transactionTemplate.execute} **返回之后**调用。
+     * 事件标着 REQUIRES_NEW，在事务里调会让「存下」先于业务提交落库 ——
+     * 万一业务随后回滚，那条事件就成了假记录，会把排查引到完全错误的方向。
+     * 反过来，业务真的回滚了也不影响已经提交的事件（这正是我们要的：
+     * 「被拒」「冲突」描述的本来就是没成功的那一次）。
+     *
+     * <p>写事件失败不能把上报本身打回去：设备那边已经把短信交出去了，
+     * 这里抛异常只会让它白重试一遍。所以整段吞掉异常只记日志 —— 与设备端
+     * {@code SmsReceiver} 里「入库失败只记日志」是同一个取舍。
+     */
+    private void recordReceiveEvent(SmsDevice device, ReceiveOutcome outcome) {
+        try {
+            eventLogService.recordForSms(outcome.eventType(), device, outcome.sms(), outcome.reason());
+        } catch (Exception e) {
+            log.warn("Failed to record receive event {} for device={}",
+                    outcome.eventType(), device == null ? null : device.getDeviceId(), e);
         }
     }
 
-    private SmsReceiveResponse doReceiveSms(String authenticatedDeviceId, SmsReceiveRequest request) {
+    private ReceiveOutcome doReceiveSms(String authenticatedDeviceId, SmsReceiveRequest request) {
         // 身份由调用方从拦截器的认证结果传入，**刻意不从请求体读**。
+        // 返回 ReceiveOutcome 而不是直接返回响应：要把「命中了哪条采集规则」带出事务，
+        // 事件那一侧要用（见 ReceiveOutcome 的说明）。
         // 做成显式参数而不是让 service 自己去 request 里取，是为了让「拿错身份」这件事
         // 在编译期就不可能发生 —— 将来多一个调用方也没法传错。
         SmsDevice device = deviceRepository.findByDeviceId(authenticatedDeviceId)
@@ -108,7 +167,11 @@ public class SmsService {
         if (existingByIdempotency.isPresent()) {
             SmsMessage msg = existingByIdempotency.get();
             log.info("Idempotency hit for deviceId={}, localMessageId={}", authenticatedDeviceId, request.getLocalMessageId());
-            return new SmsReceiveResponse(msg.getId(), true, msg.getStatus().name(), null);
+            return new ReceiveOutcome(
+                    new SmsReceiveResponse(msg.getId(), true, msg.getStatus().name(), null),
+                    EventType.SMS_DUPLICATE,
+                    "同一 localMessageId 已上报过（设备端重试）",
+                    msg);
         }
 
         // 2. Compute source hash for dedup: SHA-256(content)
@@ -143,7 +206,11 @@ public class SmsService {
             // 不值得为它把整条上报路径搭进去。
             adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS,
                     Collections.singletonMap("id", existing.getId()));
-            return new SmsReceiveResponse(existing.getId(), true, SmsStatus.DUPLICATE.name(), null);
+            return new ReceiveOutcome(
+                    new SmsReceiveResponse(existing.getId(), true, SmsStatus.DUPLICATE.name(), null),
+                    EventType.SMS_DUPLICATE,
+                    "同一内容重复上报（按设备做内容去重）",
+                    existing);
         }
 
         // 4. Apply collect rules (priority desc, first match wins; no match => collect)
@@ -170,7 +237,13 @@ public class SmsService {
             // 只留档：不写验证码缓存、不推送、也不转发，避免污染正在等待验证码的调用方
             log.info("SMS ignored by rule '{}': deviceId={}, phone={}, sender={}",
                     decision.matchedRule(), authenticatedDeviceId, request.getPhone(), request.getSender());
-            return new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null);
+            return new ReceiveOutcome(
+                    new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null),
+                    EventType.SMS_IGNORED_BY_RULE,
+                    // 规则名是排查「为什么这条没进系统」最关键的一句话，
+                    // 原先只活在这个局部变量里，管理端看不到。
+                    decision.matchedRule() == null ? "命中忽略规则" : "命中规则：" + decision.matchedRule(),
+                    message);
         }
 
         // 转发任务入队。**位置很重要**：在保存 sms_message 之后（要 message.getId()）、
@@ -245,7 +318,11 @@ public class SmsService {
                 authenticatedDeviceId, request.getPhone(), request.getSender(),
                 code != null && !code.isEmpty());
 
-        return new SmsReceiveResponse(message.getId(), false, SmsStatus.RECEIVED.name(), code);
+        return new ReceiveOutcome(
+                new SmsReceiveResponse(message.getId(), false, SmsStatus.RECEIVED.name(), code),
+                EventType.SMS_STORED,
+                null,
+                message);
     }
 
     /**

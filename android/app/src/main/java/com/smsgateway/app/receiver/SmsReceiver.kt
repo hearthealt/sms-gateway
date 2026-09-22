@@ -11,6 +11,7 @@ import com.smsgateway.app.parser.SmsFilter
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.CoroutineScope
@@ -47,12 +48,39 @@ class SmsReceiver : BroadcastReceiver() {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                // 收信卡号只解析一次，下面每一处都用它 —— **包括被过滤掉的那两条路径**。
+                //
+                // 多卡设备上这是「为什么这条没转发」的关键一维：调用方等的验证码是按号码
+                // 缓存和匹配的，不知道是哪个号收到的，就分不清「这张卡没收到」和
+                // 「收到了但标错了号码」。而那两条路径**没有队列行**，这里是唯一的归属信息。
+                val phone = resolveSmsPhone(context, subscriptionId)
+
                 // 1. Filter: only collect matching SMS
-                if (!SmsFilter.shouldCollect(sender, fullBody)) return@launch
+                if (!SmsFilter.shouldCollect(sender, fullBody)) {
+                    // 按设计丢弃，但要留痕：现场「我明明发了验证码却没转发」时，
+                    // 这一条是唯一能区分「广播根本没到」和「到了但被过滤掉」的证据 ——
+                    // 两者在别处长得一模一样（队列没有、服务端没有）。
+                    //
+                    // **刻意不带 sender**：这一支过滤掉的正是「我们决定不要」的短信，
+                    // 把它们的发送方号码再留 7 天，与「不入库」这个决定自相矛盾；
+                    // 而它们又是量最大的一类，扛着号码会把日志页刷成收件箱镜像。
+                    // 留下收信号码与时刻，足以回答「那一刻到底有没有短信进来」。
+                    EventLog.writeNow(
+                        context, EventLog.SMS_FILTERED, EventLog.LEVEL_INFO,
+                        phone = phone, reason = "未命中采集关键词"
+                    )
+                    return@launch
+                }
 
                 // 2. Parse verification code —— 解析不出来的短信没有上报价值（调用方要的就是验证码）
                 val code = SmsCodeParser.parse(fullBody)
-                if (code.isNullOrBlank()) return@launch
+                if (code.isNullOrBlank()) {
+                    EventLog.writeNow(
+                        context, EventLog.SMS_NO_CODE, EventLog.LEVEL_INFO,
+                        sender = sender, phone = phone, reason = "未解析出验证码"
+                    )
+                    return@launch
+                }
 
                 // 3. Generate unique local message ID
                 val localMessageId = "sms-${sender}-${receiveTime}-${fullBody.hashCode().toUShort()}"
@@ -63,7 +91,7 @@ class SmsReceiver : BroadcastReceiver() {
                 val entity = SmsQueueEntity(
                     localMessageId = localMessageId,
                     deviceId = DevicePrefs.deviceId(context),
-                    phone = resolveSmsPhone(context, subscriptionId),
+                    phone = phone,
                     sender = sender,
                     content = fullBody,
                     code = code,
@@ -72,9 +100,31 @@ class SmsReceiver : BroadcastReceiver() {
                     // 默认 status 即 DAO 查询用的 "pending"，nextRetryAt = 0 表示立即可上传
                 )
 
+                // insert 的返回值必须看。DAO 上是 `OnConflictStrategy.IGNORE`，
+                // 而 localMessageId 上有唯一索引 —— 撞索引时**既不抛异常、也不报错**，
+                // 静默返回 -1。原先这里把返回值直接丢掉，于是「短信没入库」这件事
+                // 在服务端和本地队列里都查不到，成了一条完全无声的丢失路径。
+                // >0 是新插入的行 id；-1 是撞了唯一索引（同一条短信重投，属正常）。
+                var rowId = -1L
                 try {
-                    AppDatabase.getInstance(context).smsQueueDao().insert(entity)
+                    rowId = AppDatabase.getInstance(context).smsQueueDao().insert(entity)
+                    if (rowId > 0) {
+                        EventLog.writeNow(
+                            context, EventLog.SMS_ENQUEUED, EventLog.LEVEL_INFO,
+                            sender = sender, phone = phone, smsId = rowId
+                        )
+                    } else {
+                        EventLog.writeNow(
+                            context, EventLog.SMS_DUPLICATE, EventLog.LEVEL_WARN,
+                            sender = sender, phone = phone,
+                            reason = "localMessageId 已存在（短信重投）"
+                        )
+                    }
                 } catch (e: Exception) {
+                    EventLog.writeNow(
+                        context, EventLog.SMS_ENQUEUE_FAILED, EventLog.LEVEL_ERROR,
+                        sender = sender, phone = phone, reason = e.javaClass.simpleName
+                    )
                     android.util.Log.e("SmsReceiver", "Failed to save SMS to database", e)
                 }
 
@@ -86,10 +136,22 @@ class SmsReceiver : BroadcastReceiver() {
                 //
                 // 恢复时（注册成功 / 心跳看到已启用 / 网关重新启动）会重新排一次，
                 // 那时这些行仍是 pending，会被一起补传。
-                if (DevicePrefs.isRegistered(context) &&
-                    !DeviceStatus.isDisabled(context) &&
-                    GatewayState.isRunning(context)
-                ) {
+                //
+                // 三种原因分开记，而不是合成一个「没上传」：现场最容易误判的就是这一支 ——
+                // 短信明明在队列里、界面也显示正常，用户却以为丢了。日志里说清是哪种。
+                val heldReason = when {
+                    !DevicePrefs.isRegistered(context) -> "未注册"
+                    DeviceStatus.isDisabled(context) -> "设备已被禁用"
+                    !GatewayState.isRunning(context) -> "网关已停止"
+                    else -> null
+                }
+                if (heldReason != null) {
+                    EventLog.writeNow(
+                        context, EventLog.SMS_HELD, EventLog.LEVEL_WARN,
+                        sender = sender, phone = phone, reason = heldReason,
+                        smsId = rowId.takeIf { it > 0 }
+                    )
+                } else {
                     SmsUploadWorker.enqueue(context)
                 }
             } finally {

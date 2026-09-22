@@ -13,7 +13,7 @@
 
     <groupId>com.smsgateway</groupId>
     <artifactId>sms-gateway-backend</artifactId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
     <name>SMS Gateway Backend</name>
     <description>SMS Gateway Backend Service</description>
 

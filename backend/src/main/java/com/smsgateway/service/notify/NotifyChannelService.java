@@ -12,6 +12,7 @@ import com.smsgateway.model.enums.NotifyChannelType;
 import com.smsgateway.repository.NotifyChannelRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.NotifyRouteRepository;
+import com.smsgateway.service.AdminEventBroadcaster;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -36,6 +37,21 @@ public class NotifyChannelService {
     private static final int PREVIEW_LENGTH = 200;
 
     private final NotifyChannelRepository channelRepository;
+    private final AdminEventBroadcaster adminEvents;
+
+    /**
+     * 渠道页的「该刷新了」信号。
+     *
+     * <p>这一页**真的有服务端自变源**：渠道连续失败到阈值会被自动停用（见
+     * {@code NotifyDispatcher}），那不是任何人的操作，不推的话管理员看不到 ——
+     * 而这恰恰是最该立刻知道的一件事（渠道挂了，验证码就转发不出去了）。
+     *
+     * <p>但**不要在每次失败时推**：投递失败是常态（对端抖动），逐次推等于刷屏。
+     * 只在状态真的变了的地方推（增删改、自动停用）。
+     */
+    private void notifyChanged() {
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_CHANNELS, Map.of());
+    }
     private final NotifyRouteRepository routeRepository;
     private final NotifyDeliveryRepository deliveryRepository;
     private final NotifyCrypto crypto;
@@ -63,6 +79,7 @@ public class NotifyChannelService {
         channelRepository.save(channel);
 
         log.info("新建转发渠道：{}（{}）", channel.getName(), channel.getType());
+        notifyChanged();
         return toView(channel);
     }
 
@@ -71,6 +88,7 @@ public class NotifyChannelService {
         NotifyChannel channel = require(id);
         applyFields(channel, request, false);
         channelRepository.save(channel);
+        notifyChanged();
         return toView(channel);
     }
 
@@ -104,6 +122,13 @@ public class NotifyChannelService {
 
         log.warn("删除转发渠道：{}（id={}），影响 {} 条规则（其中 {} 条已无目标、自动停用），{} 条未投递记录已取消",
                 channel.getName(), id, affectedRoutes, disabledRoutes, cancelled);
+
+        notifyChanged();
+        // 上面那句「已无目标、自动停用」改的是**规则**，而转发规则页可能正开着 ——
+        // 顺手也推一条，否则那边要等用户自己刷新才知道有几条被停了。
+        if (disabledRoutes > 0) {
+            adminEvents.broadcast(AdminEventBroadcaster.EVENT_ROUTES, Map.of());
+        }
     }
 
     /** @return 被停用的规则数 */
@@ -150,6 +175,7 @@ public class NotifyChannelService {
             log.warn("转发渠道 {} 已停用，顺带取消了 {} 条未投递记录", channel.getName(), cancelled);
         }
 
+        notifyChanged();
         return toView(channel);
     }
 

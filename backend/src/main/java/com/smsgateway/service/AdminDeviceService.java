@@ -5,7 +5,9 @@ import com.smsgateway.model.dto.PageResult;
 import com.smsgateway.model.dto.RecoveryCodeView;
 import com.smsgateway.model.dto.StatsView;
 import com.smsgateway.model.entity.SmsDevice;
+import com.smsgateway.model.enums.EventType;
 import com.smsgateway.repository.DeviceRepository;
+import com.smsgateway.repository.EventLogRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
 import com.smsgateway.util.HashUtil;
@@ -31,6 +33,8 @@ public class AdminDeviceService {
     private final SmsMessageRepository smsMessageRepository;
     private final NotifyDeliveryRepository notifyDeliveryRepository;
     private final DeviceService deviceService;
+    private final EventLogRepository eventLogRepository;
+    private final EventLogService eventLogService;
 
     public static final String STATUS_DISABLED = "DISABLED";
 
@@ -112,7 +116,17 @@ public class AdminDeviceService {
         // 内容是空白的孤儿（见 NotifyDeliveryService.toView）。
         int removedDeliveries = notifyDeliveryRepository.deleteByDeviceId(device.getId());
         int removedSms = smsMessageRepository.deleteByDeviceId(device.getId());
+
+        // 这台设备的历史事件一并清掉，与上面两条同一个道理：设备既然移出车队，
+        // 它的运行记录也不该继续占着列表。但**「删除」这个动作本身要留痕**，
+        // 所以下面在事务提交之后再补记一条。
+        eventLogRepository.deleteByDeviceId(device.getId());
+
         deviceRepository.delete(device);
+
+        // 只带 device_code、不带主键：提交之后 sms_device 里的行已经没了，
+        // 再写主键就是一个永远悬空的外键。
+        eventLogService.recordAfterCommit(EventType.DEVICE_DELETED, deviceId, "管理员删除设备");
 
         log.warn("Admin deleted device {}, together with {} sms rows and {} notify deliveries",
                 deviceId, removedSms, removedDeliveries);
@@ -126,6 +140,14 @@ public class AdminDeviceService {
 
         device.setStatus(enabled ? "ACTIVE" : STATUS_DISABLED);
         deviceRepository.save(device);
+
+        // 「谁把设备停了」是现场最常问的一句话，而它原先在服务端一点痕迹都没有 ——
+        // 设备端只看到上传开始被 403，界面显示「已被管理员禁用」，看不出是谁什么时候做的。
+        eventLogService.recordAfterCommit(
+                enabled ? EventType.DEVICE_ENABLED_BY_ADMIN : EventType.DEVICE_DISABLED_BY_ADMIN,
+                device,
+                enabled ? "管理员启用设备" : "管理员禁用设备");
+
         log.info("Device {} {}", deviceId, enabled ? "enabled" : "disabled");
 
         return toView(device);

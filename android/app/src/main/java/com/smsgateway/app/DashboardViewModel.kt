@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.gson.Gson
 import com.smsgateway.app.database.AppDatabase
+import com.smsgateway.app.database.EventLogEntity
 import com.smsgateway.app.database.SmsQueueEntity
 import com.smsgateway.app.model.*
 import com.smsgateway.app.network.ProbeResult
@@ -23,6 +24,7 @@ import com.smsgateway.app.util.DeviceName
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
 import com.smsgateway.app.util.ServerTime
@@ -148,12 +150,34 @@ data class DashboardState(
     val queueLoading: Boolean = false,
 
     /**
+     * 重要日志页（本地事件记录，保留 7 天）。
+     *
+     * 与 [queue] 一样只存最近若干条：这张表理论上无界，而界面一次渲染几万行没有意义。
+     */
+    val eventLog: List<EventLogEntity> = emptyList(),
+    val eventLogLoading: Boolean = false,
+    /** 事件表里的总条数（不受上面那个展示上限影响），用来显示「共 N 条」。 */
+    val eventLogTotal: Int = 0,
+
+    /**
      * 主页两张小图的数据（近 7 天 + 今日逐小时）；还没取到时为 null。
      *
-     * null 与「取到但是空的」要分开：前者是「还没问过服务端」，界面据此整块不显示；
+     * null 与「取到但是空的」要分开：前者是「还没问过服务端」，界面据此摆占位骨架；
      * 后者是「服务端说这七天一条都没有」，那是有信息量的，该把空图摆出来。
      */
     val trend: DeviceTrend? = null,
+
+    /**
+     * 本进程内是否**已经问过一次**趋势数据（成功或失败都算）。
+     *
+     * [trend] 为 null 时，界面要能区分「正在读」和「读了但没拿到」—— 只靠 null
+     * 分不出来，于是一次网络失败之后占位骨架会永远写着「读取中」，
+     * 那是在骗人。与 [smsLoaded] 同一个理由、同一套写法。
+     *
+     * 未注册时**不置位**：那种情况问都不问（见 refreshTrend 的提前返回），
+     * 主页那时显示的是「设备未注册」，不该多摆一块「读不到趋势」。
+     */
+    val trendAttempted: Boolean = false,
 
     // 服务端记录页
     val smsRecords: List<SmsRecord> = emptyList(),
@@ -162,6 +186,17 @@ data class DashboardState(
     val smsPage: Int = 1,
     val smsLoading: Boolean = false,
     val smsError: String? = null,
+    /**
+     * 本进程内是否**已经完成过一次**服务端记录加载（成功或失败都算）。
+     *
+     * 与 [smsLoading] 配合，区分「首次进入」与「复访刷新」：ViewModel 是 Activity 级的，
+     * [smsRecords] 在页面之间一直留着，所以复访时列表非空 —— 整页转圈会把它闪没，
+     * 而用户看到的那片「什么都没发生」正是「以为没在刷新」的由来。复访时改成顶部
+     * 一条细进度条，不遮内容、不跳布局。
+     *
+     * 失败也算「读完一次」：否则一次网络失败之后，复访会永远停在整页转圈上。
+     */
+    val smsLoaded: Boolean = false,
 
     // 自检页
     val selfTest: List<SelfTestItem> = emptyList(),
@@ -204,6 +239,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_SERVER_URL = DevicePrefs.KEY_SERVER_URL
 
         private const val SMS_PAGE_SIZE = 20
+
+        /**
+         * 重要日志页一次读多少条。
+         *
+         * 保留 7 天的事件在几百条量级，500 条足够覆盖「昨天出的问题今天来查」；
+         * 而一次渲染上万行既没意义、又会让 Compose 的列表初始化变慢。
+         */
+        private const val EVENT_LOG_PAGE_SIZE = 500
 
         /** 趋势图看几天。 */
         private const val TREND_DAYS = 7
@@ -483,7 +526,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 // 趋势图 5 分钟一次就够：按天/按小时聚合的数字，30 秒刷一遍没有新信息。
                 // 刚传上去一条时会单独刷一次（见 observeUploads），所以「今天 +1」也不会迟到。
-                if (ticks % TREND_REFRESH_TICKS == 0) {
+                //
+                // 但**一次都没拿到过**时降到 30 秒一次：那时主页摆的是「暂时读不到」的占位，
+                // 让它挂满 5 分钟太久了 —— 用户会当成新出的毛病。拿到数据后自动回到 5 分钟。
+                val trendMissing = _state.value.trend == null
+                if (ticks % TREND_REFRESH_TICKS == 0 || (trendMissing && ticks % 6 == 0)) {
                     refreshTrend()
                 }
                 ticks++
@@ -647,9 +694,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         throw e
     } catch (e: IOException) {
         Log.e(TAG, "Registration failed: server unreachable", e)
+        EventLog.write(
+            getApplication(), EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
+            reason = "连不上服务器"
+        )
         ConnectOutcome(false, "连不上服务器，请到设置里检查服务器地址")
     } catch (e: Exception) {
         Log.e(TAG, "Registration failed", e)
+        EventLog.write(
+            getApplication(), EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
+            reason = e.javaClass.simpleName
+        )
         ConnectOutcome(false, "注册失败：${e.message ?: e.javaClass.simpleName}")
     }
 
@@ -660,6 +715,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private suspend fun performRegistration(): ConnectOutcome {
         val app = getApplication<Application>()
+
+        // 「首次注册」与「重新注册」在日志里长得一模一样，而设备身份被重置过一次
+        // 恰恰是排查「服务端怎么多出一台设备」的关键线索。必须在下面 updateToken
+        // 之前读，那之后 token 已经换成新的了。
+        val isReRegister = DevicePrefs.deviceToken(app).isNotBlank()
 
         // 先落盘再发请求。UUID 一旦生成就是持久的，即使这次请求失败或进程中途被杀，
         // 重试复用的也是同一个标识，不会再注册出第二台设备。
@@ -687,6 +747,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             // 这里原本读 body()?.message —— 但 Retrofit 在非 2xx 时 body() 恒为 null，
             // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
             val detail = parseErrorMessage(response.errorBody()?.string())
+            EventLog.write(
+                app, EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
+                reason = "HTTP ${response.code()}"
+            )
             return ConnectOutcome(
                 false,
                 "注册失败（HTTP ${response.code()}）" + (detail?.let { "：$it" } ?: ""),
@@ -719,6 +783,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         SmsUploadWorker.enqueue(app)
         refreshServerStats()
         startService()
+
+        EventLog.write(
+            app, EventLog.DEVICE_REGISTERED, EventLog.LEVEL_INFO,
+            reason = if (isReRegister) "重新注册" else "首次注册"
+        )
 
         // 成功也要说一声。之前成功分支置 null，于是点了「重新注册」之后界面上什么都不变 ——
         // 现场无从判断到底成没成，只能靠猜。
@@ -937,6 +1006,49 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    // ---------- 重要日志页 ----------
+
+    fun refreshEventLog() {
+        viewModelScope.launch { refreshEventLogNow() }
+    }
+
+    /**
+     * 事件日志读取的挂起版本。写法与 [refreshQueueNow] 一致：
+     * 真正干活的是这个，非挂起版只是把活派给 viewModelScope 的一层壳。
+     */
+    suspend fun refreshEventLogNow() {
+        _state.update { it.copy(eventLogLoading = true) }
+        try {
+            val dao = database.eventLogDao()
+            val rows = dao.getRecent(EVENT_LOG_PAGE_SIZE)
+            // 总数单独查：展示有上限（最近 500 条），而「共 N 条」要如实反映库里到底有多少，
+            // 否则超过 500 条之后那个数字会永远停在 500，看着像被截断了。
+            val total = dao.count()
+            _state.update {
+                it.copy(eventLog = rows, eventLogTotal = total, eventLogLoading = false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Load event log failed", e)
+            _state.update { it.copy(eventLogLoading = false) }
+        }
+    }
+
+    /** 清空重要日志。结果走 [DashboardState.settingsMessage] 那条一次性通道（同 [clearUploadedRecords]）。 */
+    fun clearEventLog() {
+        viewModelScope.launch {
+            try {
+                val removed = database.eventLogDao().deleteAll()
+                Log.i(TAG, "Cleared $removed event log rows")
+                _state.update { it.copy(settingsMessage = "已清理 $removed 条日志") }
+            } catch (e: Exception) {
+                Log.e(TAG, "Clear event log failed", e)
+                _state.update {
+                    it.copy(settingsMessage = "清理失败：${e.message ?: e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
     // ---------- 主页趋势图 ----------
 
     /**
@@ -946,15 +1058,26 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      * 为一次请求失败把两张图变没，比图稍旧几分钟糟糕得多。真要排查有记录页。
      */
     private suspend fun refreshTrend() {
-        if (!DevicePrefs.isRegistered(getApplication())) return
+        // 未注册时也要把 trendAttempted 置上。
+        //
+        // 这里原先想的是「未注册就别多摆一块读不到趋势」——**错的**：主页那张卡现在
+        // 是无条件渲染占位骨架的（见 TrendCard），不置位的结果是骨架永远写着「读取中」，
+        // 正好成了注释里反复说要避免的那句谎话。未注册的设备一进来就是这个样子。
+        if (!DevicePrefs.isRegistered(getApplication())) {
+            _state.update { it.copy(trendAttempted = true) }
+            return
+        }
         try {
             val response = RetrofitClient.getApiService().smsTrend(TREND_DAYS)
-            val trend = response.body()?.data ?: return
-            _state.update { it.copy(trend = trend) }
+            val trend = response.body()?.data
+            _state.update { it.copy(trend = trend ?: it.trend, trendAttempted = true) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Load trend failed", e)
+            // 失败也要置位：否则占位骨架会一直写着「读取中」，而它其实已经不读了。
+            // 保留上一次的数据（if (trend == null) 时不覆盖），与 refreshServerStats 同一个取舍。
+            _state.update { it.copy(trendAttempted = true) }
         }
     }
 
@@ -1049,6 +1172,23 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { loadServerSmsNow(page = current.smsPage + 1, append = true) }
     }
 
+    /**
+     * 用户正停在服务端记录页、而本机刚有一条短信上传成功：翻新第一页。
+     *
+     * 由页面订阅 [UploadEvents] 后调用（**不是**在 [startMonitoring] 的轮询里做）——
+     * 这一页只在被看着的时候才需要实时，离开页面就不该再为它发请求。
+     *
+     * 本页只列**本设备**的记录（`mySms`），所以「本机上传成功」是唯一需要立刻反映的事件，
+     * 不必为此加轮询。
+     *
+     * 守卫读 `_state.value` 而不是由页面传参：用户翻到第 2 页之后，新数据在第一页 ——
+     * 直接重拉会把他正在看的位置顶掉。这不是丢数据，只是别把人的位置踢走。
+     */
+    fun onUploadedWhileViewingServerSms() {
+        if (_state.value.smsPage > 1) return
+        loadServerSms()
+    }
+
     /** 挂起版本，理由同 [refreshQueueNow]：下拉刷新要等到这次请求真的回来。 */
     suspend fun loadServerSmsNow(page: Int = 1, append: Boolean = false) {
         _state.update { it.copy(smsLoading = true, smsError = null) }
@@ -1072,7 +1212,8 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                         smsRecords = merged,
                         smsTotal = body.data.total,
                         smsPage = page,
-                        smsLoading = false
+                        smsLoading = false,
+                        smsLoaded = true
                     )
                 }
                 // 列表刷新时同步刷新计数，保证两者永远一致
@@ -1081,6 +1222,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.update {
                     it.copy(
                         smsLoading = false,
+                        smsLoaded = true,
                         smsError = "读取失败（HTTP ${response.code()}）" +
                             (parseErrorMessage(response.errorBody()?.string())?.let { m -> "：$m" }
                                 ?: "")
@@ -1094,6 +1236,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             _state.update {
                 it.copy(
                     smsLoading = false,
+                    smsLoaded = true,
                     smsError = "连不上服务器：${e.message ?: e.javaClass.simpleName}"
                 )
             }

@@ -335,6 +335,40 @@ CREATE TABLE IF NOT EXISTS sys_config (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+-- ---------------------------------------------------------------------------
+-- 11. 运行事件（event_log）
+-- ---------------------------------------------------------------------------
+-- 起因是一条验证码短信**静默丢失**：设备说没传上去、服务端说没收到，两边都查不到。
+-- 这张表回答「这条上报在服务端这一侧到底被判成了什么」——存下 / 重复 /
+-- 被采集规则忽略 / 被拒，外加注册与令牌异常、设备上下线。
+--
+-- **刻意不存短信正文与验证码**：与 sms_message 不同，这张表是长期留存的运行记录
+-- （默认保留 7 天），正文和验证码不该在里面出现第二遍。要正文按 sms_message_id
+-- 关联回那张表（它自己有一份过期策略）。
+--
+-- **刻意不存 device_token / enroll_secret**：令牌可以冒充设备，写进任何长期留存的
+-- 地方都是净损失。认证失败只记「令牌无效」这个结论。
+--
+-- device_code 冗余存业务标识：设备行被删掉之后（删设备会连同它的历史事件一起清，
+-- 但删除这个动作本身要留痕）列表上仍然认得出它是什么设备。
+CREATE TABLE IF NOT EXISTS event_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    event_type VARCHAR(48) NOT NULL COMMENT '见 EventType 枚举',
+    level VARCHAR(16) NOT NULL DEFAULT 'INFO' COMMENT 'INFO / WARN / ERROR',
+    device_id BIGINT DEFAULT NULL COMMENT '关联 sms_device.id；设备已删或未认出时为 NULL',
+    device_code VARCHAR(128) DEFAULT NULL COMMENT '设备业务标识，设备行不在了也认得出',
+    local_message_id VARCHAR(128) DEFAULT NULL COMMENT '设备侧消息 ID，用于与 sms_message 对照',
+    sms_message_id BIGINT DEFAULT NULL COMMENT '关联 sms_message.id；该行可能已被保留策略清掉，展示必须容错',
+    sender VARCHAR(100) DEFAULT NULL COMMENT '短信发送方',
+    phone VARCHAR(32) DEFAULT NULL COMMENT '接收号码',
+    reason VARCHAR(255) DEFAULT NULL COMMENT '判定结果 / 原因码 / HTTP 状态。**不得写入正文或验证码**',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_created_at (created_at),
+    INDEX idx_type_created (event_type, created_at),
+    INDEX idx_device_created (device_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 -- ============================================================================
 -- 二、补列 / 补索引（只为**已存在的旧库**服务）
 --

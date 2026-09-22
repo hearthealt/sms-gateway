@@ -144,6 +144,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
@@ -259,6 +260,16 @@ async function handleToggle() {
 }
 
 onMounted(loadDevice)
+
+/*
+ * 设备的心跳、在线状态、电量、待上传量都在自己变；`sms` 是这一页下半部分那几张图与列表。
+ * 两者都不是任何人的操作，只能靠推。
+ */
+useAdminEvents((event) => {
+  if (event !== 'devices' && event !== 'sms' && event !== 'hello') return
+  loadDevice()
+  loadSms()
+})
 </script>
 
 <style scoped>

@@ -54,6 +54,14 @@ object AuthState {
         GatewayForegroundService.stop(context)
 
         if (_tokenRejected.value) return false
+
+        // 只记本轮第一次观察到的拒绝。心跳 30 秒一次、上传每次失败都会走到这里，
+        // 不挡的话同一次失效会把日志刷满 —— 而这正是「重复调用不反复置位」的同一个理由。
+        EventLog.write(
+            context, EventLog.DEVICE_TOKEN_REJECTED, EventLog.LEVEL_ERROR,
+            reason = "服务端不再认这台设备，已停止上报"
+        )
+
         _tokenRejected.value = true
         return true
     }

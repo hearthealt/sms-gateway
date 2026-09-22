@@ -4,7 +4,7 @@ import 'element-plus/dist/index.css'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import {
   ArrowDown, ArrowRight, ChatDotSquare, CircleCheck, CopyDocument, Document,
-  Fold, Hide, Iphone, Key, Lightning, Loading, Lock, Menu, Monitor, Odometer,
+  Fold, Hide, Iphone, Key, Lightning, List, Loading, Lock, Menu, Monitor, Odometer,
   Plus, Refresh, RefreshRight, Search, Setting, Timer, User, View, WarningFilled,
 } from '@element-plus/icons-vue'
 import App from './App.vue'
@@ -23,7 +23,7 @@ const app = createApp(App)
  */
 const icons = {
   ArrowDown, ArrowRight, ChatDotSquare, CircleCheck, CopyDocument, Document,
-  Fold, Hide, Iphone, Key, Lightning, Loading, Lock, Menu, Monitor, Odometer,
+  Fold, Hide, Iphone, Key, Lightning, List, Loading, Lock, Menu, Monitor, Odometer,
   Plus, Refresh, RefreshRight, Search, Setting, Timer, User, View, WarningFilled,
 }
 for (const [name, component] of Object.entries(icons)) {

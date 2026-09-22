@@ -119,6 +119,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { Plus, View, Hide, CopyDocument } from '@element-plus/icons-vue'
@@ -242,6 +243,18 @@ async function handleToggle(row: ApiKey, val: boolean) {
 }
 
 onMounted(loadKeys)
+
+/*
+ * 另一个管理员增删了密钥、或改了启用状态时自动重拉 ——
+ * 「这把钥匙还能不能用」是现场最常问的一句话。
+ *
+ * **弹窗开着时跳过**：新建密钥的弹窗里那份表单不能被静默覆盖。
+ */
+useAdminEvents((event) => {
+  if (event !== 'apikeys' && event !== 'hello') return
+  if (dialogVisible.value) return
+  loadKeys()
+})
 </script>
 
 <style scoped>

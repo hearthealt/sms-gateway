@@ -1,5 +1,6 @@
 package com.smsgateway.service;
 
+import com.smsgateway.exception.EnrollTokenRequiredException;
 import com.smsgateway.exception.EnrollmentRequiredException;
 import com.smsgateway.model.dto.DailyCount;
 import com.smsgateway.model.dto.DeviceRegisterRequest;
@@ -9,6 +10,7 @@ import com.smsgateway.model.dto.DeviceTrend;
 import com.smsgateway.model.dto.HeartbeatRequest;
 import com.smsgateway.model.dto.HourlyCount;
 import com.smsgateway.model.entity.SmsDevice;
+import com.smsgateway.model.enums.EventType;
 import com.smsgateway.model.enums.SmsStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.SmsMessageRepository;
@@ -58,6 +60,7 @@ public class DeviceService {
      * 所有老设备重装后就全部失联了。
      */
     private final DeviceEnrollTokenService enrollTokenService;
+    private final EventLogService eventLogService;
 
     @Value("${app.secret.key}")
     private String secretKey;
@@ -67,8 +70,20 @@ public class DeviceService {
     private static final long HEARTBEAT_TTL_SECONDS = 90;
 
     public DeviceRegisterResponse register(DeviceRegisterRequest request) {
+        // 事务之前先看一眼这台设备在不在：一能区分「首次注册」与「重新注册」
+        // （身份被重置过一次是排查「服务端怎么多了一台设备」的关键线索），
+        // 二能在被拒时把「是哪台设备被拒」记进事件 —— 那正是最需要知道的信息。
+        SmsDevice known = deviceRepository.findByDeviceId(request.getDeviceId()).orElse(null);
+
+        DeviceRegisterResponse response;
         try {
-            return transactionTemplate.execute(status -> doRegister(request));
+            response = transactionTemplate.execute(status -> doRegister(request));
+        } catch (EnrollmentRequiredException | EnrollTokenRequiredException e) {
+            // 注册被拒：口令不对、密钥不匹配、或这台设备压根没启用过重注册校验。
+            // 这类拒绝在设备端只表现为一句「注册失败」，服务端不记就没人知道是哪一种。
+            recordQuietly(EventType.DEVICE_ENROLL_REJECTED, known,
+                    e.getClass().getSimpleName() + "：" + e.getMessage());
+            throw e;
         } catch (DataIntegrityViolationException e) {
             // 两个相同 deviceId 的注册并发到达时，双方都会在查询时扑空，后落地的那个
             // 撞上 device_id 的唯一约束。注册本身是幂等的（token 由 deviceId 的 HMAC 推导，
@@ -79,7 +94,7 @@ public class DeviceService {
             // 看不出请求当初用的是哪个密钥。
             log.info("Concurrent registration for deviceId={}, returning existing device",
                     request.getDeviceId());
-            return deviceRepository.findByDeviceId(request.getDeviceId())
+            response = deviceRepository.findByDeviceId(request.getDeviceId())
                     .map(device -> {
                         verifyEnrollment(device, request.getEnrollSecret());
                         return new DeviceRegisterResponse(
@@ -88,6 +103,44 @@ public class DeviceService {
                                 device.getStatus());
                     })
                     .orElseThrow(() -> e);
+        }
+
+        if (known != null) {
+            recordQuietly(EventType.DEVICE_RE_REGISTERED, known, "重新注册");
+        } else {
+            // 首次注册时库里还查不到这台设备（known 为 null），但**请求里带着它的 deviceId**。
+            // 不把它带上，这条事件就只剩「注册成功 / 首次注册」几个字、认不出是哪台机器 ——
+            // 而它存在的全部意义正是回答「服务端怎么多出来一台设备」。
+            recordQuietlyByIdentity(EventType.DEVICE_REGISTERED, request.getDeviceId(), "首次注册");
+        }
+        return response;
+    }
+
+    /**
+     * 记一条事件，失败不影响这次请求的结论。
+     *
+     * <p>注册与心跳都是**设备等着回包**的接口：事件写不进去是旁路问题，
+     * 让它把一个成功的注册变成 500，设备那边只会看到「注册失败」并反复重试 ——
+     * 比少一条日志坏得多。
+     */
+    private void recordQuietly(EventType type, SmsDevice device, String reason) {
+        try {
+            eventLogService.record(type, device, reason);
+        } catch (Exception e) {
+            log.warn("Failed to record device event {}", type, e);
+        }
+    }
+
+    /**
+     * 设备行**还不存在**时用这个（首次注册）。
+     *
+     * <p>只带业务标识、不带主键：那时还没有主键可带。
+     */
+    private void recordQuietlyByIdentity(EventType type, String deviceCode, String reason) {
+        try {
+            eventLogService.recordWithIdentity(type, null, deviceCode, reason);
+        } catch (Exception e) {
+            log.warn("Failed to record device event {}", type, e);
         }
     }
 
@@ -234,6 +287,9 @@ public class DeviceService {
 
         if (!wasOnline) {
             adminEvents.broadcast(AdminEventBroadcaster.EVENT_DEVICES, Map.of("deviceId", deviceId));
+            // 只在这一下「掉线又回来」时记。每 30 秒的心跳都记，7 天就是两万行，
+            // 真正要看的那些事件会被自己刷没 —— 与上面那个 broadcast 的取舍完全一致。
+            recordQuietly(EventType.DEVICE_ONLINE, device, "恢复在线（此前不在线）");
         }
 
         log.debug("Heartbeat received from device: {}", deviceId);
@@ -370,6 +426,7 @@ public class DeviceService {
 
         adminEvents.broadcast(AdminEventBroadcaster.EVENT_DEVICES,
                 Map.of("deviceId", authenticatedDeviceId));
+        recordQuietly(EventType.DEVICE_OFFLINE_REPORTED, device, "用户停止了网关");
         log.info("Device reported gateway stopped: {}", authenticatedDeviceId);
     }
 

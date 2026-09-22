@@ -242,6 +242,10 @@ export default defineComponent({
         children: [
           { path: '/apikeys', icon: 'Key', label: 'API 密钥' },
           { path: '/api-docs', icon: 'Document', label: '接口文档' },
+          // 「运行日志」归在开放接口这一组不是因为它跟接口有关，而是因为它和接口文档
+          // 是同一种东西：平时不看，出事了才翻。放进「采集转发」会把那一组
+          // （全都是「短信怎么流转」的配置项）掺进一个不是配置的页面。
+          { path: '/eventlog', icon: 'List', label: '运行日志' },
         ],
       },
 

@@ -17,6 +17,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import com.smsgateway.service.AdminEventBroadcaster;
+
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -46,6 +49,7 @@ public class NotifyDeliveryService {
      * 是「排队中」还是「已暂停」，是两回事。
      */
     private final NotifyChannelRepository channelRepository;
+    private final AdminEventBroadcaster adminEvents;
 
     public PageResult<NotifyDeliveryView> list(int page, int pageSize, Long channelId, String status) {
         NotifyDeliveryStatus parsedStatus = parseStatus(status);
@@ -108,6 +112,11 @@ public class NotifyDeliveryService {
         delivery.setNextRetryAt(LocalDateTime.now());
         delivery.setLastError(null);
         deliveryRepository.save(delivery);
+
+        // 手动重投会让这条记录从「失败」变回「待投递」，正在看投递记录页的人
+        // 应该立刻看到这个变化 —— 否则他会以为没点上，再点一次。
+        adminEvents.broadcast(AdminEventBroadcaster.EVENT_DELIVERIES,
+                Collections.singletonMap("id", id));
 
         log.info("手动重投：deliveryId={}", id);
 
