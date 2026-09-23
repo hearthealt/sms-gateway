@@ -1,8 +1,6 @@
 package com.smsgateway.app.ui.screens.queue
 
 import androidx.compose.animation.AnimatedVisibility
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -61,8 +59,6 @@ fun QueueScreen(
     onBack: () -> Unit
 ) {
     val pullState = rememberPullToRefreshState()
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // 一秒钟走一次，只为「还有多久重试」那个倒计时 —— 队列不动的时候没有任何状态
@@ -139,13 +135,7 @@ fun QueueScreen(
                                 row = row,
                                 now = now,
                                 onRetry = { viewModel.retrySms(row.id) },
-                                onDelete = { viewModel.deleteSms(row.id) },
-                                onCopyCode = { code ->
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                                        as? ClipboardManager
-                                    clipboard?.setPrimaryClip(ClipData.newPlainText("验证码", code))
-                                    scope.launch { snackbarHostState.showSnackbar("已复制 $code") }
-                                }
+                                onDelete = { viewModel.deleteSms(row.id) }
                             )
                         }
                     }

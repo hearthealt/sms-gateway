@@ -75,7 +75,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="typeLabel" label="事件" width="160" show-overflow-tooltip />
-        <el-table-column label="设备" width="150">
+        <el-table-column label="设备" width="190">
           <template #default="{ row }">
             <!--
               设备行可能已经被删掉（删设备会连同它的历史事件一起清，但「删除」那一条留着），
@@ -87,7 +87,9 @@
               照它跳过去会落到一个 404 的设备详情页。deviceName 只有活着的设备才有。
             -->
             <template v-if="row.deviceId && row.deviceName">
-              <el-tooltip :content="row.deviceId" placement="top">
+              <!-- 设备名放得下就放，放不下时截断 —— 悬停必须能看到**完整设备名**，
+                   而不是只在下面垫一行 tooltip 显示 deviceId（那对不上用户眼前那段省略号）。 -->
+              <el-tooltip :content="row.deviceName" placement="top" :show-after="300">
                 <el-link
                   type="primary"
                   underline="never"
@@ -103,7 +105,7 @@
             <span v-else class="muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="发送方 / 号码" width="200">
+        <el-table-column label="发送方 / 号码" width="260" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.sender || row.phone">
               {{ row.sender || '-' }}

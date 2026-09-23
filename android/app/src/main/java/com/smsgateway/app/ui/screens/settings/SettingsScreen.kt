@@ -110,7 +110,7 @@ fun SettingsScreen(
         // 授了就重算列表（simRefreshKey 变了，见 rememberSimSlots）
         simRefreshKey++
         if (granted.values.none { it }) {
-            toast("没有电话权限就读不到卡里的号码，在下面直接手填即可")
+            toast("没有电话权限读不到卡里的号码，直接手填即可")
         }
     }
 
@@ -259,13 +259,12 @@ fun SettingsScreen(
                 Text(
                     text = when {
                         !hasPhonePermission ->
-                            "未授予电话权限，读不到 SIM 卡里存的号码。点上面的按钮申请，" +
-                                "或直接在输入框里手填 —— 手填的值一样会被用上。"
+                            "未授予电话权限，读不到卡里的号码。点上面按钮申请，或直接手填。"
 
                         simResult.problem != null ->
-                            "${simResult.problem}。可直接在输入框里手填号码。"
+                            "${simResult.problem}。可直接手填。"
 
-                        else -> "号码存在 SIM 卡上，多数运营商不写入，读不到时手填即可。"
+                        else -> "多数运营商不把号码写进 SIM 卡，读不到就手填。"
                     },
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
@@ -300,9 +299,10 @@ fun SettingsScreen(
                     onClick = onOpenEventLog,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("查看重要日志") }
+                // 日志页自己写着「记录哪些事件、保留几天」，这里只留一句「什么时候该看它」。
+                // 原先这段把那份说明又抄了一遍，两处说法迟早会不一致。
                 Text(
-                    text = "短信采集、上传与设备状态的重要事件，保留 7 天。" +
-                        "「短信为什么没转发」这类问题看这里。",
+                    text = "排查「短信为什么没转发」看这里。",
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
@@ -312,7 +312,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("清理本地已上传记录") }
                 Text(
-                    text = "只删本地已上传成功的历史，不影响服务端数据。",
+                    text = "只删本地已上传的，服务端不受影响。",
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
@@ -322,7 +322,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("清理重要日志") }
                 Text(
-                    text = "只删本地这份日志，不影响待上传的短信。",
+                    text = "只删这份日志，待上传的短信不受影响。",
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
@@ -351,7 +351,7 @@ fun SettingsScreen(
                                     viewModel.updatePhone(number, sim.subscriptionId)
                                     toast("已读取：$number")
                                 } else {
-                                    toast("${sim.label} 没有写入号码，请手动填写")
+                                    toast("${sim.label} 没写号码，请手填")
                                 }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -379,7 +379,7 @@ fun SettingsScreen(
             onDismissRequest = { showReregisterDialog = false },
             title = { Text("重新注册设备？") },
             text = {
-                Text("会用当前的服务器地址重新向后台登记这台设备。设备 ID 保持不变，后台不会新增设备。")
+                Text("用当前地址重新登记这台设备。设备 ID 不变，后台不会新增设备。")
             },
             confirmButton = {
                 TextButton(onClick = {

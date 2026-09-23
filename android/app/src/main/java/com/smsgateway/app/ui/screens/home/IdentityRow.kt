@@ -57,10 +57,13 @@ fun IdentityRow(state: DashboardState, onOpenSettings: () -> Unit) {
                 thickness = 1.dp,
                 color = AppColor.Divider
             )
+            // 空态不能只写「未设置」：号码读不到时短信照样传得上去，服务端却会跳过写
+            // 按号码的验证码缓存 —— 于是「传上去了但调用方等不到码」，而界面上一切正常。
+            // 这里是现场唯一能不靠查库就发现这件事的地方。
             IdentityLine(
                 icon = Icons.Default.Phone,
                 label = "手机号",
-                value = state.phone.ifBlank { "未设置" },
+                value = state.phone.ifBlank { "未设置（收不到验证码）" },
                 onClick = onOpenSettings
             )
         }

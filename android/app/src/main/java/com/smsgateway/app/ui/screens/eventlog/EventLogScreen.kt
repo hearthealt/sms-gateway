@@ -5,15 +5,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -22,11 +26,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppScreen
 import com.smsgateway.app.ui.components.EmptyState
 import com.smsgateway.app.ui.components.EventLogRow
+import com.smsgateway.app.ui.components.RefreshableFill
 import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
@@ -46,15 +52,33 @@ import com.smsgateway.app.util.EventLog
  *
  * 保留 7 天，由上传 worker 与网关心跳循环两处定期剪枝。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EventLogScreen(
     state: DashboardState,
     viewModel: DashboardViewModel,
     onBack: () -> Unit
 ) {
-    // 进页面自己读一次 —— 与队列页同一个约定（见 QueueScreen）：
-    // 页面自己知道该加载什么，不靠 MainActivity 的导航回调代劳。
+    // 下拉刷新。写法与队列页**逐行一致**（见 QueueScreen）——同一套手势在两个页面
+    // 用不同的实现，迟早会在某一次改动里只修好一边。
+    val pullState = rememberPullToRefreshState()
+
+    // 进页面自己读一次 —— 与队列页同一个约定：页面自己知道该加载什么，
+    // 不靠 MainActivity 的导航回调代劳。
     LaunchedEffect(Unit) { viewModel.refreshEventLogNow() }
+
+    // 松手后 isRefreshing 置位，等这次读库真的结束再收手。
+    // finally 收尾：转圈收不回来是比「刷新失败」更难查的那种毛病 ——
+    // 屏幕上没有任何一处提示，只有一个永远转的圈。
+    LaunchedEffect(pullState.isRefreshing) {
+        if (pullState.isRefreshing) {
+            try {
+                viewModel.refreshEventLogNow()
+            } finally {
+                pullState.endRefresh()
+            }
+        }
+    }
 
     AppScreen(
         title = "重要日志",
@@ -65,6 +89,8 @@ fun EventLogScreen(
         } else null,
         onBack = onBack,
         actions = {
+            // 右上角这个按钮**保留**：手势适合「手已经在列表上」的场景，
+            // 按钮适合「第一次来、不知道能下拉」的场景，两者都有人用。
             IconButton(
                 onClick = { viewModel.refreshEventLog() },
                 enabled = !state.eventLogLoading
@@ -73,7 +99,12 @@ fun EventLogScreen(
             }
         }
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .nestedScroll(pullState.nestedScrollConnection)
+        ) {
             when {
                 // 首次加载还没回来。与刷新区分开：复访时列表已有内容，
                 // 整页转圈会把它闪没。
@@ -82,12 +113,19 @@ fun EventLogScreen(
                     contentAlignment = Alignment.Center
                 ) { CircularProgressIndicator() }
 
-                state.eventLog.isEmpty() -> EmptyState(
-                    icon = Icons.Default.Refresh,
-                    title = "还没有日志",
-                    description = "这里记录短信采集、上传与设备状态的重要事件\n" +
-                        "保留最近 ${EventLog.RETENTION_DAYS} 天，便于事后排查",
-                )
+                // 套一层可滚动容器：空状态本身不可滚动，手势不会进嵌套滚动链路，
+                // 下拉刷新在这一页最容易想刷的时候（什么都没有）正好是失效的
+                // （见 RefreshableFill）。与队列页同一个写法。
+                state.eventLog.isEmpty() -> RefreshableFill {
+                    EmptyState(
+                        icon = Icons.Default.Refresh,
+                        title = "还没有日志",
+                        // 采集、上传、设备状态三类说全，天数照旧 —— 剩下的话由设置页那句
+                        // 「什么时候该看这里」负责，两处不重复。
+                        description = "采集、上传与设备状态的重要事件都会记在这里\n" +
+                            "保留最近 ${EventLog.RETENTION_DAYS} 天"
+                    )
+                }
 
                 else -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -116,12 +154,17 @@ fun EventLogScreen(
                                 text = "只显示最近 ${state.eventLog.size} 条",
                                 style = AppTypography.hint,
                                 color = AppColor.InkMuted,
-                                modifier = Modifier.fillMaxSize().padding(AppSpacing.sm)
+                                modifier = Modifier.fillMaxWidth().padding(AppSpacing.sm)
                             )
                         }
                     }
                 }
             }
+
+            PullToRefreshContainer(
+                state = pullState,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
     }
 }

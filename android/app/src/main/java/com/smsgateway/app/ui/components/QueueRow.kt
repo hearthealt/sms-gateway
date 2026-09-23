@@ -52,8 +52,7 @@ fun QueueRow(
     row: SmsQueueEntity,
     now: Long,
     onRetry: () -> Unit,
-    onDelete: () -> Unit,
-    onCopyCode: (String) -> Unit = {}
+    onDelete: () -> Unit
 ) {
     val failed = row.status == "failed"
     // 这两个按钮都会立刻改变眼前的列表（重试会挪位置、删除会让它消失），
@@ -114,31 +113,15 @@ fun QueueRow(
                 overflow = TextOverflow.Ellipsis
             )
 
-            // 验证码（如果有）。整块可点 → 复制这一条 ——
-            // 与服务端记录页同一套交互，两页来回看不会一个能点一个不能点
-            row.code.takeIf { it.isNotBlank() }?.let { code ->
-                Spacer(modifier = Modifier.height(AppSpacing.xxs))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(AppColor.BadgeShape)
-                        .clickable { onCopyCode(code) }
-                        .padding(horizontal = AppSpacing.xxs, vertical = 2.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Key,
-                        contentDescription = "验证码，点一下复制",
-                        tint = AppColor.InkSecondary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(AppSpacing.xxs))
-                    Text(
-                        text = code,
-                        style = AppTypography.mono(AppTypography.h3),
-                        color = AppColor.Ink
-                    )
-                }
-            }
+            // 这里刻意**不再显示验证码**（原先有一个可点复制的验证码块）。
+            //
+            // 客户端不再解析验证码（认码只留服务端一处，见 SmsReceiver 的说明），
+            // 所以本地这一列恒为空 —— 留着那块 UI 只会是一个永远不显示的东西。
+            //
+            // 想复制验证码去**服务端记录页**：那里的码是服务端从正文提取的，
+            // 是权威值。而队列页这一列此前存的是设备端自己猜的码，正是会给出
+            // 错答案的那一套（「您的验证码已发送，流水号 999999」会猜成 999999）。
+            // 何况正文本身在上一行完整显示着，码不是没地方看。
 
             Spacer(modifier = Modifier.height(AppSpacing.xxs))
             HorizontalDivider(color = AppColor.Divider)
@@ -159,6 +142,17 @@ fun QueueRow(
                             text = "第 ${row.retryCount} 次重试",
                             style = AppTypography.caption,
                             color = AppColor.InkSecondary
+                        )
+                    }
+                    // 号码读不到时这一行传得上去，但服务端会跳过写按号码的验证码缓存 ——
+                    // 「传上去了、调用方却等不到」是这条链路上最难查的一种：到这里队列行
+                    // 会消失、事件表写的是「上传成功」，三处都没有异常信号。
+                    // 队列是现场唯一还看得见这条短信的地方，先说清楚。
+                    if (row.phone.isBlank()) {
+                        Text(
+                            text = "号码未知，调用方可能取不到",
+                            style = AppTypography.caption,
+                            color = AppColor.Warning
                         )
                     }
                     if (!failed) {

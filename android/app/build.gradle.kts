@@ -30,8 +30,8 @@ android {
         // 版本号与主版本（backend/pom.xml、management/package.json、git tag）保持一致。
         // versionCode 是给系统看的整数、必须单调递增，按 major*10000 + minor*100 + patch 算：
         // 1.0.2 → 10002、1.1.0 → 10100、2.0.0 → 20000。
-        versionCode = 10003
-        versionName = "1.0.3"
+        versionCode = 10004
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -109,6 +109,9 @@ dependencies {
     // 表现为「一点注册就闪退」。material3 1.2.0 才是与 Compose 1.6.0 配套的版本。
     implementation("androidx.compose.material3:material3:1.2.0")
 
+    // 下拉刷新用的是 **material3 自带**的（`androidx.compose.material3.pulltorefresh`），
+    // 队列页与重要日志页同一套。别去引 `androidx.compose.material`（Material 2）——
+    // 曾为它多背 456KB，而 material3 1.2.0 里本来就有 `PullToRefreshContainer`。
     implementation("androidx.compose.material:material-icons-extended")
 
     // Room
