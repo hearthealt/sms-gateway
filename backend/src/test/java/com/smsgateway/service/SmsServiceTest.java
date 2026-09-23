@@ -186,22 +186,29 @@ class SmsServiceTest {
     }
 
     @Test
-    @DisplayName("客户端已解析出验证码时优先采用客户端结果")
-    void clientProvidedCodeWins() {
+    @DisplayName("客户端送来的验证码一律不采用 —— 它的规则比服务端宽，会把流水号当验证码")
+    void clientProvidedCodeIsIgnored() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
                 request("随便什么内容", "999999"));
 
-        assertThat(response.getSmsCode()).isEqualTo("999999");
-        verify(valueOps).set(eq(CODE_KEY), eq("999999"), eq(300L), eq(TimeUnit.SECONDS));
+        assertThat(response.getSmsCode()).isEmpty();
+        verify(valueOps, never()).set(anyString(), anyString(), anyLong(), any(TimeUnit.class));
     }
 
     @Test
-    @DisplayName("客户端传空串时回退到后端解析（空串不等于 null，不能直接采用）")
-    void blankClientCodeFallsBackToParsing() {
+    @DisplayName("客户端送的值既不进 sms_message.code、也不进缓存 —— 两处必须与正文提取结果一致")
+    void clientValueNeverLeaksIntoStoredCodeOrCache() {
         SmsReceiveResponse response = smsService.receiveSms(DEVICE_ID,
-                request("您的验证码是123456", ""));
+                request("您的验证码是123456", "999999"));
 
         assertThat(response.getSmsCode()).isEqualTo("123456");
+
+        // sms_message.code 此前存的是 request.getCode() 原文，与写进缓存的那个值各算各的
+        // —— 两边规则一旦不同，库里和缓存里就是两个不同的码，且没有任何信号。
+        ArgumentCaptor<SmsMessage> saved = ArgumentCaptor.forClass(SmsMessage.class);
+        verify(smsMessageRepository).save(saved.capture());
+        assertThat(saved.getValue().getCode()).isEqualTo("123456");
+
         verify(valueOps).set(eq(CODE_KEY), eq("123456"), eq(300L), eq(TimeUnit.SECONDS));
     }
 

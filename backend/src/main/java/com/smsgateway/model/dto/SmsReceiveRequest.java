@@ -34,7 +34,18 @@ public class SmsReceiveRequest {
     @Size(max = 32, message = "phone 超长（上限 32）")
     private String phone;
 
-    @NotBlank(message = "sender cannot be empty")
+    /**
+     * 发送方号码。**允许为空**：个别 PDU（部分厂商 ROM、某些 alphanumeric 发送方）
+     * 解出的 originatingAddress 是 null，设备端只能送空串上来。
+     *
+     * <p>这里原先有 {@code @NotBlank}。后果不是「这条被拒」这么简单：设备端把 400 归为
+     * 终态 {@code failed}，而本地查询只取 {@code pending} —— 于是这条短信**再也不会被重试**，
+     * 用户还在等的那个验证码就此消失。而短信本身是完整的、正文里就有码，
+     * 不该因为发件人读不到而整条丢掉（与 {@link #phone} 允许为空是同一个取舍）。
+     *
+     * <p>代价：转发频道名里 sender 段为空（{@code sms:channel:{phone}:}），
+     * 按发送方订阅的调用方匹配不到 —— 那是降级，不是丢失。
+     */
     @Size(max = 100, message = "sender 超长（上限 100）")
     private String sender;
 

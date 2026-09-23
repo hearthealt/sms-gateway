@@ -161,6 +161,12 @@ public class SmsService {
         // 这里归一成空串，免得插入时违反约束、把整条短信一起丢掉。
         String phone = request.getPhone() == null ? "" : request.getPhone();
 
+        // sender 同理，且**必须在放开 @NotBlank 之后补上**：@Size 不拦 null，
+        // 而 sms_message.sender 是 NOT NULL —— 不归一的话，一个 sender: null 的上报
+        // 会从「400 被拒」变成「500 插入失败」。旧版本 App 只会送空串不会送 null，
+        // 但接口是对外开放的，不能假设调用方一定是设备。
+        String sender = (request.getSender() == null) ? "" : request.getSender();
+
         // 1. Idempotency by (device_id, local_message_id)
         Optional<SmsMessage> existingByIdempotency =
                 smsMessageRepository.findByDeviceIdAndLocalMessageId(devicePk, request.getLocalMessageId());
@@ -214,16 +220,31 @@ public class SmsService {
         }
 
         // 4. Apply collect rules (priority desc, first match wins; no match => collect)
-        CollectRuleEngine.Decision decision = collectRuleEngine.decide(request.getSender(), request.getContent());
+        CollectRuleEngine.Decision decision = collectRuleEngine.decide(sender, request.getContent());
+
+        // 验证码一律由服务端从正文里提取，**不再采用客户端送来的那个值**。
+        //
+        // 设备端（SmsCodeParser）那套规则与本项目的 CodeExtractor 不一致，而且更宽：
+        // 它会把订单号/流水号当成验证码（"您的验证码已发送，流水号 123456" 会给出 123456），
+        // 也会从更长的数字串里截一段（"验证码是1234567890" 会给出 12345678）。
+        // 那个值此前被原样写进 sms:code:{phone} 并推给等待方 —— 等验证码的调用方
+        // 拿到的是一个**错码**，而两端都没有任何信号，比超时更难查。
+        //
+        // 现在只留这一处提取：规则改一次全设备生效，不必等设备端发版。
+        //
+        // 提取放在建实体之前，是为了让「存进 sms_message.code 的」与「写进缓存、回给
+        // 调用方的」**是同一个值**。原先前者是 request.getCode() 原文、后者走 resolveCode，
+        // 两个口子各算各的，一旦规则不同就会分叉。
+        String code = CodeExtractor.extract(request.getContent());
 
         // 5. Save new SMS message
         SmsMessage message = new SmsMessage();
         message.setDeviceId(devicePk);
         message.setLocalMessageId(request.getLocalMessageId());
         message.setPhone(phone);
-        message.setSender(request.getSender());
+        message.setSender(sender);
         message.setContent(request.getContent());
-        message.setCode(request.getCode());
+        message.setCode(code);
         message.setStatus(decision.ignored() ? SmsStatus.IGNORED : SmsStatus.RECEIVED);
         message.setSourceHash(sourceHash);
         if (request.getReceiveTime() != null) {
@@ -236,7 +257,7 @@ public class SmsService {
         if (decision.ignored()) {
             // 只留档：不写验证码缓存、不推送、也不转发，避免污染正在等待验证码的调用方
             log.info("SMS ignored by rule '{}': deviceId={}, phone={}, sender={}",
-                    decision.matchedRule(), authenticatedDeviceId, request.getPhone(), request.getSender());
+                    decision.matchedRule(), authenticatedDeviceId, request.getPhone(), sender);
             return new ReceiveOutcome(
                     new SmsReceiveResponse(message.getId(), false, SmsStatus.IGNORED.name(), null),
                     EventType.SMS_IGNORED_BY_RULE,
@@ -260,7 +281,6 @@ public class SmsService {
         adminEvents.broadcast(AdminEventBroadcaster.EVENT_SMS,
                 Collections.singletonMap("id", message.getId()));
 
-        String code = resolveCode(request.getCode(), request.getContent());
         // 外部调用方按号码取短信、不关心发送方，所以归一化后的号码是唯一的匹配维度。
         // 归一化必须与 WaitingService 用同一套规则，否则又是一次静默超时。
         String normalizedPhone = PhoneUtil.normalize(request.getPhone());
@@ -285,21 +305,21 @@ public class SmsService {
                     CODE_TTL_SECONDS, TimeUnit.SECONDS);
         } else if (code.isEmpty()) {
             log.debug("No verification code parsed, skip Redis cache: phone={}, sender={}",
-                    request.getPhone(), request.getSender());
+                    request.getPhone(), sender);
         } else {
             // 设备读不到本机号（phone 为 null/空）时没有调用方能等到，写了也是死数据
-            log.debug("Phone number unknown, skip Redis cache: sender={}", request.getSender());
+            log.debug("Phone number unknown, skip Redis cache: sender={}", sender);
         }
 
         // 7. Notify waiting consumers via Redis pub/sub
         // 同样只在解析出验证码时推送：用空验证码 complete future 会让等待方拿到空值。
         // 频道名保留 {phone}:{sender} —— 订阅方是全量模式订阅 "sms:channel:*"、靠消息体匹配的。
         if (!code.isEmpty() && !normalizedPhone.isEmpty()) {
-            String waitChannel = "sms:channel:" + request.getPhone() + ":" + request.getSender();
+            String waitChannel = "sms:channel:" + request.getPhone() + ":" + sender;
             long receiveTimeEpoch = message.getReceiveTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
             String messageJson = String.format(
                     "{\"sender\":\"%s\",\"content\":\"%s\",\"code\":\"%s\",\"phone\":\"%s\",\"receivedAt\":%d}",
-                    escapeJson(request.getSender()),
+                    escapeJson(sender),
                     escapeJson(request.getContent()),
                     escapeJson(code),
                     escapeJson(normalizedPhone),
@@ -315,7 +335,7 @@ public class SmsService {
         // 5 分钟的 TTL 长，落盘等于长期留存。只记「有没有解析出来」，
         // 排查「这条为什么没出码」够用了。
         log.info("SMS received and stored: deviceId={}, phone={}, sender={}, hasCode={}",
-                authenticatedDeviceId, request.getPhone(), request.getSender(),
+                authenticatedDeviceId, request.getPhone(), sender,
                 code != null && !code.isEmpty());
 
         return new ReceiveOutcome(
@@ -323,20 +343,6 @@ public class SmsService {
                 EventType.SMS_STORED,
                 null,
                 message);
-    }
-
-    /**
-     * 客户端已解析出验证码时优先采用；否则由后端解析。
-     * 空串一律视为「未解析」——否则会绕过 CodeExtractor 的兜底。
-     *
-     * <p>提取逻辑搬到了 {@link CodeExtractor}：那是一段自成一体、有明确输入输出的
-     * 正则逻辑，留在本类里只会让「这条短信为什么没出码」更难查。
-     */
-    private String resolveCode(String clientCode, String content) {
-        if (clientCode != null && !clientCode.isBlank()) {
-            return clientCode.trim();
-        }
-        return CodeExtractor.extract(content);
     }
 
     private String escapeJson(String value) {

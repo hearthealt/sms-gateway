@@ -473,11 +473,10 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 ```json
 {
   "deviceId": "a1b2c3d4e5f6",
-  "localMessageId": "msg-1758096000000-1",
+  "localMessageId": "sms-1758096000000-1-3187294506",
   "phone": "13800138000",
   "sender": "10690329012345",
   "content": "【某某】您的验证码是 483920，5 分钟内有效。",
-  "code": "483920",
   "receiveTime": 1758096000000
 }
 ```
@@ -486,6 +485,18 @@ curl -H "Authorization: Bearer sk-xxxxxxxx" \
 { "code": 200, "message": "success",
   "data": { "messageId": 1024, "duplicate": false, "status": "RECEIVED", "smsCode": "483920" } }
 ```
+
+> **`code` 字段已废弃。** 请求体里仍然接受它（旧版本 App 会送），但**服务端一律不采用**——
+> 验证码一律由服务端从 `content` 里提取（`CodeExtractor`），认码只留这一处，
+> 规则改一次全设备生效、不必等设备端发版。响应里的 `smsCode` 就是提取结果。
+>
+> 之所以不再信任设备端的值：它那套规则既认不出字母数字码（`4a6e9w` 直接丢），
+> 又会把订单号/流水号当成验证码（「您的验证码已发送，流水号 999999」会给出 `999999`）。
+> 而错码会被写进 `sms:code:{号码}` 并推给等待方——等验证码的调用方拿到的是**错的**，
+> 比超时更难查。
+>
+> `localMessageId` 由设备端生成、对服务端**不透明**（只做 `(device_id, local_message_id)` 等值比较），
+> 但长度上限 128。当前设备端格式是 `sms-{收到时刻}-{卡槽}-{正文哈希}`。
 
 去重是双保险：`(device_id, local_message_id)` 唯一键 + `source_hash`（正文 SHA-256）唯一键。重复上报返回 `message: "duplicate"`，`duplicate: true`。
 
