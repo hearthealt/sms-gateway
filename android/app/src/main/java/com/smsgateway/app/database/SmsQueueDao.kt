@@ -27,6 +27,20 @@ interface SmsQueueDao {
     @Query("SELECT * FROM sms_queue WHERE status = 'pending' AND (nextRetryAt = 0 OR nextRetryAt <= :currentTimeMillis) ORDER BY receiveTime ASC")
     suspend fun getPendingSms(currentTimeMillis: Long): List<SmsQueueEntity>
 
+    /**
+     * 还没上传的行数，**不管到没到重试时刻**。
+     *
+     * 用来区分「队列真的空了」和「有短信但都还在退避里等」—— 上传 worker 对前者
+     * 该以 success 收场（整条工作链结束），对后者必须 retry（让 WorkManager 按自己的
+     * 节奏回来）。两者原先都走 success，第三轮回访时就静默断链了。
+     *
+     * **不能用 [getOutstandingCountSync] 代替**：那个把 failed 也算进来，而 failed 是
+     * 永远查不出来的终态行 —— 拿它做重试判据，一台有一条失败短信的设备会永远 retry
+     * 下去，纯烧电。
+     */
+    @Query("SELECT COUNT(*) FROM sms_queue WHERE status = 'pending'")
+    suspend fun countPending(): Int
+
     /** 还没传上去的行（pending 待重试 + failed 终态），供队列页展示。 */
     @Query("SELECT * FROM sms_queue WHERE status != 'uploaded' ORDER BY receiveTime DESC")
     suspend fun getOutstanding(): List<SmsQueueEntity>
@@ -59,8 +73,18 @@ interface SmsQueueDao {
     /**
      * 给注册前入库的行补上真实身份。
      *
-     * 这些行是设备尚未注册时以空串 deviceId/phone 落库的。不补的话即使注册成功也传不上去：
-     * 服务端 deviceId 解析不到设备、phone 为空（列 NOT NULL）都会直接 400。
+     * 这些行是设备尚未注册时以空串 deviceId/phone 落库的。
+     *
+     * 关于 phone：**它不是「不补就传不上去」的原因**。这段注释原先写着「phone 为空
+     * （列 NOT NULL）会直接 400」，与后端实现不符 —— SmsReceiveRequest 对 phone 只校验
+     * 长度、没有 @NotBlank，SmsService 还会把 null 归一成空串，所以 phone 为空照样能入库。
+     * 补它的实际收益是让服务端能写 `sms:code:{号码}` 缓存：号码为空时那份缓存被跳过，
+     * 按号码等验证码的调用方会一直等到超时，而设备侧记的却是「上传成功」。
+     * （见 SmsReceiver.reportMissingPhoneOnce 与 EventLog.SMS_NO_PHONE。）
+     *
+     * 关于 deviceId：上传时实际用的是 prefs 里的设备标识
+     * （SmsUploadWorker 里 `DevicePrefs.deviceId(...).ifBlank { sms.deviceId }`），
+     * 所以这一项主要服务于界面展示与未注册期的兜底。
      */
     @Query("UPDATE sms_queue SET deviceId = :deviceId, phone = :phone WHERE status = 'pending' AND deviceId = ''")
     suspend fun backfillIdentity(deviceId: String, phone: String): Int

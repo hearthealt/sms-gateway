@@ -7,6 +7,7 @@ import com.smsgateway.app.network.NetworkWatch
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +23,18 @@ class SmsGatewayApp : Application() {
         super.onCreate()
         instance = this
         database = AppDatabase.getInstance(this)
+
+        // 进程启动留痕。放在最前面（DB 刚就绪、其余初始化还没跑）：
+        // 万一后面的初始化抛异常，这一条也已经在写队列里了 —— 而「进程起来了但没初始化完」
+        // 正是最需要看见的情况。
+        //
+        // 不节流，每次冷启动都记一条：进程被系统反复拉起来（WorkManager、短信广播）
+        // 本身就是重要信号，压掉它等于把「这台机器一直在被唤醒」这件事藏起来。
+        // 与「网关启动」区分：只看到这一条 = 进程起来了但网关没起。
+        EventLog.write(
+            this, EventLog.APP_STARTED, EventLog.LEVEL_INFO,
+            reason = "进程启动"
+        )
 
         // 进程也可能由 WorkManager 或广播接收器拉起，那时 DashboardViewModel 不会被创建，
         // 必须在这里按已保存的配置把网络客户端与设备状态装配好。

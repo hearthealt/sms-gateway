@@ -194,6 +194,29 @@ object DevicePhone {
     }
 
     /**
+     * 这个值是不是一台**真实存在**的卡的 subId。
+     *
+     * 广播里那个 `subscription` extra 没有公开 API 定义（见 SmsReceiver 的说明），
+     * 历史 ROM 往里放的是卡槽号（0/1）之类的别的值。拿一个不是 subId 的数字去查
+     * SubscriptionManager，轻则查不到，重则**恰好撞上另一张卡的 subId** ——
+     * 那条短信就会被标成另一张卡的号码，而服务端是按号码缓存验证码的。
+     *
+     * 查询失败一律返回 false：调用方在 false 时的行为是「留空」，
+     * 那是延迟；标错号码是错答案，更难查。
+     */
+    fun isKnownSubscription(context: Context, subscriptionId: Int): Boolean {
+        if (subscriptionId < 0) return false
+        return try {
+            val manager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+                as? SubscriptionManager ?: return false
+            manager.activeSubscriptionInfoList?.any { it.subscriptionId == subscriptionId } == true
+        } catch (e: Exception) {
+            Log.w(TAG, "isKnownSubscription: 查卡列表失败", e)
+            false
+        }
+    }
+
+    /**
      * 读号码：三条路依次试，取第一个非空的。
      *
      * 为什么要三条：同一个号码在不同 ROM / 运营商组合下，能被读出来的那条路并不一样，

@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.smsgateway.app.MainActivity
 import com.smsgateway.app.R
+import com.smsgateway.app.database.AppDatabase
 import com.smsgateway.app.util.DevicePrefs
 import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.EventLog
@@ -40,6 +41,15 @@ class GatewayForegroundService : Service() {
          * 多删几次只是白耗电，而少删几次也不会让表涨到哪去。
          */
         private const val EVENT_LOG_PRUNE_INTERVAL_MS = 60 * 60 * 1000L
+
+        /**
+         * 周期补传的间隔。
+         *
+         * 5 分钟只是「把断掉的重试链重新点起来」的节奏 —— 秒级的短暂抖动由上传 worker
+         * 自己的退避兜住，不必靠这个周期。取 5 分钟是因为它是这台设备上**唯一**会定期
+         * 醒来的路径：一个没有新短信的网关，队列里卡住的那条验证码不会自己好。
+         */
+        private const val UPLOAD_FLUSH_INTERVAL_MS = 5 * 60 * 1000L
 
         /**
          * 当前活着的服务实例，用来把运行态绑定到**实例**而不是某个回调。
@@ -143,6 +153,13 @@ class GatewayForegroundService : Service() {
         liveInstance = this
         GatewayState.set(this, true)
 
+        // 应用每次打开的对账补发也会走到这里（见 DashboardViewModel.ensureGatewayServiceRunning），
+        // 而 onCreate 只在实例**首次**创建时执行 —— 少了这一行，服务已经在跑时「打开应用」
+        // 对积压队列等于什么都没做。人在现场的那一刻值得换来一次立刻重试，
+        // 不该让卡住的那条验证码干等下一个 5 分钟周期。
+        // 未注册 / 被禁用时本 worker 会立刻自行收场，不会真的发请求。
+        SmsUploadWorker.enqueue(this)
+
         // 幂等：重复 start 时不要叠加第二个心跳循环；onCreate 已经起过一个了，
         // 这里只是兜底（例如服务对象被复用、或循环已因异常退出）。
         if (heartbeatJob?.isActive != true) {
@@ -156,6 +173,9 @@ class GatewayForegroundService : Service() {
 
     /** 上次剪枝事件日志的时刻（进程内即可 —— 重启后多剪一次没有任何副作用）。 */
     private var lastEventLogPruneAt = 0L
+
+    /** 上次把滞留短信重新排给 WorkManager 的时刻（进程内即可）。 */
+    private var lastUploadFlushAt = 0L
 
     /**
      * 事件日志的过期清理。
@@ -174,6 +194,40 @@ class GatewayForegroundService : Service() {
         if (removed > 0) {
             Log.i(TAG, "Pruned $removed event log rows older than ${EventLog.RETENTION_DAYS} days")
         }
+    }
+
+    /**
+     * 把滞留在队列里的短信重新排给 WorkManager。
+     *
+     * 这是本应用**唯一**定期把上传重试链点起来的地方。在此之前，排上传的六处调用点
+     * 全是事件驱动的（新短信、服务启动、被禁用→启用、注册成功、用户手点重试、
+     * 一次性 sweep），一个周期性的都没有 —— 于是无人值守设备最典型的现场恰恰无解：
+     * 没有新短信，卡在退避里那条验证码就一直躺着，直到有人重启网关。
+     *
+     * 队列空就什么都不做。心跳 30 秒一轮，无条件 enqueue 会用 `REPLACE` 把上一轮
+     * 还在跑的 worker 取消重来，纯白耗电。
+     */
+    private suspend fun flushPendingUploadsIfDue() {
+        val now = System.currentTimeMillis()
+        if (now - lastUploadFlushAt < UPLOAD_FLUSH_INTERVAL_MS) return
+
+        // 传了也白传的三种状态先挡掉，与上传 worker 里的判断同源：
+        // 未注册、被禁用都不该在这儿点火；网关没在跑更不用说 —— 这个函数本来就
+        // 跑在服务的协程里，能走到这儿说明网关是活的。
+        if (!DevicePrefs.isRegistered(this)) return
+        if (DeviceStatus.isDisabled(this)) return
+
+        lastUploadFlushAt = now
+
+        val dao = AppDatabase.getInstance(this).smsQueueDao()
+        // 只数 pending，理由见 SmsQueueDao.countPending 的说明。
+        if (dao.countPending() == 0) return
+
+        Log.i(TAG, "Re-arming upload worker for stranded SMS")
+        // enqueueIfIdle 而不是 enqueue：补传只在重试链已经断了的时候才该点火。
+        // 用 REPLACE 会把正在跑的那一轮取消掉，并把 runAttemptCount 归零 ——
+        // 那会让「重试到上限就收手」的守卫永远到不了，见 SmsUploadWorker.enqueueIfIdle。
+        SmsUploadWorker.enqueueIfIdle(this)
     }
 
     private fun buildNotification(status: String): Notification {
@@ -198,15 +252,21 @@ class GatewayForegroundService : Service() {
             // 循环一旦退出，服务还活着、通知还挂着、运行态还是 true，而**再没有任何人
             // 发心跳** —— 后端判离线，界面却显示「已启动」，现场只会以为是对面服务器的问题。
             // 这类「活着的空壳」比服务直接挂掉更难查，所以宁可把异常吞在这一轮里。
-            try {
+            val heartbeatOk = try {
                 // 心跳实现与状态判定都在 HeartbeatSender 里，界面上的「检查状态」按钮走同一份逻辑
                 HeartbeatSender.send(this@GatewayForegroundService)
                 updateNotification(notificationText())
+                true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Heartbeat round failed", e)
+                false
             }
+
+            // 心跳都不通就别再让上传去撞同一堵墙了 —— 那只是把失败次数和耗电翻倍，
+            // 换不来任何成功的机会。下一轮（30 秒后）会重新判断。
+            if (heartbeatOk) flushPendingUploadsIfDue()
 
             pruneEventLogIfDue()
 

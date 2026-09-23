@@ -61,7 +61,14 @@ object EventLog {
     /** 广播收到了，但正文没命中采集关键词，按设计丢弃。 */
     const val SMS_FILTERED = "sms_filtered"
 
-    /** 广播收到了、关键词命中了，但解析不出验证码，按设计丢弃。 */
+    /**
+     * 广播收到了、关键词命中了，但解析不出验证码，按设计丢弃。
+     *
+     * **已不再写入**（2026-09-23）：客户端不再解析验证码，「认不出来就丢」这道闸门
+     * 已经拆掉——关键在于它曾是最贵的一条丢失路径（服务端根本看不到那条短信）。
+     * 常量与下面的中文标签保留着，只因为升级前入库的旧行还带着这个 type，
+     * 删掉的话日志页会显示原始英文常量名。
+     */
     const val SMS_NO_CODE = "sms_no_code"
 
     /** 已入库，等待上传。**这是正常路径的锚点。** */
@@ -75,6 +82,19 @@ object EventLog {
 
     /** 已入库，但按当前策略不上传（未注册 / 被禁用 / 网关已停止）。不是丢失。 */
     const val SMS_HELD = "sms_held"
+
+    /**
+     * 短信能正常上传，但**读不到收信的那张卡的号码**。
+     *
+     * 这不是上传失败 —— 服务端收得下（phone 允许为空），只是会跳过写
+     * `sms:code:{号码}` 验证码缓存，于是按号码等码的调用方**永远等不到**，
+     * 而设备侧记的是「上传成功」、队列里那行也正常消失。三处都没有异常信号，
+     * 这条事件是唯一把它变成可见的地方。
+     *
+     * 进程内只记一条（见 SmsReceiver）：号码没配的设备每一条短信都会命中，
+     * 逐条记会把 7 天的事件表刷成同一条。
+     */
+    const val SMS_NO_PHONE = "sms_no_phone"
 
     // ── 上传 ────────────────────────────────────────────────────────────────
 
@@ -111,6 +131,21 @@ object EventLog {
 
     // ── 网关服务 ────────────────────────────────────────────────────────────
 
+    /**
+     * 进程启动。**每次冷启动一条**，写在 `Application.onCreate`。
+     *
+     * 与 [GATEWAY_STARTED] 是两件事，合起来才能回答「这台机器刚才到底发生了什么」：
+     *
+     * - 只有 [APP_STARTED]：有人打开了应用（或系统为了一条广播把进程拉起来），而网关没起
+     * - 只有 [GATEWAY_STARTED]：服务被系统重建（START_STICKY / 开机），进程是它带起来的
+     * - 两条紧挨着：用户点了启动，或开机自启正常
+     * - 两条都没有，但队列在动：进程一直活着，没重启过
+     *
+     * 排查「网关莫名其妙停了」时，这一条是唯一能把「被系统杀了」和「压根没起来」
+     * 分开的证据 —— 前者会看到一串 APP_STARTED，后者一条都没有。
+     */
+    const val APP_STARTED = "app_started"
+
     const val GATEWAY_STARTED = "gateway_started"
     const val GATEWAY_STOPPED = "gateway_stopped"
 
@@ -131,6 +166,7 @@ object EventLog {
         SMS_DUPLICATE -> "重复短信"
         SMS_ENQUEUE_FAILED -> "入库失败"
         SMS_HELD -> "暂不上传"
+        SMS_NO_PHONE -> "号码未知"
         UPLOAD_OK -> "上传成功"
         UPLOAD_RETRYING -> "上传失败"
         UPLOAD_REJECTED -> "被服务端拒绝"
@@ -144,6 +180,7 @@ object EventLog {
         DEVICE_ENABLED -> "已恢复启用"
         HEARTBEAT_FAILED -> "心跳中断"
         HEARTBEAT_RECOVERED -> "心跳恢复"
+        APP_STARTED -> "进程启动"
         GATEWAY_STARTED -> "网关启动"
         GATEWAY_STOPPED -> "网关停止"
         GATEWAY_DESTROYED -> "网关被系统销毁"

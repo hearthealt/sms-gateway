@@ -653,10 +653,19 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         val app = getApplication<Application>()
         val normalized = raw.trim()
 
-        // 文本没变就沿用原有的来源卡信息：用户从 SIM 卡读完之后顺手点一下「保存手机号」，
+        // 号码没变就沿用原有的来源卡信息：用户从 SIM 卡读完之后顺手点一下「保存手机号」，
         // 不该把「这个号码来自哪张卡」抹掉 —— 抹掉之后多卡时又无法判断归属性了。
+        //
+        // 比的是**号码**而不是字符串：用户把 `13800138000` 补成 `+8613800138000` 时
+        // 字符串不等，但那是同一个号。按字符串比会在这里把 subId 无声抹成 -1，
+        // 而 -1 会让 SmsReceiver 里的 fromDifferentSim 从此恒为 false，
+        // 副卡收到的验证码全被标成主卡的号码。
         val effectiveSubId =
-            if (normalized == DevicePrefs.phone(app)) DevicePrefs.phoneSubId(app) else subId
+            if (DevicePhone.sameNumber(normalized, DevicePrefs.phone(app))) {
+                DevicePrefs.phoneSubId(app)
+            } else {
+                subId
+            }
 
         DevicePrefs.setPhone(app, normalized, effectiveSubId)
         _state.update { it.copy(phone = normalized) }

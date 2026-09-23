@@ -32,13 +32,32 @@ class SmsUploadWorker(
         private const val TAG = "SmsUploadWorker"
         private const val WORK_NAME = "sms_upload"
 
-        /** 单轮工作的最大尝试次数，超过就收手，不让 WorkManager 无限重试下去。 */
-        private const val MAX_ATTEMPTS = 5
+        /**
+         * 单轮工作的最大尝试次数，超过就收手，不让 WorkManager 无限重试下去。
+         *
+         * 8 次：WorkManager 的退避是 10s 起翻倍，第 8 次约 21 分钟，正好覆盖行内退避
+         * 15 分钟的封顶 —— 否则「有行但都还没到点」会一直 retry 到收手，白白多跑几轮
+         * （每一轮只花一次 COUNT，但仍是一次进程唤醒）。
+         */
+        private const val MAX_ATTEMPTS = 8
 
         /** 已上传的行在本地保留多久。到期由 [pruneOldUploads] 清掉。 */
         private const val UPLOADED_RETENTION_DAYS = 7L
 
-        fun enqueue(context: Context) {
+        fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.REPLACE)
+
+        /**
+         * 只在**没有**在跑或在排的任务时才排一次。
+         *
+         * 周期补传用这个而不是 [enqueue]：`REPLACE` 会取消正在跑的那一轮（半程上传白做，
+         * 靠服务端幂等才不丢），而且重建任务链会把 `runAttemptCount` 归零 ——
+         * 「不让 WorkManager 无限重试下去」那条收手守卫于是**在网关运行期间永远到不了**，
+         * 一条必然失败的行会每 5 分钟被真发一次请求，与那段注释的承诺正好相反。
+         * `KEEP` 则只在链条已经结束（跑完/放弃）时才重新点火，正是补传要的语义。
+         */
+        fun enqueueIfIdle(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)
+
+        private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
@@ -54,11 +73,7 @@ class SmsUploadWorker(
                 .build()
 
             WorkManager.getInstance(context)
-                .enqueueUniqueWork(
-                    WORK_NAME,
-                    ExistingWorkPolicy.REPLACE,
-                    workRequest
-                )
+                .enqueueUniqueWork(WORK_NAME, policy, workRequest)
         }
     }
 
@@ -126,9 +141,32 @@ class SmsUploadWorker(
 
             try {
                 val dao = AppDatabase.getInstance(context).smsQueueDao()
+
+                // 剪枝放在判空**之前**。原先挂在下面，于是「没到点就提前回来」的那一轮
+                // 会把剪枝一起跳过 —— 一台长期只在重试失败、没有新短信的设备，
+                // 已上传的行与过期事件就再也不会被清掉。
+                pruneOldUploads(dao)
+                EventLog.prune(context)
+
                 val pendingSms = dao.getPendingSms(System.currentTimeMillis())
 
                 if (pendingSms.isEmpty()) {
+                    // 「队列空了」和「有短信但都还没到重试时刻」是两件完全不同的事，
+                    // 原先都走 success —— 而这一支正是重试链静默断裂的地方。
+                    //
+                    // WorkManager 的退避是 10s 起翻倍（回到 T0+10、T0+30、T0+70…），
+                    // 行内退避是 10/30/60/300/900s 的**绝对截止时刻**。第三轮回访
+                    // （T0+30）必然早于行内的第二个截止（T0+40），于是 getPendingSms
+                    // 返回空 —— 到这里以 success 收场，整条重试链结束，行还躺在库里
+                    // pending，再没有人会来传它。而 runAttemptCount 才 2 < MAX_ATTEMPTS，
+                    // 连下面那条「本轮放弃」都跑不到，事件表里一条痕迹都没有。
+                    //
+                    // 有行、只是还没到点，就交给 WorkManager 继续回来：它才是唯一的
+                    // 调度者，nextRetryAt 只负责**否决**某一次运行，不负责决定何时跑。
+                    if (dao.countPending() > 0) {
+                        Log.i(TAG, "Nothing due yet but queue is not empty, asking WorkManager to come back")
+                        return@withContext Result.retry()
+                    }
                     Log.d(TAG, "No pending SMS to upload")
                     return@withContext Result.success()
                 }
@@ -222,13 +260,6 @@ class SmsUploadWorker(
                     }
                 }
 
-                pruneOldUploads(dao)
-
-                // 事件日志的剪枝挂在同一个落点上，理由与 pruneOldUploads 相同：
-                // 这里是唯一「有短信就会跑起来」的周期路径。网关心跳循环里另有一处，
-                // 两者互为兜底（长期不收短信的机器由心跳那边负责清）。
-                EventLog.prune(context)
-
                 when {
                     allSuccess -> Result.success()
 
@@ -291,7 +322,6 @@ class SmsUploadWorker(
                 phone = sms.phone,
                 sender = sms.sender,
                 content = sms.content,
-                code = sms.code,
                 receiveTime = sms.receiveTime.toString()
             )
             val idempotencyKey = "$deviceId:${sms.localMessageId}"
