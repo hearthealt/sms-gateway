@@ -6,18 +6,15 @@ import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material3.CircularProgressIndicator
@@ -27,39 +24,35 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
-import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppScreen
 import com.smsgateway.app.ui.components.EmptyState
+import com.smsgateway.app.ui.components.InlineNotice
+import com.smsgateway.app.ui.components.NoticeType
 import com.smsgateway.app.ui.components.RefreshableFill
+import com.smsgateway.app.ui.components.RefreshableScreen
 import com.smsgateway.app.ui.components.ServerSmsRow
 import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
-import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.util.UploadEvents
 import kotlinx.coroutines.launch
 
@@ -73,13 +66,12 @@ import kotlinx.coroutines.launch
 fun ServerSmsScreen(
     state: DashboardState,
     viewModel: DashboardViewModel,
+    snackbarHostState: SnackbarHostState,
     onBack: () -> Unit
 ) {
-    val pullState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
 
     // 滚到底就续下一页。不摆「加载更多」按钮：那种按钮在列表末尾，而要看更多
     // 恰恰是在滚到末尾的时候 —— 让「继续滚」本身把它带回来，比多一次点击顺
@@ -145,20 +137,6 @@ fun ServerSmsScreen(
         }
     }
 
-    // 这一页的数据在服务端，下拉刷新是它唯一的「我要最新」入口，
-    // 所以要等请求真的回来再收手（见 loadServerSmsNow）。
-    LaunchedEffect(pullState.isRefreshing) {
-        if (pullState.isRefreshing) {
-            // finally 收尾：现在两个加载函数内部把异常全收口了，走不到 else 分支，
-            // 但那是它们的实现细节 —— 将来谁让它们抛异常，指示器就再也收不回来
-            try {
-                viewModel.loadServerSmsNow()
-            } finally {
-                pullState.endRefresh()
-            }
-        }
-    }
-
     // 原先这里还有一个「复制今日验证码」（整页的码一次拿走）。删掉了：
     // 一格点一下复制眼前这条才是常态，而顶栏那个看不出范围的图标只会让人
     // 以为点下去是复制眼前这条 —— 结果拿到几十条。见 ServerSmsRow 里的单条复制。
@@ -179,15 +157,13 @@ fun ServerSmsScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .nestedScroll(pullState.nestedScrollConnection)
-        ) {
+        RefreshableScreen(
+            onRefresh = { viewModel.loadServerSmsNow() },
+            modifier = Modifier.padding(padding)
+        ) { pullState ->
             when {
                 // 「一次都没读完过」才整页转圈。复访时 smsRecords 非空，转圈会把它闪没 ——
-                // 而那种情况下用户看到的「什么都没发生」正是「以为没在刷新」的由来（见下面的细进度条）。
+                // 而那种情况下用户看到的「什么都没发生」正是「以为没在刷新」的由来。
                 state.smsLoading && !state.smsLoaded -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
@@ -213,20 +189,20 @@ fun ServerSmsScreen(
                     EmptyState(
                         icon = Icons.Default.Sms,
                         title = "服务端还没有记录",
-                        description = "本机上传成功的短信会出现在这里",
-                        actionLabel = "返回主页",
-                        onAction = onBack
+                        // 不挂「返回主页」按钮：左上角的返回键是同一个动作，
+                        // 而空状态里摆一个实心大按钮会变成整页最显眼的元素。
+                        description = "本机上传成功的短信会出现在这里"
                     )
                 }
 
                 else -> LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(AppSpacing.md),
+                    contentPadding = PaddingValues(AppSpacing.gutter),
                     verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
-                    item {
-                        ListHeader(error = state.smsError)
+                    state.smsError?.let { error ->
+                        item { RefreshFailedNotice(error = error, onRetry = { viewModel.loadServerSms() }) }
                     }
 
                     itemsIndexed(
@@ -268,30 +244,28 @@ fun ServerSmsScreen(
                         .align(Alignment.TopCenter)
                 )
             }
-
-            PullToRefreshContainer(
-                state = pullState,
-                modifier = Modifier.align(Alignment.TopCenter)
-            )
         }
     }
 }
 
 /**
- * 列表顶部一行：刷新失败的原因（有的话）+ 总数。
+ * 列表顶部一行：刷新失败的原因 + 一个就地重试的入口。
  *
- * 条数已经挪到顶栏标题右边（见 AppScreen 的 subtitle）—— 同一个数字摆两处，
- * 一处在滚动区里会跟着滚走，不如只在头部说一次。这里只剩失败提示。
+ * 原先这里只是一行红色小字。它太弱有两个后果：一是**看不见**（列表内容一多就淹没在
+ * 卡片之间），二是**没有下一步**（用户知道失败了，但只能退出去再进来，或者猜着再去点
+ * 顶栏那个刷新）。所以换成 [InlineNotice]：有色块、有图标，右边直接给「重试」。
+ *
+ * 它不是「整页报错」的替代品 —— 一条记录都没有时走的是 EmptyState 那条路。
+ * 这里是「已经有内容、只是这次没刷上」的降级表达。
  */
 @Composable
-private fun ListHeader(error: String?) {
-    if (error == null) return
-
-    Text(
-        text = "刷新失败：$error —— 下面是上次读到的记录。",
-        style = AppTypography.caption,
-        color = AppColor.Danger,
-        modifier = Modifier.fillMaxWidth()
+private fun RefreshFailedNotice(error: String, onRetry: () -> Unit) {
+    InlineNotice(
+        text = "刷新失败：$error\n下面是上次读到的记录。",
+        type = NoticeType.Danger,
+        action = {
+            TextButton(onClick = onRetry) { androidx.compose.material3.Text("重试") }
+        }
     )
 }
 

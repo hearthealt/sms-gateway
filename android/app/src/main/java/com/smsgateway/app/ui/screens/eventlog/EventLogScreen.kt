@@ -10,14 +10,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
-import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -26,13 +27,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppScreen
 import com.smsgateway.app.ui.components.EmptyState
 import com.smsgateway.app.ui.components.EventLogRow
 import com.smsgateway.app.ui.components.RefreshableFill
+import com.smsgateway.app.ui.components.RefreshableScreen
 import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
@@ -57,28 +58,12 @@ import com.smsgateway.app.util.EventLog
 fun EventLogScreen(
     state: DashboardState,
     viewModel: DashboardViewModel,
+    snackbarHostState: SnackbarHostState,
     onBack: () -> Unit
 ) {
-    // 下拉刷新。写法与队列页**逐行一致**（见 QueueScreen）——同一套手势在两个页面
-    // 用不同的实现，迟早会在某一次改动里只修好一边。
-    val pullState = rememberPullToRefreshState()
-
     // 进页面自己读一次 —— 与队列页同一个约定：页面自己知道该加载什么，
     // 不靠 MainActivity 的导航回调代劳。
     LaunchedEffect(Unit) { viewModel.refreshEventLogNow() }
-
-    // 松手后 isRefreshing 置位，等这次读库真的结束再收手。
-    // finally 收尾：转圈收不回来是比「刷新失败」更难查的那种毛病 ——
-    // 屏幕上没有任何一处提示，只有一个永远转的圈。
-    LaunchedEffect(pullState.isRefreshing) {
-        if (pullState.isRefreshing) {
-            try {
-                viewModel.refreshEventLogNow()
-            } finally {
-                pullState.endRefresh()
-            }
-        }
-    }
 
     AppScreen(
         title = "重要日志",
@@ -97,13 +82,12 @@ fun EventLogScreen(
             ) {
                 Icon(Icons.Default.Refresh, "刷新", tint = AppColor.onBrand)
             }
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .nestedScroll(pullState.nestedScrollConnection)
+        RefreshableScreen(
+            onRefresh = { viewModel.refreshEventLogNow() },
+            modifier = Modifier.padding(padding)
         ) {
             when {
                 // 首次加载还没回来。与刷新区分开：复访时列表已有内容，
@@ -118,7 +102,10 @@ fun EventLogScreen(
                 // （见 RefreshableFill）。与队列页同一个写法。
                 state.eventLog.isEmpty() -> RefreshableFill {
                     EmptyState(
-                        icon = Icons.Default.Refresh,
+                        // 不用 Refresh 图标：那个图形和右上角那个「刷新」按钮一模一样，
+                        // 摆在这一页正中看起来就像「这里有个按钮」，而它不可点。
+                        // 这一页要表达的是「回看发生过什么」，用时钟/历史这一类意象。
+                        icon = Icons.Default.History,
                         title = "还没有日志",
                         // 采集、上传、设备状态三类说全，天数照旧 —— 剩下的话由设置页那句
                         // 「什么时候该看这里」负责，两处不重复。
@@ -129,7 +116,7 @@ fun EventLogScreen(
 
                 else -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(AppSpacing.md),
+                    contentPadding = PaddingValues(AppSpacing.gutter),
                     verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
                     itemsIndexed(state.eventLog, key = { _, row -> row.id }) { index, row ->
@@ -160,11 +147,6 @@ fun EventLogScreen(
                     }
                 }
             }
-
-            PullToRefreshContainer(
-                state = pullState,
-                modifier = Modifier.align(Alignment.TopCenter)
-            )
         }
     }
 }

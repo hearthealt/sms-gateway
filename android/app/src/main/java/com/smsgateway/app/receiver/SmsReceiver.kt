@@ -207,8 +207,10 @@ class SmsReceiver : BroadcastReceiver() {
 
                 // 3. Generate unique local message ID
                 // 格式与理由见 LocalMessageId：老格式的低 16 位截断会让「同一号码在同一秒
-                // 发来的两条不同正文」撞成同一条，第二条被静默丢弃并记成「重复短信」。
-                val localMessageId = LocalMessageId.build(receiveTime, subscriptionId, fullBody)
+                // 发来的两条不同正文」撞成同一条，第二条被静默丢弃并记成「重复短信」；
+                // 而「同一张卡、同一秒、正文相同、发送方不同」那一维此前根本没进键里。
+                val localMessageId =
+                    LocalMessageId.build(receiveTime, subscriptionId, fullBody, sender)
 
                 // 4. Enqueue to Room database
                 // deviceId 取本机已注册的信息；未注册时为空串，注册成功后
@@ -335,10 +337,16 @@ class SmsReceiver : BroadcastReceiver() {
             //
             // 「查不到卡列表」必须和「只有一张卡」分开：未授权、或 ROM 挡掉卡列表时，
             // querySlots 会返回空列表或退化成一个「默认卡」，两者 size 都 <= 1，
-            // 只看 size 会把守不住的回落又放回来。所以要看 problem。
-            val slots = DevicePhone.querySlots(context)
-            val singleSim = slots.problem == null && slots.slots.size <= 1
-            return if (singleSim) DevicePrefs.phone(context) else ""
+            // 只看 size 会把守不住的回落又放回来。判据本身收在 DevicePhone.isSingleSim 里
+            // —— 它在拿不到卡列表时会退回「卡槽数」，那是个不需要电话权限的事实。
+            //
+            // 退回卡槽数救的是原先最冤的一批设备：单卡机 + 用户拒了电话权限。
+            // 那时 isKnownSubscription 恒为 false，subId 恒为 -1，querySlots 带着
+            // 「未授予电话权限」的 problem 回来，于是 singleSim 恒为 false、
+            // 这个函数恒返回空串 —— 用户手填的号码永远用不上，每条验证码都以
+            // phone="" 上传，服务端跳过 sms:code:{号码} 缓存，按号码等码的调用方全部超时，
+            // 而设备侧显示的却是「上传成功」。
+            return if (DevicePhone.isSingleSim(context)) DevicePrefs.phone(context) else ""
         }
 
         // 知道来自哪张卡、但卡里没写号码（多数运营商如此，是常态）。

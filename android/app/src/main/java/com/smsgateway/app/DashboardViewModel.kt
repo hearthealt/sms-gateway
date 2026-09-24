@@ -35,12 +35,45 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** 自检结果的一项。 */
-data class SelfTestItem(val label: String, val ok: Boolean, val detail: String)
+/**
+ * 自检未通过时，用户下一步能去哪儿。
+ *
+ * 收成一个枚举而不是让界面按 label 猜：label 是给人看的中文，改一个字就会让
+ * 「去开启」按钮悄悄失效（when 落到 else 分支、什么都不做），而这类失效
+ * 只有在真机上恰好点中那一项时才发现。
+ *
+ * 与 [SelfTestAction] 配对的按钮文案也放在这里 —— 按钮上写什么由「去哪儿」决定，
+ * 不由界面各写一份。
+ */
+enum class SelfTestAction(val label: String) {
+    /** 应用详情页：权限、通知开关都在那里。 */
+    OPEN_APP_SETTINGS("去开启"),
+
+    /** 电池优化白名单。它在系统设置的另一处，应用详情页里没有。 */
+    OPEN_BATTERY_SETTINGS("去设置"),
+
+    /** 扫码连接：未注册时唯一该做的事。 */
+    OPEN_QUICK_CONNECT("去连接")
+}
+
+/**
+ * 自检结果的一项。
+ *
+ * @param action 未通过时的下一步动作；null 表示这一项没有能直达的地方
+ *   （服务器连通、令牌有效这两项只能重跑自检）。
+ */
+data class SelfTestItem(
+    val label: String,
+    val ok: Boolean,
+    val detail: String,
+    val action: SelfTestAction? = null
+)
 
 /**
  * 「快速连接」进行到哪一步。null 表示没有进行中的连接。
@@ -147,7 +180,14 @@ data class DashboardState(
 
     // 队列页（本地未上传的行）
     val queue: List<SmsQueueEntity> = emptyList(),
-    val queueLoading: Boolean = false,
+    /**
+     * 初值是 **true**，不是 false。
+     *
+     * 队列页在第一帧拿到的是一个空列表，此时还没人读过库 —— 若初值是 false，
+     * 页面会先闪一下「全部已上传」再换成真实内容。而那句话是这一页最不该说错的：
+     * 它的意思是「积压已经清空」。所以宁可先按「在读」处理。
+     */
+    val queueLoading: Boolean = true,
 
     /**
      * 重要日志页（本地事件记录，保留 7 天）。
@@ -274,6 +314,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private val connectInFlight = AtomicBoolean(false)
 
+    /**
+     * 服务端记录页的读请求串行闸门。
+     *
+     * 用 Mutex 而不是 AtomicBoolean：这里要的是「排队」，不是「拒绝第二个」——
+     * 一次下拉刷新撞上正在跑的翻页时，正确的结果是等前一个回来再发，
+     * 而不是把这**次**刷新丢掉（丢了就是转圈收不回来）。见 [loadServerSmsNow]。
+     */
+    private val serverSmsMutex = Mutex()
+
     private val database = AppDatabase.getInstance(application)
     private val prefs = DevicePrefs.get(application)
 
@@ -282,7 +331,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         restoreRetrofitConfig()
         tryAutoFillPhone()
         ensureGatewayServiceRunning()
-        startMonitoring()
+        observeQueue()
         observeService()
         observeUploads()
     }
@@ -509,34 +558,70 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         RetrofitClient.ensureConfigured(getApplication())
     }
 
-    private fun startMonitoring() {
+    /**
+     * 队列是**活的**，不是进页面时拍的快照。
+     *
+     * 原先队列页的数据来自 [refreshQueueNow] 那次读库，之后就一直留在 state 里 ——
+     * 页面上的那一行与库里的那一行于是会分叉。最贵的一次分叉是「立即重试」：
+     * 后台 worker 已经把这条传上去了，而页面上这一行还在，用户点重试把它改回 pending
+     * 又传一遍，服务端的 duplicate_count +1、管理端显示成「重复」。
+     * 光靠 DAO 里那条状态条件只能挡住「已上传」这一种，行被删掉、号码被补上、
+     * 重试次数变化一样看不见。订阅 Room 的 Flow 之后，库一动这些就都跟上了。
+     *
+     * 代价只有一次本地表的失效通知：Room 只在 sms_queue 真的被写时重新查询。
+     */
+    private fun observeQueue() {
         viewModelScope.launch {
-            var ticks = 0
-            while (isActive) {
-                refreshPendingCount()
-
-                // 今日统计则必须来自服务端：设备端的记录页展示的就是服务端数据，
-                // 本地库会因为「清理本地记录」、清除应用数据而与它不一致，
-                // 之前正是这样出现了「数字显示 0、点进去却有内容」。
-                // 每 6 个 tick（约 30 秒）拉一次即可，不必跟着 5 秒的本地轮询 ——
-                // 真正需要「立刻」的那种变化（刚传上去一条）走 UploadEvents，不靠这里。
-                if (ticks % 6 == 0) {
-                    refreshServerStats()
-
+            try {
+                database.smsQueueDao().observeOutstanding().collect { rows ->
+                    _state.update { it.copy(queue = rows) }
                 }
-                // 趋势图 5 分钟一次就够：按天/按小时聚合的数字，30 秒刷一遍没有新信息。
-                // 刚传上去一条时会单独刷一次（见 observeUploads），所以「今天 +1」也不会迟到。
-                //
-                // 但**一次都没拿到过**时降到 30 秒一次：那时主页摆的是「暂时读不到」的占位，
-                // 让它挂满 5 分钟太久了 —— 用户会当成新出的毛病。拿到数据后自动回到 5 分钟。
-                val trendMissing = _state.value.trend == null
-                if (ticks % TREND_REFRESH_TICKS == 0 || (trendMissing && ticks % 6 == 0)) {
-                    refreshTrend()
-                }
-                ticks++
-
-                delay(5_000L)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Observe queue failed", e)
             }
+        }
+    }
+
+    /**
+     * 轮询。**由界面驱动**（MainActivity 里用 repeatOnLifecycle(STARTED) 包着），
+     * 不是一个自己跑一辈子的循环。
+     *
+     * 原先这是 init 里起的一个 `while (isActive)`：ViewModel 是 Activity 级的，
+     * 按 Home 键、或在 Android 12+ 上按返回退回桌面时它都还活着，而前台服务让进程常驻 ——
+     * 于是一部被丢在后台的手机仍在每 5 秒查一次库、每 30 秒拉一次 mySmsStats，
+     * 与心跳完全重复。界面不可见时没有任何人在看这些数字。
+     *
+     * 它是 suspend 的、且可以被取消：取消（界面进入 STOP）时循环直接结束，
+     * 不需要任何清理 —— 这也是它比「加一个 enabled 标志」好的地方，
+     * 标志位的写法总有一处忘记复位。
+     */
+    suspend fun runPolling() {
+        var ticks = 0
+        while (currentCoroutineContext().isActive) {
+            refreshPendingCount()
+
+            // 今日统计则必须来自服务端：设备端的记录页展示的就是服务端数据，
+            // 本地库会因为「清理本地记录」、清除应用数据而与它不一致，
+            // 之前正是这样出现了「数字显示 0、点进去却有内容」。
+            // 每 6 个 tick（约 30 秒）拉一次即可，不必跟着 5 秒的本地轮询 ——
+            // 真正需要「立刻」的那种变化（刚传上去一条）走 UploadEvents，不靠这里。
+            if (ticks % 6 == 0) {
+                refreshServerStats()
+            }
+            // 趋势图 5 分钟一次就够：按天/按小时聚合的数字，30 秒刷一遍没有新信息。
+            // 刚传上去一条时会单独刷一次（见 observeUploads），所以「今天 +1」也不会迟到。
+            //
+            // 但**一次都没拿到过**时降到 30 秒一次：那时主页摆的是「暂时读不到」的占位，
+            // 让它挂满 5 分钟太久了 —— 用户会当成新出的毛病。拿到数据后自动回到 5 分钟。
+            val trendMissing = _state.value.trend == null
+            if (ticks % TREND_REFRESH_TICKS == 0 || (trendMissing && ticks % 6 == 0)) {
+                refreshTrend()
+            }
+            ticks++
+
+            delay(5_000L)
         }
     }
 
@@ -973,13 +1058,22 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** 手动重试单条：立刻可传并清零重试计数，然后唤醒 worker。 */
+    /**
+     * 手动重试单条：立刻可传并清零重试计数，然后唤醒 worker。
+     *
+     * 这里**不**再手动重读队列：界面已经订阅着这张表（见 [observeQueue]），
+     * 改完库界面自己就跟上了。手动重读在一次点击里会发出两次查询、写出两次 state。
+     */
     fun retrySms(id: Long) {
         viewModelScope.launch {
             try {
-                database.smsQueueDao().retryNow(id)
-                SmsUploadWorker.enqueue(getApplication())
-                refreshQueueNow()
+                // DAO 那边带 `AND status != 'uploaded'`：这一行如果在这几秒里已经被
+                // 后台传上去了，就什么都不该做（否则服务端会记一次重复）。
+                // 返回 0 行受影响就是那种情况，连 worker 都不必唤醒。
+                val changed = database.smsQueueDao().retryNow(id)
+                if (changed > 0) {
+                    SmsUploadWorker.enqueue(getApplication())
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Retry SMS $id failed", e)
             }
@@ -990,7 +1084,6 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 database.smsQueueDao().deleteById(id)
-                refreshQueueNow()
             } catch (e: Exception) {
                 Log.e(TAG, "Delete SMS $id failed", e)
             }
@@ -1095,8 +1188,19 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
      *
      * 失败就静默留着上一次的结果：这只是个提示，为它报错不值当 —— 真要测，点按钮
      * 那一下会给出准确得多的结论。
+     *
+     * **未注册时直接返回**，不发这个请求。理由不是省一次请求：这个接口要鉴权，
+     * 而未注册时请求根本不带 Authorization 头，服务端必然回 401 ——
+     * 401 会走到 [AuthState.markTokenRejected]，那条路会停掉网关、写一条
+     * `DEVICE_TOKEN_REJECTED` ERROR、并在界面上提示「服务端已不认这台设备，请重新注册」。
+     * 而实际情况只是「还没注册过」，是一句彻头彻尾的误报。
      */
     fun refreshNotifyChannels() {
+        val app = getApplication<Application>()
+        if (!DevicePrefs.isRegistered(app)) {
+            _state.update { if (it.notifyChannels == null) it else it.copy(notifyChannels = null) }
+            return
+        }
         viewModelScope.launch {
             try {
                 val response = RetrofitClient.getApiService().notifyChannels()
@@ -1198,8 +1302,39 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         loadServerSms()
     }
 
-    /** 挂起版本，理由同 [refreshQueueNow]：下拉刷新要等到这次请求真的回来。 */
+    /**
+     * 挂起版本，理由同 [refreshQueueNow]：下拉刷新要等到这次请求真的回来。
+     *
+     * 整个方法串行化。刷新第 1 页与「加载更多」是两种不同的写回（替换 / 追加），
+     * 两者并发时后回来的那个会把先回来的结果挤掉 —— 第 1 页替换掉已经追加好的第 2 页，
+     * 或者第 2 页接在一个已经被替换掉的基础后面。现场表现是列表**缺了中间几页**，
+     * 而翻页两次都能成功，看不出错了。
+     *
+     * 加锁而不是「已在加载就直接返回」：后者会让一次下拉刷新被静默丢掉，
+     * 用户看到的是转圈收不回来（或者干脆什么都没发生）。
+     */
     suspend fun loadServerSmsNow(page: Int = 1, append: Boolean = false) {
+        serverSmsMutex.withLock { loadServerSmsLocked(page, append) }
+    }
+
+    private suspend fun loadServerSmsLocked(page: Int, append: Boolean) {
+        // 未注册时不发。与 refreshNotifyChannels 同一个理由：请求不带 Authorization 头
+        // 必然 401，而那条 401 会把网关停掉并写一条「服务端已不认这台设备」的 ERROR ——
+        // 对一台还没注册过的新设备，这是纯粹的误报。
+        if (!DevicePrefs.isRegistered(getApplication())) {
+            _state.update {
+                it.copy(
+                    smsRecords = emptyList(),
+                    smsTotal = 0,
+                    smsPage = 1,
+                    smsLoading = false,
+                    smsLoaded = true,
+                    smsError = null
+                )
+            }
+            return
+        }
+
         _state.update { it.copy(smsLoading = true, smsError = null) }
         try {
             val response = RetrofitClient.getApiService()
@@ -1270,15 +1405,22 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             val app = getApplication<Application>()
             val results = mutableListOf<SelfTestItem>()
 
-            fun add(label: String, ok: Boolean, detail: String) {
-                results += SelfTestItem(label, ok, detail)
+            fun add(
+                label: String,
+                ok: Boolean,
+                detail: String,
+                action: SelfTestAction? = null
+            ) {
+                results += SelfTestItem(label, ok, detail, action)
                 _state.update { it.copy(selfTest = results.toList()) }
             }
 
+            val smsPermission = hasPermission(app, Manifest.permission.RECEIVE_SMS)
             add(
                 "短信接收权限",
-                hasPermission(app, Manifest.permission.RECEIVE_SMS),
-                if (hasPermission(app, Manifest.permission.RECEIVE_SMS)) "已授予" else "未授予，收不到任何短信"
+                smsPermission,
+                if (smsPermission) "已授予" else "未授予，收不到任何短信",
+                SelfTestAction.OPEN_APP_SETTINGS
             )
             // 这里原本还有一行「短信读取权限」（READ_SMS）。那个权限已经移除 ——
             // 本应用只从 SMS_RECEIVED 广播取消息，从没读过系统短信库，
@@ -1286,21 +1428,46 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val ok = hasPermission(app, Manifest.permission.POST_NOTIFICATIONS)
-                add("通知权限", ok, if (ok) "已授予" else "未授予，前台服务通知会被隐藏")
+                add(
+                    "通知权限",
+                    ok,
+                    if (ok) "已授予" else "未授予，前台服务通知会被隐藏",
+                    SelfTestAction.OPEN_APP_SETTINGS
+                )
             }
+
+            // 电话权限单列一项。它缺了**不会**报任何错、也不会让哪一步失败：
+            // 短信照收照传，只是上传的 phone 可能是空的，而服务端据此跳过
+            // sms:code:{号码} 缓存 —— 按号码等验证码的调用方于是每一条都超时，
+            // 设备侧的记录却从头到尾都是「上传成功」。这是全链路最难查的一种，
+            // 所以它的判据必须出现在自检页上，而不是只在主页横幅里一闪。
+            val phonePermission = DevicePhone.hasPermission(app)
+            add(
+                "电话权限",
+                phonePermission,
+                if (phonePermission) {
+                    "已授予，能分辨短信来自哪张卡"
+                } else {
+                    "未授予：双卡机分不清短信来自哪张卡，上传可能不带号码" +
+                        "（单卡机不受影响，号码会回落到你填的那个）"
+                },
+                SelfTestAction.OPEN_APP_SETTINGS
+            )
 
             val ignoring = isIgnoringBatteryOptimizations(app)
             add(
                 "电池优化白名单",
                 ignoring,
-                if (ignoring) "已加入，后台服务不易被杀" else "未加入，系统可能随时杀掉后台服务"
+                if (ignoring) "已加入，后台服务不易被杀" else "未加入，系统可能随时杀掉后台服务",
+                SelfTestAction.OPEN_BATTERY_SETTINGS
             )
 
             val registered = DevicePrefs.isRegistered(app)
             add(
                 "设备注册",
                 registered,
-                if (registered) "已注册" else "未注册，请先注册设备"
+                if (registered) "已注册" else "未注册：先扫码连接服务器，否则一条也传不上去",
+                SelfTestAction.OPEN_QUICK_CONNECT
             )
 
             if (registered) {

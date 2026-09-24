@@ -153,6 +153,15 @@ object EventLog {
     const val GATEWAY_DESTROYED = "gateway_destroyed"
 
     /**
+     * 系统拒绝让服务变成前台服务（Android 12+ 的后台启动限制）。
+     *
+     * 要单独一个类型，不能并进 GATEWAY_DESTROYED：那一条的语义是「起来之后被杀了」，
+     * 而这一条是「压根没起来」。两者的下一步完全不同 —— 前者要查电池白名单和 ROM 的
+     * 清理策略，后者要去设置里手动开一次网关。混在一起就分不出该往哪查。
+     */
+    const val GATEWAY_START_BLOCKED = "gateway_start_blocked"
+
+    /**
      * 界面上的中文标签。放在常量旁边而不是界面层：两处各写一份的话，
      * 加一个新事件类型时总有一边会被忘掉，而那一边的表现是日志页上冒出一串英文常量名。
      *
@@ -184,6 +193,7 @@ object EventLog {
         GATEWAY_STARTED -> "网关启动"
         GATEWAY_STOPPED -> "网关停止"
         GATEWAY_DESTROYED -> "网关被系统销毁"
+        GATEWAY_START_BLOCKED -> "网关未能启动（系统限制）"
         else -> type
     }
 

@@ -1,21 +1,18 @@
 package com.smsgateway.app.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import com.smsgateway.app.database.EventLogEntity
+import com.smsgateway.app.ui.AppCard
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
@@ -35,66 +32,59 @@ import com.smsgateway.app.util.EventLog
  */
 @Composable
 fun EventLogRow(row: EventLogEntity) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = AppColor.CardShape,
-        colors = CardDefaults.cardColors(containerColor = AppColor.Card),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    AppCard(
+        contentPadding = PaddingValues(AppSpacing.md),
+        verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
     ) {
-        Column(
-            modifier = Modifier.padding(AppSpacing.md),
-            verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                StatusBadge(
-                    text = EventLog.labelOf(row.type),
-                    type = badgeTypeOf(row.level)
-                )
-                Spacer(modifier = Modifier.width(AppSpacing.xs))
-                Text(
-                    text = formatClockTime(row.createdAt),
-                    style = AppTypography.caption,
-                    color = AppColor.InkMuted
-                )
-            }
+            StatusBadge(
+                text = EventLog.labelOf(row.type),
+                type = badgeTypeOf(row.level)
+            )
+            Spacer(modifier = Modifier.width(AppSpacing.xs))
+            Text(
+                text = formatClockTime(row.createdAt),
+                style = AppTypography.caption,
+                color = AppColor.InkMuted
+            )
+        }
 
-            // 发送方与**收信号码**并排。后者是多卡设备上排查的关键一维 ——
-            // 调用方等的验证码是按号码缓存与匹配的，不知道是哪个号收到的，
-            // 就分不清「这张卡没收到」和「收到了但标错了号码」（见 EventLogEntity.phone）。
-            //
-            // 两个都在时标一下「收信」：光看两串数字分不出哪个是哪个。
-            // 都可能为空：设备级事件（注册、心跳、服务启停）两个都没有，
-            // 而不该留一行空白占位 —— 那会让日志看起来缺了东西。
-            val sender = row.sender?.takeIf { it.isNotBlank() }
-            val phone = row.phone?.takeIf { it.isNotBlank() }
-            val parties = when {
-                sender != null && phone != null -> "$sender · 收信 $phone"
-                sender != null -> sender
-                phone != null -> "收信 $phone"
-                else -> null
-            }
-            parties?.let {
-                Text(
-                    text = it,
-                    style = AppTypography.bodyMedium,
-                    color = AppColor.Ink,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+        // 发送方与**收信号码**并排。后者是多卡设备上排查的关键一维 ——
+        // 调用方等的验证码是按号码缓存与匹配的，不知道是哪个号收到的，
+        // 就分不清「这张卡没收到」和「收到了但标错了号码」（见 EventLogEntity.phone）。
+        //
+        // 两个都在时标一下「收信」：光看两串数字分不出哪个是哪个。
+        // 都可能为空：设备级事件（注册、心跳、服务启停）两个都没有，
+        // 而不该留一行空白占位 —— 那会让日志看起来缺了东西。
+        val sender = row.sender?.takeIf { it.isNotBlank() }
+        val phone = row.phone?.takeIf { it.isNotBlank() }
+        val parties = when {
+            sender != null && phone != null -> "$sender · 收信 $phone"
+            sender != null -> sender
+            phone != null -> "收信 $phone"
+            else -> null
+        }
+        parties?.let {
+            Text(
+                text = it,
+                style = AppTypography.bodyMedium,
+                color = AppColor.Ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
 
-            row.reason?.let { reason ->
-                Text(
-                    text = reason,
-                    style = AppTypography.caption,
-                    // 原因染成次要色而不是正文色：它是补充说明，主信息是上面那个标签
-                    color = AppColor.InkSecondary
-                )
-            }
+        row.reason?.let { reason ->
+            Text(
+                text = reason,
+                style = AppTypography.caption,
+                // 原因染成次要色而不是正文色：它是补充说明，主信息是上面那个标签
+                color = AppColor.InkSecondary
+            )
         }
     }
 }

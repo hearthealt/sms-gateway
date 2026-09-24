@@ -9,7 +9,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -21,7 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.BuildConfig
-import com.smsgateway.app.ui.components.StatusRow
+import com.smsgateway.app.ui.AppOutlinedButton
+import com.smsgateway.app.ui.components.InfoRow
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
@@ -38,10 +38,20 @@ fun AboutCard() {
     var showLicenses by remember { mutableStateOf(false) }
 
     SettingsCard(title = "关于") {
-        StatusRow(label = "应用版本", value = BuildConfig.VERSION_NAME)
-        StatusRow(label = "包名", value = BuildConfig.APPLICATION_ID, monospace = true, selectable = true)
+        InfoRow(
+            label = "应用版本",
+            value = BuildConfig.VERSION_NAME,
+            modifier = Modifier.padding(vertical = AppSpacing.xxs)
+        )
+        InfoRow(
+            label = "包名",
+            value = BuildConfig.APPLICATION_ID,
+            monospace = true,
+            selectable = true,
+            modifier = Modifier.padding(vertical = AppSpacing.xxs)
+        )
 
-        OutlinedButton(
+        AppOutlinedButton(
             onClick = { showLicenses = true },
             modifier = Modifier.fillMaxWidth()
         ) { Text("开源许可") }

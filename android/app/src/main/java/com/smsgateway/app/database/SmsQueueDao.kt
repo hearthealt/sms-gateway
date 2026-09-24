@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SmsQueueDao {
@@ -46,6 +47,17 @@ interface SmsQueueDao {
     suspend fun getOutstanding(): List<SmsQueueEntity>
 
     /**
+     * [getOutstanding] 的**订阅版**，队列页用它。
+     *
+     * 队列页原先拿的是一次读库的快照，而库随时在被后台的 worker 改动 ——
+     * 页面上那一行与库里那一行于是会分叉，最贵的一次分叉是「立即重试」把已经传上去的
+     * 短信又传了一遍（见 DashboardViewModel.observeQueue）。
+     * 订阅之后每一处改动都会推回界面，快照与真值之间不再有窗口。
+     */
+    @Query("SELECT * FROM sms_queue WHERE status != 'uploaded' ORDER BY receiveTime DESC")
+    fun observeOutstanding(): Flow<List<SmsQueueEntity>>
+
+    /**
      * 「待上传」的口径：所有还没成功传上去的行。
      *
      * 包含 failed —— 它们同样没传上去，把它们排除在外会让界面显示 0 而实际有积压，
@@ -57,9 +69,21 @@ interface SmsQueueDao {
     @Query("DELETE FROM sms_queue WHERE id = :id")
     suspend fun deleteById(id: Long)
 
-    /** 手动重试：立刻可传，并清零重试计数（用户主动介入，重新给满重试预算）。 */
-    @Query("UPDATE sms_queue SET status = 'pending', retryCount = 0, nextRetryAt = 0 WHERE id = :id")
-    suspend fun retryNow(id: Long)
+    /**
+     * 手动重试：立刻可传，并清零重试计数（用户主动介入，重新给满重试预算）。
+     *
+     * 末尾那条状态条件是必需的，不是防御性写法：队列页上那一行可能是几秒前的快照，
+     * 而这段时间里后台 worker 完全可能已经把它传上去了。这时点「立即重试」会把一条
+     * **已上传**的行改回 pending 再传一遍 —— 服务端 duplicate_count +1、管理端显示成
+     * 「重复」，而现场看到的是一条正常的验证码莫名多了一次重复。
+     * 界面那边同时改订阅 Flow（见 observeOutstanding），两条一起才封严：这一条挡住
+     * 「快照过期」，Flow 挡住「快照与被点之间」。
+     */
+    @Query(
+        "UPDATE sms_queue SET status = 'pending', retryCount = 0, nextRetryAt = 0 " +
+            "WHERE id = :id AND status != 'uploaded'"
+    )
+    suspend fun retryNow(id: Long): Int
 
     /**
      * 一次性修复：把早期版本错标成 failed 的行扫回 pending。
@@ -85,8 +109,19 @@ interface SmsQueueDao {
      * 关于 deviceId：上传时实际用的是 prefs 里的设备标识
      * （SmsUploadWorker 里 `DevicePrefs.deviceId(...).ifBlank { sms.deviceId }`），
      * 所以这一项主要服务于界面展示与未注册期的兜底。
+     *
+     * 关于 phone 的第四点：**只补空的那一份**。这句话是一条 CASE，不是一句无条件赋值，
+     * 这一点是有意的：入库时 phone 已经由 SmsReceiver.resolveSmsPhone 按**收到它的那张卡**
+     * 解析过一遍（这正是双卡不错标的原因），而这里补的是配置里那个「本机号码」。
+     * 无条件覆盖会把自己解析出来的号码抹平成配置号码 —— 双卡错标会从这条路重新长回来。
+     * 补空的那些（号码读不到、或当时还没有权限）仍然值得补：空号码会让服务端跳过
+     * `sms:code:{号码}` 缓存，调用方等不到码。
      */
-    @Query("UPDATE sms_queue SET deviceId = :deviceId, phone = :phone WHERE status = 'pending' AND deviceId = ''")
+    @Query(
+        "UPDATE sms_queue SET deviceId = :deviceId, " +
+            "phone = CASE WHEN phone = '' THEN :phone ELSE phone END " +
+            "WHERE status = 'pending' AND deviceId = ''"
+    )
     suspend fun backfillIdentity(deviceId: String, phone: String): Int
 
     @Query("DELETE FROM sms_queue WHERE status = 'uploaded' AND receiveTime < :beforeTimestamp")

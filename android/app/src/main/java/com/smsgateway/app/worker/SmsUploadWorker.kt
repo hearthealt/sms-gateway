@@ -218,7 +218,13 @@ class SmsUploadWorker(
                                 reason = "${attempt.detail}：令牌被拒，已停止上报",
                                 smsId = sms.id
                             )
-                            AuthState.markTokenRejected(context)
+                            // 带上这次请求用的那份令牌：AuthState 会先核对它是不是**当前**
+                            // 令牌，不是就什么都不做 —— 一条迟到的 401 不该删掉刚重新注册
+                            // 拿到的新令牌（见 AuthState.markTokenRejected）。
+                            //
+                            // 注：AuthInterceptor 其实已经先一步报过一次了（401 是它先看到的），
+                            // 这里是第二条路径，两者都走同一个判据，重复调用是幂等的。
+                            AuthState.markTokenRejected(context, attempt.authToken)
                             return@withContext Result.success()
                         }
 
@@ -256,6 +262,28 @@ class SmsUploadWorker(
                                 )
                             }
                             Log.w(TAG, "Failed to upload SMS: ${sms.id}, retry ${sms.retryCount + 1}")
+
+                            // 连不上服务器（连接超时、DNS 失败、连接被拒）时**立刻收手**，
+                            // 不再逐条去撞同一堵墙。
+                            //
+                            // 不加这一条，一条积压 20 条以上的队列会这样跑：每条都要等满
+                            // 30 秒的 connect/read 超时，一轮就是 10 分钟以上 —— 而
+                            // WorkManager 的 CoroutineWorker 上限正好是 10 分钟，
+                            // 到点被系统中止。中止发生在上传循环中途，结果是这一轮
+                            // 一条都没记账（后面那些行的 retryCount 全没动），
+                            // WorkManager 那边还叠加了一次「被中止」的重试，
+                            // 下一轮再从第一条开始等 30 秒。整个队列永远推不动。
+                            //
+                            // 只对**连接层**失败收手，HTTP 5xx 继续往下走：那说明对面活着，
+                            // 只是这一条（或这一个时刻）出了问题，下一条完全可能成功。
+                            if (attempt.connectionFailed) {
+                                Log.w(
+                                    TAG,
+                                    "Server unreachable, stopping this round to stay within " +
+                                        "WorkManager's execution limit; ${pendingSms.size} due row(s) left"
+                                )
+                                break
+                            }
                         }
                     }
                 }
@@ -305,8 +333,24 @@ class SmsUploadWorker(
      *
      * detail 一律是**受控文案**（`HTTP NNN` 或异常类名），绝不拼 errorBody ——
      * 那是一段不可控的字节流，而事件表要留 7 天。
+     *
+     * @param connectionFailed 失败发生在**连接层**（请求根本没到对面）。
+     *   与「对面回了 5xx」是两回事，调用方对这两者的处置不同：前者要立刻停手
+     *   （见上传循环里的说明），后者要继续往下试。
      */
-    private data class UploadAttempt(val outcome: Outcome, val detail: String)
+    private data class UploadAttempt(
+        val outcome: Outcome,
+        val detail: String,
+        val connectionFailed: Boolean = false,
+        /**
+         * 这次请求实际带上去的那份令牌，仅在 [Outcome.UNAUTHORIZED] 时有意义。
+         *
+         * 必须把它一起带回来给 [AuthState.markTokenRejected]：那里要拿它比对**当前**令牌，
+         * 被拒的不是当前这一份就不该清库。用「处理 401 那一刻读到的 prefs 值」代替是不行的
+         * —— 那时可能已经换成了重新注册拿到的新令牌，照着清就是刚注册完又被踢回未注册。
+         */
+        val authToken: String? = null
+    )
 
     private suspend fun uploadSingleSms(sms: SmsQueueEntity): UploadAttempt {
         return try {
@@ -324,6 +368,10 @@ class SmsUploadWorker(
                 content = sms.content,
                 receiveTime = sms.receiveTime.toString()
             )
+            // 发请求之前把当前令牌记下来：401 时要用它去比对「被拒的是不是现在这一份」。
+            // 放在这里而不是收到 401 之后再读，是因为那中间可能已经有别的路径换过令牌。
+            val authToken = RetrofitClient.getDeviceToken()
+
             val idempotencyKey = "$deviceId:${sms.localMessageId}"
             val response = api.uploadSms(idempotencyKey, request)
 
@@ -335,14 +383,17 @@ class SmsUploadWorker(
                 response.code() == 400 || response.code() == 422 -> Outcome.INVALID
                 else -> Outcome.TRANSIENT
             }
-            UploadAttempt(outcome, detail)
+            UploadAttempt(outcome, detail, authToken = authToken)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Upload error for SMS ${sms.id}", e)
             // 异常不带 message：IOException 的 message 里可能带完整 URL 或对端响应片段，
             // 而类名已经足够区分「超时 / DNS / 连接被拒」这几类。
-            UploadAttempt(Outcome.TRANSIENT, e.javaClass.simpleName)
+            //
+            // 走到 catch 就是「请求没换回一个 HTTP 响应」，也就是连接层的问题 ——
+            // 传 connectionFailed = true 让调用方据此收手。
+            UploadAttempt(Outcome.TRANSIENT, e.javaClass.simpleName, connectionFailed = true)
         }
     }
 

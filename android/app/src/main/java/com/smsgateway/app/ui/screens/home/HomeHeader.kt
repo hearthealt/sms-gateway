@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -27,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.R
 import com.smsgateway.app.ui.theme.AppColor
+import com.smsgateway.app.ui.theme.AppSize
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
 
@@ -57,13 +57,13 @@ fun HomeHeader(
             )
             // 开了沉浸式之后得自己让开状态栏，否则标题会被时间、电量压住
             .statusBarsPadding()
-            .padding(horizontal = AppSpacing.md, vertical = AppSpacing.sm),
+            .padding(horizontal = AppSpacing.gutter, vertical = AppSpacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
-                .clip(RoundedCornerShape(11.dp))
+                .size(AppSize.logoBlock)
+                .clip(AppColor.LogoShape)
                 .background(AppColor.onBrand),
             contentAlignment = Alignment.Center
         ) {
@@ -74,7 +74,7 @@ fun HomeHeader(
                 painter = painterResource(R.drawable.ic_logo_mark),
                 contentDescription = null,
                 tint = AppColor.Brand,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(AppSize.logoMark)
             )
         }
         Spacer(modifier = Modifier.width(AppSpacing.sm))

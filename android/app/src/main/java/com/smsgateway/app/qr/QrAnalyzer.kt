@@ -23,6 +23,22 @@ class QrAnalyzer(private val onResult: (String) -> Unit) : ImageAnalysis.Analyze
     private val lastAttemptAt = AtomicLong(0L)
     private val finished = AtomicBoolean(false)
 
+    /**
+     * 让这个分析器重新开始解码。
+     *
+     * 没有它，解出**任何**一段文字之后这个实例就永久停工了（[finished] 是闩锁）。
+     * 而「解出来了」不等于「这就是我们要的码」：扫到一张微信码同样会闩上。
+     * 调用方在发现内容不是配置码时（QuickConnectScreen）必须调这个，
+     * 否则预览照常在动、扫码页却永远没反应，只能退出重进。
+     *
+     * 时间闸也一起清零：不清的话紧接着的那一帧会因为距上次尝试不足 [THROTTLE_MS]
+     * 而被丢掉，用户会感觉「明明已经重新对准了，它还是慢半拍」。
+     */
+    fun reset() {
+        lastAttemptAt.set(0L)
+        finished.set(false)
+    }
+
     override fun analyze(image: ImageProxy) {
         try {
             if (finished.get()) return

@@ -49,10 +49,24 @@
         android:theme="@style/Theme.SmsGateway"
         tools:targetApi="34">
 
+        <!-- 刻意**不**配 android:configChanges。
+             曾经加过（orientation|uiMode|fontScale…），想的是「转屏与改字号别重建 Activity」，
+             但那是把问题修在错的地方：重建本身是无害的，有害的是重建时无条件上锁
+             与无条件申请权限 —— 那两条已经在 MainActivity.onCreate 里用
+             savedInstanceState 判断修掉了（见那里的说明）。
+             而声明 configChanges 之后，Configuration 的变化完全交给 Compose 自己去发现，
+             一旦某条路径没接上（字号、深浅色都走过这种坑），表现就是「改了系统设置
+             界面没变」，比多一次重建难查得多。
+
+             windowSoftInputMode 用 adjustResize 而不是默认的 adjustPan：
+             沉浸式 + 手势导航下，默认行为会让键盘**盖住**输入框，而 adjustResize
+             把可用高度让给布局，配合各页面里的 imePadding()，输入框会自动滚进视野。
+             设置页与锁屏这两处的输入框都吃过这个亏。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.SmsGateway">
+            android:theme="@style/Theme.SmsGateway"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

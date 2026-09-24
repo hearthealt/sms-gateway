@@ -6,6 +6,7 @@ import android.content.Intent
 import android.util.Log
 import com.smsgateway.app.service.GatewayForegroundService
 import com.smsgateway.app.util.DevicePrefs
+import com.smsgateway.app.util.GatewayState
 
 /**
  * 在开机、以及**本应用被覆盖安装之后**重新拉起网关前台服务。
@@ -22,9 +23,22 @@ class BootReceiver : BroadcastReceiver() {
             // 提供的入口，它在后台启动前台服务的豁免名单上。
             Intent.ACTION_MY_PACKAGE_REPLACED,
             "android.intent.action.QUICKBOOT_POWERON" -> {
-                // 未注册时不要拉起服务：否则开机会挂上一条常驻的「设备未注册」通知，
+                // 两个条件都必须看，缺一个就会违背界面上的承诺。
+                //
+                // **未注册**时不要拉起服务：否则开机会挂上一条常驻的「设备未注册」通知，
                 // 而它什么也做不了。注册成功后 registerDevice() 本来就会启动服务，不会漏。
-                if (DevicePrefs.isRegistered(context)) {
+                //
+                // **用户手动停过**时也不能拉起来：停止按钮在界面上写的是「短信会留在本地，
+                // 不会上报」，而服务起来之后 onCreate 会 markStarted（运行态写回 true）
+                // 并立刻排一次上传 —— 积压的短信会被全部上报。原先这里只看注册状态，
+                // 于是「点停止 → 手机重启」或「点停止 → 推一次 APK 更新」就等于把那个
+                // 承诺悄悄撤销了，而用户什么都没做。
+                //
+                // gateway_running 在关机时不会被清掉（关机不走 onDestroy），所以
+                // MY_PACKAGE_REPLACED 那条路上它也是可信的：停过就是 false，没停过就是 true。
+                // 判据与 DashboardViewModel.ensureGatewayServiceRunning 完全一致 ——
+                // 两处标准不同正是这个 bug 的成因。
+                if (DevicePrefs.isRegistered(context) && GatewayState.isRunning(context)) {
                     startGateway(context)
                 }
             }

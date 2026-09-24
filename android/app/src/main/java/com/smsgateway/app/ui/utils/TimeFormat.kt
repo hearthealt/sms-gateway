@@ -1,5 +1,6 @@
 package com.smsgateway.app.ui.utils
 
+import com.smsgateway.app.util.ServerTime
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -22,6 +23,25 @@ fun formatClockTime(at: Long): String {
         now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
     return SimpleDateFormat(if (sameDay) "HH:mm" else "MM-dd HH:mm", Locale.getDefault())
         .format(Date(at))
+}
+
+/**
+ * 服务端下发的时间字符串 → 与本地行**同一套**格式（[formatClockTime]）。
+ *
+ * 服务端记录页原先直接显示完整的 `yyyy-MM-dd HH:mm:ss`，而队列页与日志页显示的是
+ * 「今天只给时刻」。同一个应用里两种时间写法，而且更长的那种并不更有用 ——
+ * 这一页绝大多数记录也是今天的。统一到 [formatClockTime]。
+ *
+ * 解析失败时退回原串截到秒：宁可显示得笨一点，也不要让整页时间空白。
+ */
+fun formatServerTime(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    val at = ServerTime.parseInstant(raw)
+    return if (at != null) {
+        formatClockTime(at).ifBlank { null }
+    } else {
+        raw.replace('T', ' ').take(19)
+    }
 }
 
 /**

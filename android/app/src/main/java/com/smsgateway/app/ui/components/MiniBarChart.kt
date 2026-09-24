@@ -23,6 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
@@ -37,8 +43,24 @@ data class MiniBar(val label: String, val value: Long)
 /** 相邻柱之间留出的底色缝。靠留白分隔，不描边。 */
 private val BAR_GAP = 2.dp
 
-/** 轴标签那一行的高度，够放下一行 hint 字号。 */
-private val LABEL_HEIGHT = 16.dp
+/**
+ * 轴标签那一行的高度。**不写死**，按轴标签的字号实际量出来。
+ *
+ * 原先固定 16dp。系统字体调到 1.3 倍之后，11sp 的标签实际要 20dp 才放得下 ——
+ * 写死的高度会把下面几个字符裁掉（Canvas 画文字不会自己撑开容器），
+ * 而这个视图的高度又是数据回来前后必须一致的东西（见 MiniBarChartPlaceholder），
+ * 所以两边都要用同一个量出来的值。
+ */
+@Composable
+internal fun rememberAxisLabelHeight(style: TextStyle): Dp {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return remember(style, density) {
+        // 量一个最宽的轴标签（「00 点」），而不是量空串 —— 空串的高度是 0
+        val px = measurer.measure(text = "00 点", style = style).size.height
+        with(density) { px.toDp() }
+    }
+}
 
 /**
  * 柱状图的占位骨架。
@@ -63,9 +85,12 @@ fun MiniBarChartPlaceholder(
     hint: String,
     plotHeight: Dp = 52.dp
 ) {
+    val labelHeight = rememberAxisLabelHeight(chartTitleStyle)
+    val peakLineHeight = rememberPeakLineHeight()
+
     Column(modifier = modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text = title, style = AppTypography.hint, color = AppColor.InkMuted)
+            Text(text = title, style = chartTitleStyle, color = AppColor.Ink)
             Spacer(modifier = Modifier.weight(1f))
             Text(text = hint, style = AppTypography.caption, color = AppColor.InkMuted)
         }
@@ -102,8 +127,12 @@ fun MiniBarChartPlaceholder(
         HorizontalDivider(thickness = 1.dp, color = AppColor.Divider)
 
         // 轴标签那一行也占住：真图的高度包含它，不占的话数据回来仍会往下弹。
+        Spacer(modifier = Modifier.height(labelHeight))
+
+        // 峰值标注那一行同理 —— 真图里它**始终**占一行（见 MiniBarChart 的说明），
+        // 骨架不占的话，数据回来的那一刻整页会往上跳一截。
         Spacer(modifier = Modifier.height(AppSpacing.xxs))
-        Spacer(modifier = Modifier.height(LABEL_HEIGHT))
+        Spacer(modifier = Modifier.height(peakLineHeight))
     }
 }
 
@@ -125,6 +154,13 @@ fun MiniBarChartPlaceholder(
  * - **选中态**：点一根柱子，上方读数换成它（默认最后一根 = 今天 / 当前小时）。
  *   这是触屏上的 tooltip —— 但数值**不依赖它**：峰值已直接标注，
  *   不点也能读出个大概，这与「tooltip 不能是读数的唯一途径」是同一条。
+ *
+ * ## 无障碍
+ *
+ * 24 根柱子原先各自是一个**没有标签、没有说明**的 clickable，TalkBack 会一口气读出
+ * 24 个「按钮」—— 既听不出画的是什么，也走不出去。现在整块绘图区是**一个**节点：
+ * 读出结论（最多的是哪天、多少），再给一个「下一根柱子」的自定义动作让人逐根听。
+ * 触摸行为不变（点哪根选哪根），`clearAndSetSemantics` 只影响读屏那一路。
  *
  * @param labelEvery 每几根标一个 x 标签。24 小时的图必须隔几个标，
  *   不然标签会挤成一团（挤在一起的标签比没有标签更难读）。
@@ -159,12 +195,18 @@ fun MiniBarChart(
         mutableIntStateOf(defaultSelected.coerceIn(0, bars.lastIndex))
     }
     val current = bars[selected]
+    val labelHeight = rememberAxisLabelHeight(chartTitleStyle)
+    val peakLineHeight = rememberPeakLineHeight()
 
     Column(modifier = modifier) {
         // 标题与读数一行：读数就是 tooltip，常驻在这里而不是浮在图上 ——
-        // 触屏没有 hover，浮层要么挡图要么一闪而过
+        // 触屏没有 hover，浮层要么挡图要么一闪而过。
+        //
+        // 标题用 [chartTitleStyle]（正文级），读数用 caption：原先标题是 hint(11sp)、
+        // 读数是 caption(12sp)，**读数比标题还大** —— 于是一眼看到的是那根柱子的值，
+        // 而这张图叫什么得凑近看，层级整个是反的。
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text = title, style = AppTypography.hint, color = AppColor.InkMuted)
+            Text(text = title, style = chartTitleStyle, color = AppColor.Ink)
             Spacer(modifier = Modifier.weight(1f))
             Text(
                 text = "${current.label} · ${current.value} $unit",
@@ -178,7 +220,19 @@ fun MiniBarChart(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(plotHeight),
+                .height(plotHeight)
+                // 整块合成一个节点：24 个无标签的 clickable 对读屏是不可用的
+                // （它只会连读 24 次「按钮」，既没有内容也没有出路）。
+                .clearAndSetSemantics {
+                    contentDescription = "${title}：最多 ${bars[peakIndex].label}，" +
+                        "${bars[peakIndex].value} $unit；当前 ${current.label}，${current.value} $unit"
+                    customActions = listOf(
+                        CustomAccessibilityAction("下一根柱子") {
+                            selected = (selected + 1) % bars.size
+                            true
+                        }
+                    )
+                },
             horizontalArrangement = Arrangement.spacedBy(BAR_GAP),
             verticalAlignment = Alignment.Bottom
         ) {
@@ -237,7 +291,7 @@ fun MiniBarChart(
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(LABEL_HEIGHT)
+                .height(labelHeight)
         ) {
             val gapPx = BAR_GAP.toPx()
             val barWidth = (size.width - gapPx * (bars.size - 1)) / bars.size
@@ -253,14 +307,53 @@ fun MiniBarChart(
         }
 
         // 峰值直接标注：不点也能看出「最多的一天是多少」。
-        // 峰值恰好是被选中那根时就不重复说了 —— 上方读数已经在说同一件事。
-        if (peakIndex != selected && bars[peakIndex].value > 0) {
-            Spacer(modifier = Modifier.height(AppSpacing.xxs))
-            Text(
-                text = "最多 ${bars[peakIndex].label} · ${bars[peakIndex].value} $unit",
-                style = AppTypography.hint,
-                color = AppColor.InkMuted
-            )
-        }
+        //
+        // 这一行**始终占位**，即使当前选中的正好是峰值（那时它内容为空）。
+        // 原先它是条件渲染的：点中峰值那根柱子，这一行消失、上面几块整体往上跳 ——
+        // 手指正停在屏幕上，页面却动了，看起来像点坏了什么。
+        // 空字符串的高度是 0，所以这里用一个不换行空格占住那一行。
+        Spacer(modifier = Modifier.height(AppSpacing.xxs))
+        Text(
+            text = if (peakIndex != selected && bars[peakIndex].value > 0) {
+                "最多 ${bars[peakIndex].label} · ${bars[peakIndex].value} $unit"
+            } else {
+                " "
+            },
+            style = AppTypography.hint,
+            color = AppColor.InkMuted,
+            maxLines = 1,
+            // 高度钉成与占位骨架同一个量出来的值。写法上有点绕（这个 Text 自己也能量），
+            // 但这样两边的高度是**同一个数**，而不是「两个恰好相等的数」——
+            // 后者在有人改了这里的 style 之后就会悄悄错开，而错开的表现是
+            // 数据回来的那一刻整页往上跳一下。
+            modifier = Modifier.height(peakLineHeight)
+        )
+    }
+}
+
+/**
+ * 图表的标题样式。用 bodyMedium（正文级）而不是 caption/hint：
+ * 它是一张图的**名字**，必须比图里的读数大，否则一眼看到的是数据而不是「这是什么数据」。
+ */
+private val chartTitleStyle = AppTypography.bodyMedium
+
+/**
+ * 峰值标注那一行的高度。
+ *
+ * 同样按字号**实际量**，不用 `AppTypography.hint.lineHeight.value.dp` 那种写法：
+ * lineHeight 的单位是 sp，把它的数值当 dp 用在 1.3 倍字体下会少算约 5dp，
+ * 而那 5dp 就是数据回来时整页往上跳的高度。
+ *
+ * 单独拎出来是给占位骨架用的：骨架必须把这一行也占住，否则数据回来的那一刻整页会跳。
+ */
+@Composable
+private fun rememberPeakLineHeight(): Dp {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val style = AppTypography.hint
+    return remember(style, density) {
+        // 量一句有代表性的文案：单行文本的高度只取决于字体，与内容无关
+        val px = measurer.measure(text = "最多 9/21 · 12 条", style = style).size.height
+        with(density) { px.toDp() }
     }
 }

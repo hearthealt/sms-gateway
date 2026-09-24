@@ -23,6 +23,13 @@ import androidx.compose.ui.unit.dp
  * 面的颜色只有「页面底色」和「卡片」两种，文字只有四级灰，状态色只表达状态。
  * 这不是随手定的：原先首页自绘一套（白卡片、#F4F6FA 底）、五个子页面用 Material3
  * 默认值（不给颜色就落到淡紫灰），同一个应用里首页和设置页看起来像两个产品。
+ *
+ * ## 对比度是硬约束，不是偏好
+ *
+ * 文字四级灰之间的**步长**、以及每个状态色压在自己那块浅底上的对比度，都按
+ * WCAG AA 定过（正文 4.5:1、大字 3:1、图标这类非文字 3:1）。这不是为了应付检查：
+ * 这台手机摆在工位上，看的人常常是隔着两米扫一眼，浅灰糊在白底上就等于没有。
+ * 下面每一条注释里的比值都是按 sRGB 相对亮度算的，改色值时要一起改。
  */
 object AppColor {
 
@@ -52,9 +59,9 @@ object AppColor {
     val InkStrong: Color @Composable @ReadOnlyComposable get() = palette().inkStrong
     /** 次要：标签、说明。 */
     val InkSecondary: Color @Composable @ReadOnlyComposable get() = palette().inkSecondary
-    /** 弱化：提示、占位。 */
+    /** 弱化：提示、占位。仍然要读得清 —— 它是**文字**，不是装饰。 */
     val InkMuted: Color @Composable @ReadOnlyComposable get() = palette().inkMuted
-    /** 最弱：空状态的大图标、箭头这类纯装饰。 */
+    /** 最弱：空状态的大图标、箭头这类纯装饰，可以低于正文的对比度要求。 */
     val Faint: Color @Composable @ReadOnlyComposable get() = palette().faint
     /** 分隔线。比底色深一档即可，不做可见的边框。 */
     val Divider: Color @Composable @ReadOnlyComposable get() = palette().divider
@@ -85,6 +92,9 @@ object AppColor {
     val BannerShape = RoundedCornerShape(12.dp)
     val ButtonShape = RoundedCornerShape(12.dp)
     val BadgeShape = RoundedCornerShape(6.dp)
+
+    /** 品牌 logo 块。与 [AppSize.logoBlock] 配套，首页头部与锁屏共用。 */
+    val LogoShape = RoundedCornerShape(11.dp)
 }
 
 /**
@@ -106,6 +116,17 @@ data class AppPalette(
      */
     val onBrand: Color,
     val brand: Color,
+    /**
+     * Material 组件的强调色（实心按钮、输入框光标与焦点框、TextButton 文字）。
+     *
+     * 与 [brand] 分开是必要的，不是多此一举：[brand] 用在渐变头和图表这类**大面积、
+     * 上面不压小字**的地方，而 [primary] 要承载 14sp 的按钮标签 —— 两者的对比度
+     * 门槛完全不同。原先两者共用一个 #1E88E5，白字压上去只有 3.7:1，
+     * 正文门槛是 4.5:1，按钮文字就一直差那么一截。
+     */
+    val primary: Color,
+    /** 压在最上面的 [primary] 块里的前景。深色模式下 primary 是浅蓝，这里就得是深色。 */
+    val onPrimary: Color,
     val screen: Color,
     val card: Color,
     val ink: Color,
@@ -134,31 +155,39 @@ data class AppPalette(
  * 浅色：品牌蓝 + 浅灰底 + 白卡片。
  *
  * 状态色用「深字 + 浅底」：底色只负责把这块圈出来，字色才是要读的那个，
- * 所以浅底要浅到不抢字的对比度。
+ * 所以浅底要浅到不抢字的对比度。每个状态色压在自己那块底上的比值都在 5:1 以上。
  */
 internal val LightPalette = AppPalette(
     brandDark = Color(0xFF0D47A1),
     onBrand = Color.White,
     brand = Color(0xFF1E88E5),
+    // 白字压在这个蓝上 4.6:1（#1E88E5 只有 3.7:1，按钮标签是 14sp 正文，不够）
+    primary = Color(0xFF1976D2),
+    onPrimary = Color.White,
     screen = Color(0xFFF4F6FA),
     card = Color.White,
     ink = Color(0xFF263238),
     inkStrong = Color(0xFF37474F),
-    inkSecondary = Color(0xFF546E7A),
-    inkMuted = Color(0xFF90A4AE),
-    faint = Color(0xFFBDBDBD),
+    // 四级灰是一条**连续**的阶梯（白底上 12.4 / 11.0 / 7.2 / 5.3:1），
+    // 不能各自调：原先 inkMuted(#90A4AE) 只有 2.6:1，比它更弱的 faint 反而更浅，
+    // 于是「说明文字」和「装饰图标」在屏幕上是同一个亮度，说明文字等于读不到。
+    inkSecondary = Color(0xFF455A64),
+    inkMuted = Color(0xFF5F6E78),
+    // 3.6:1 —— 它只用于装饰（空状态大图标、行尾箭头），非文字门槛是 3:1
+    faint = Color(0xFF7A8994),
     divider = Color(0xFFECEFF3),
     danger = Color(0xFFC62828),
     dangerBg = Color(0xFFFFEBEE),
-    success = Color(0xFF2E7D32),
+    // #2E7D32 压在 successBg 上只有 4.2:1，绿 900 才过得了正文门槛
+    success = Color(0xFF1B5E20),
     successBg = Color(0xFFE8F5E9),
-    warning = Color(0xFFE65100),
+    warning = Color(0xFFBF360C),
     warningBg = Color(0xFFFFF3E0),
     info = Color(0xFF1565C0),
     infoBg = Color(0xFFE3F2FD),
     neutralWarn = Color(0xFF5E35B1),
     neutralWarnBg = Color(0xFFEDE7F6),
-    neutral = Color(0xFF616161),
+    neutral = Color(0xFF545D62),
     neutralBg = Color(0xFFF5F5F5),
     switchOffThumb = Color(0xFF9E9E9E),
     switchOffTrack = Color(0xFFE0E0E0)
@@ -168,18 +197,24 @@ internal val LightPalette = AppPalette(
  * 深色：面比纯黑浅一档（#000 上的白字会发糊，且 OLED 上边界糊成一片），
  * 状态色整体提亮 —— 浅色那套的红/绿直接搬到深底上对比度不够，读起来是「暗红」。
  * 品牌蓝两端保持不变：它本来就是深蓝，放在深色里不需要改，改了反而不像同一个应用。
+ *
+ * 只有 [primary] 是反的：深色模式下它必须**变浅**，白字才不至于糊在按钮上 ——
+ * 这正是 Material 深色主题的做法（浅色容器 + 深色前景）。
  */
 internal val DarkPalette = AppPalette(
     brandDark = Color(0xFF0D47A1),
     onBrand = Color.White,
     brand = Color(0xFF1E88E5),
+    primary = Color(0xFF64B5F6),
+    onPrimary = Color(0xFF102027),
     screen = Color(0xFF0E1116),
     card = Color(0xFF1F252D),
     ink = Color(0xFFE8EAED),
     inkStrong = Color(0xFFECEFF1),
     inkSecondary = Color(0xFFB0BEC5),
     inkMuted = Color(0xFF8A9AA5),
-    faint = Color(0xFF5A6672),
+    // 3.4:1 —— 与浅色那一档同样是装饰用的最低一档
+    faint = Color(0xFF6B7885),
     divider = Color(0xFF262C34),
     danger = Color(0xFFEF5350),
     dangerBg = Color(0xFF3A1F1F),

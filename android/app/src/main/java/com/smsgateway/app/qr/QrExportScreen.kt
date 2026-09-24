@@ -12,13 +12,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.ui.AppCard
-import com.smsgateway.app.ui.theme.AppColor
-import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.ui.AppScreen
+import com.smsgateway.app.ui.AppTextButton
+import com.smsgateway.app.ui.components.InlineNotice
+import com.smsgateway.app.ui.components.NoticeType
+import com.smsgateway.app.ui.theme.AppColor
+import com.smsgateway.app.ui.theme.AppSize
+import com.smsgateway.app.ui.theme.AppSpacing
+import com.smsgateway.app.ui.theme.AppTypography
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -55,14 +59,19 @@ fun QrExportScreen(
         qrBitmap = withContext(Dispatchers.Default) { QrEncoder.encode(payload) }
     }
 
+    // 原文默认收起来。它不是给扫的（扫的人用相机），是给「想核对一下这串里到底写了什么」
+    // 的人看的 —— 而它里面带着接入口令，摊在屏幕上就是一次不必要的暴露：
+    // 这台手机常年摆在工位上，屏幕上多一串能直接读走的凭证不是好事。
+    var showPayload by remember { mutableStateOf(false) }
+
     AppScreen(title = "导出配置", onBack = onBack) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(AppSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.md)
         ) {
             // 不再给这张卡加标题：整页只有它一张卡，页面顶栏已经写着「导出配置」，
             // 再重复一句只是多一行字。
@@ -76,16 +85,19 @@ fun QrExportScreen(
                     val bitmap = qrBitmap
                     if (bitmap == null) {
                         Box(
-                            modifier = Modifier.size(240.dp),
+                            modifier = Modifier.size(QR_SIZE),
                             contentAlignment = Alignment.Center
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(AppSize.spinnerCard),
+                                strokeWidth = 3.dp
+                            )
                         }
                     } else {
                         Image(
                             bitmap = bitmap.asImageBitmap(),
                             contentDescription = "配置二维码",
-                            modifier = Modifier.size(240.dp),
+                            modifier = Modifier.size(QR_SIZE),
                             // 二维码放大后必须关掉插值，否则边缘被模糊化会扫不动
                             filterQuality = FilterQuality.None
                         )
@@ -96,23 +108,36 @@ fun QrExportScreen(
                     style = AppTypography.caption,
                     color = AppColor.InkMuted
                 )
+
                 // 口令是这个应用里唯一会被二维码带出去、且能在服务端"起作用"的凭证，
                 // 所以拿着这张码的人要清楚自己在给出什么。
                 if (state.enrollToken.isNotBlank()) {
-                    Text(
+                    // 不再用等宽字体：这是一句**中文告诫**，不是一串要逐位核对的字符。
+                    // 等宽体在中文字形下只是把字距拉开，读起来更费力而没有任何收益。
+                    // 换成与全应用一致的提示块，顺便带上图标。
+                    InlineNotice(
                         text = "注意：这张码包含服务器的接入口令，拿到它的人都能把一台设备接入本服务器。",
-                        style = AppTypography.mono(AppTypography.caption),
-                        color = AppColor.Danger
+                        type = NoticeType.Danger
                     )
                 }
-                SelectionContainer {
-                    Text(
-                        text = payload,
-                        style = AppTypography.caption,
-                        fontFamily = FontFamily.Monospace
-                    )
+
+                AppTextButton(onClick = { showPayload = !showPayload }) {
+                    Text(if (showPayload) "隐藏原文" else "显示原文")
+                }
+
+                if (showPayload) {
+                    SelectionContainer {
+                        Text(
+                            text = payload,
+                            style = AppTypography.mono(AppTypography.caption),
+                            color = AppColor.InkSecondary
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+/** 二维码显示边长。与扫码页那个取景框同尺寸，两边对得上「要放多大」这件事。 */
+private val QR_SIZE = 240.dp

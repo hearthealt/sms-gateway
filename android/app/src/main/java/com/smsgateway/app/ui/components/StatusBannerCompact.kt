@@ -2,6 +2,7 @@ package com.smsgateway.app.ui.components
 
 import android.content.Context
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,12 +12,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Block
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.PhoneDisabled
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,7 +24,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.smsgateway.app.ui.AppTextButton
 import com.smsgateway.app.ui.theme.AppColor
+import com.smsgateway.app.ui.theme.AppSize
 import com.smsgateway.app.ui.theme.AppSpacing
 import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.ui.utils.SystemSettings
@@ -63,7 +65,7 @@ private fun CompactWarningBanner(
                 imageVector = icon,
                 contentDescription = null,
                 tint = contentColor,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(AppSize.iconMd)
             )
             Spacer(modifier = Modifier.width(AppSpacing.xs))
             Column(modifier = Modifier.weight(1f)) {
@@ -78,17 +80,22 @@ private fun CompactWarningBanner(
                     Text(
                         text = it,
                         style = AppTypography.caption,
-                        color = contentColor.copy(alpha = 0.8f)
+                        // 实色，不叠 alpha。原来这里是 contentColor.copy(alpha = 0.8f)，
+                        // 而这条横幅的底色本身就与字色同族（比如 NeutralWarn 压 NeutralWarnBg），
+                        // 乘一个 0.8 之后实测只剩约 4.3:1 —— 而它是 caption 字号，
+                        // 门槛是 4.5:1，正好差一点。主次由**字号**区分已经足够
+                        // （message 是 bodySmall、这里是 caption），不必再压对比度。
+                        color = contentColor
                     )
                 }
             }
             // 按钮取横幅自己的字色，不要落到 colorScheme.primary：
             // 那样橙色横幅上会挂一个蓝按钮，两种主题下都不搭
-            TextButton(
+            AppTextButton(
                 onClick = onClick,
-                colors = ButtonDefaults.textButtonColors(contentColor = contentColor)
+                contentPadding = PaddingValues(horizontal = AppSpacing.sm, vertical = AppSpacing.xxs)
             ) {
-                Text(actionLabel, style = AppTypography.bodySmall)
+                Text(actionLabel, style = AppTypography.bodySmall, color = contentColor)
             }
         }
     }
@@ -107,6 +114,32 @@ fun PermissionBannerCompact() {
         backgroundColor = AppColor.DangerBg,
         contentColor = AppColor.Danger,
         onClick = { SystemSettings.openAppDetails(context) }
+    )
+}
+
+/**
+ * 电话权限缺失横幅。
+ *
+ * 用中性紫而不是红色：它**不是**一个「现在就不工作」的问题 —— 单卡机照常上报，
+ * 号码能安全回落；双卡机上也只是号码可能不带。用红色会让每天看见它的人麻木，
+ * 而那张红色横幅的位置要留给真正收不到短信的情况。
+ *
+ * 文案必须说清是「双卡机 + 某些情况」，否则用户会以为手填的号码没生效 ——
+ * 而它其实生效了（见 DevicePhone.isSingleSim）。
+ */
+@Composable
+fun PhonePermissionBanner() {
+    val context = LocalContext.current
+    CompactWarningBanner(
+        icon = Icons.Default.PhoneDisabled,
+        message = "缺少电话权限，双卡机分不清短信来自哪张卡",
+        actionLabel = "去开启",
+        backgroundColor = AppColor.NeutralWarnBg,
+        contentColor = AppColor.NeutralWarn,
+        onClick = { SystemSettings.openAppDetails(context) },
+        // 这一行是给单卡机用户的：否则他会照着上面那句话去反复查权限，
+        // 而自己的设备本来就不受这个问题影响
+        detail = "单卡机不受影响。开启后号码归属才能标对，按号码等验证码的调用方才取得到码。"
     )
 }
 

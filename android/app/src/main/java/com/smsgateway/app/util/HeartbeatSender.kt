@@ -126,6 +126,11 @@ object HeartbeatSender {
             pendingCount = pendingCount
         )
 
+        // 发出去之前把当前令牌记下来：401 时要用它去比对「被拒的是不是现在这一份」。
+        // 收到 401 之后再读是不行的 —— 那中间可能已经有别的路径（重新注册）换过令牌，
+        // 于是这条迟到的 401 会把刚存下的新令牌删掉。
+        val authToken = RetrofitClient.getDeviceToken()
+
         return try {
             val response = RetrofitClient.getApiService().heartbeat(request)
             if (!response.isSuccessful) {
@@ -133,7 +138,10 @@ object HeartbeatSender {
                     // 令牌被拒 = 服务端不认这台设备了（设备记录被删、或换了主密钥）。
                     // 必须清掉本地令牌，否则 isRegistered 永远是 true，界面一直显示
                     // 「已注册」而实际一条也传不上去，现场根本想不到要重新注册。
-                    AuthState.markTokenRejected(app)
+                    //
+                    // 注：AuthInterceptor 其实已经先一步报过一次了（401 是它先看到的），
+                    // 这里是第二条路径，两者走同一个判据，重复调用是幂等的。
+                    AuthState.markTokenRejected(app, authToken)
                 }
                 Log.w(TAG, "Heartbeat rejected: HTTP ${response.code()}")
                 recordHeartbeatFailure(app, "HTTP ${response.code()}")

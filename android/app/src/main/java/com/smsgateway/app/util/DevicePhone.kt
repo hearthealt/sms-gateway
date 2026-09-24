@@ -101,6 +101,50 @@ object DevicePhone {
     fun listSlots(context: Context): List<SimSlot> = querySlots(context).slots
 
     /**
+     * 这台设备的卡槽数。**不需要任何权限**，这是它唯一的用处。
+     *
+     * 用 [TelephonyManager.getActiveModemCount]（API 30 起，之前是已弃用的 `phoneCount`）：
+     * 它报的是硬件/系统层面的调制解调器数量，与有没有 READ_PHONE_STATE 无关 ——
+     * 而 [querySlots] 走的是 SubscriptionManager，没有权限就一个字都问不出来。
+     *
+     * 取不到（服务缺失、ROM 抛异常）时返回 0，调用方必须把 0 当成「不知道」而不是
+     * 「零张卡」：把不确定当成确定，正是下面那个判据要避免的事。
+     */
+    @Suppress("DEPRECATION")
+    fun activeModemCount(context: Context): Int = try {
+        val manager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        when {
+            manager == null -> 0
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> manager.activeModemCount
+            else -> manager.phoneCount
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "activeModemCount 失败", e)
+        0
+    }
+
+    /**
+     * 这台设备**确定**只有一张卡吗。
+     *
+     * 这是 [SmsReceiver.resolveSmsPhone] 判定「能不能拿配置里的号码顶上」的依据。
+     * 条件是「确定」而不是「大概」：这个问题的两个方向代价不对称 ——
+     * 判成单卡而其实是双卡，副卡收到的验证码会被标成主卡的号码，调用方拿到**错答案**；
+     * 判成双卡而其实是单卡，只是号码留空，调用方等不到码、最后超时。
+     * 超时能被发现，错答案不能。
+     *
+     * 两条路，优先那条准的：
+     * 1. 有电话权限时以**激活的卡列表**为准（双卡槽只插一张卡也判得对）；
+     * 2. 没有权限时退回卡槽数 —— 它不需要权限，代价是「双卡槽只插一张卡」会被当成双卡，
+     *    也就是退化成「留空」。这一档救的正是原先最冤的那批设备：单卡机 + 用户拒了权限。
+     *    （见 [SmsReceiver] 的说明：那种情况下原先每一条短信都以空号码上传。）
+     */
+    fun isSingleSim(context: Context): Boolean {
+        val slots = querySlots(context)
+        if (slots.problem == null) return slots.slots.size <= 1
+        return activeModemCount(context) == 1
+    }
+
+    /**
      * 列卡，并带上「为什么是空的」。
      *
      * 拿不到 [SubscriptionManager.getActiveSubscriptionInfoList] 时**不是直接给空**，

@@ -20,21 +20,47 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
+/**
+ * 全部可变字段都是 @Volatile，全部写入路径都是 @Synchronized。
+ *
+ * 这不是防御性写法，是这两条并发的必然要求：
+ * - 改服务器地址走设置页/扫码页（主线程），而 `getApiService()` 走心跳与上报（IO 线程）。
+ *   两者撞上时，若 [configure] 只在主线程改 [baseUrl]、而 IO 线程正好在判空与构建之间，
+ *   就可能把用**旧地址**构建好的客户端写回 [apiService] —— 此后所有请求都发往旧服务器，
+ *   而界面显示的是新地址，怎么核都对不上。
+ * - [apiService]、[retrofit]、[httpClient] 三者的写入与读取原本不在同一个锁里。
+ *
+ * @Volatile 管的是「读到的不是某个中间态」；@Synchronized 管的是「构建与写入是一件事」。
+ * 两者缺一，问题都只是从「每次必现」变成「偶发」，而偶发的那一类最难查。
+ */
 object RetrofitClient {
 
+    @Volatile
     private var baseUrl: String = "http://10.0.2.2:8080/"
+
+    @Volatile
     private var deviceToken: String? = null
+
+    @Volatile
     private var deviceId: String? = null
 
+    @Volatile
     private var apiService: ApiService? = null
+
+    @Volatile
     private var retrofit: Retrofit? = null
+
+    @Volatile
     private var httpClient: OkHttpClient? = null
+
+    @Volatile
     private var probeClient: OkHttpClient? = null
 
     /**
      * Application context，供鉴权拦截器在收到 401 时清理本地令牌。
      * 只存 Application，不会泄漏 Activity。
      */
+    @Volatile
     private var appContext: Context? = null
 
     /** 只用于解析探活响应。Retrofit 那个 Gson 实例藏在 GsonConverterFactory 里取不出来。 */
@@ -43,6 +69,7 @@ object RetrofitClient {
     /** Retrofit 要求 baseUrl 以 / 结尾，这里统一收口，免得configure 与 ensureConfigured 各写一份。 */
     private fun normalizedUrl(url: String): String = url.trimEnd('/') + "/"
 
+    @Synchronized
     fun configure(url: String, token: String?, id: String?) {
         baseUrl = normalizedUrl(url)
         deviceToken = token
@@ -58,7 +85,11 @@ object RetrofitClient {
      * 打出去 —— 只会 401 然后无限重试，短信永远传不上去。
      *
      * 只在地址或凭据真的变了时才重建，否则每 30 秒一次的心跳都会新建一个 OkHttpClient。
+     *
+     * 整个方法在锁里：「比对四个字段 → 决定要不要重建」必须是一次原子判断。
+     * 拆开的话，两个线程可以同时读到「不一样」然后各自 configure 一次。
      */
+    @Synchronized
     fun ensureConfigured(context: Context) {
         appContext = context.applicationContext
 
@@ -77,11 +108,13 @@ object RetrofitClient {
         configure(url, token, id)
     }
 
+    @Synchronized
     fun updateToken(token: String?) {
         deviceToken = token
         resetClient()
     }
 
+    @Synchronized
     fun updateDeviceId(id: String?) {
         deviceId = id
         resetClient()
@@ -91,6 +124,7 @@ object RetrofitClient {
     fun getDeviceId(): String? = deviceId
     fun getBaseUrl(): String = baseUrl
 
+    @Synchronized
     private fun resetClient() {
         apiService = null
         retrofit = null
@@ -126,7 +160,12 @@ object RetrofitClient {
                     deviceIdProvider = { deviceId },
                     // 用 Application context，不存在泄漏。它由 ensureConfigured 记下来 ——
                     // 心跳和上报在进程被 WorkManager 拉起时都会调它，所以不会拿不到。
-                    onUnauthorized = { appContext?.let { AuthState.markTokenRejected(it) } }
+                    //
+                    // 把被拒的那份令牌一路传下去：AuthState 要拿它比对当前令牌，
+                    // 免得一条迟到的 401 删掉刚重新注册拿到的新令牌（见 markTokenRejected）。
+                    onUnauthorized = { rejected ->
+                        appContext?.let { AuthState.markTokenRejected(it, rejected) }
+                    }
                 )
             )
             .addInterceptor(loggingInterceptor)
@@ -136,6 +175,15 @@ object RetrofitClient {
             .build()
     }
 
+    /**
+     * 懒构建 + 缓存，整个判断与写入在同一把锁里。
+     *
+     * 若只是 `httpClient ?: build().also { httpClient = it }`，两个线程可以各建一个客户端，
+     * 后写的那个赢 —— 而**先构建的那个可能正被别的调用方拿着用**，于是同一进程里同时
+     * 存在两套连接池与两个 AuthInterceptor 实例。锁与方法重入（它被 getApiService 调用，
+     * 而后者也持锁）在这里都是安全的：同一线程可以重复进入同一把监视器锁。
+     */
+    @Synchronized
     private fun getHttpClient(): OkHttpClient =
         httpClient ?: buildHttpClient().also { httpClient = it }
 
@@ -156,6 +204,7 @@ object RetrofitClient {
      *
      * 不随 resetClient() 重建：它不依赖地址与令牌，没有任何可失效的配置。
      */
+    @Synchronized
     private fun getProbeClient(): OkHttpClient =
         probeClient ?: buildProbeClient().also { probeClient = it }
 

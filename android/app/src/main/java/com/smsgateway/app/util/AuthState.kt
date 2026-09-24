@@ -30,10 +30,25 @@ object AuthState {
      * 会清掉本地令牌 —— 这是关键的一步：清掉之后 `isRegistered` 变回 false，
      * 界面才肯显示「设备未注册」，用户才有机会看到并去重新注册。
      *
+     * @param rejectedToken 被拒的那份令牌，由 AuthInterceptor 原样带过来。
+     *   **必须核对它是不是当前这一份**：重新注册会换掉令牌，而注册前发出的请求
+     *   可能这时候才回来。那条迟到的 401 说的是一份已经作废的旧令牌，
+     *   照着它清库就会把刚存下的新令牌删掉 —— 界面重新显示「未注册」，
+     *   用户只能再注册一次，而重注册之后同样的事还可能再发生（每次都是概率问题）。
      * @return true 表示这是本轮第一次观察到拒绝。重复调用不会反复置位，
      *         免得每 30 秒的心跳把同一条提示刷屏。
      */
-    fun markTokenRejected(context: Context): Boolean {
+    fun markTokenRejected(context: Context, rejectedToken: String?): Boolean {
+        // 没带令牌的请求不该走到这里（AuthInterceptor 已经挡了），但这里是公开的入口，
+        // 再挡一次：把「未注册」误判成「令牌失效」的代价是三处误报，而这一次判断是免费的。
+        if (rejectedToken.isNullOrBlank()) return false
+
+        val current = DevicePrefs.deviceToken(context)
+        if (current.isNotBlank() && current != rejectedToken) {
+            // 令牌已经被换过：这份 401 说的是上一份，与现在无关。什么都不做。
+            return false
+        }
+
         DevicePrefs.clearToken(context)
         RetrofitClient.updateToken(null)
 

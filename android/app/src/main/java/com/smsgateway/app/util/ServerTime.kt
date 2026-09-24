@@ -1,6 +1,8 @@
 package com.smsgateway.app.util
 
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
@@ -21,5 +23,24 @@ object ServerTime {
     fun parseDay(raw: String?): LocalDate? {
         if (raw.isNullOrBlank()) return null
         return runCatching { LocalDate.parse(raw, DateTimeFormatter.ISO_LOCAL_DATE) }.getOrNull()
+    }
+
+    /**
+     * 服务端下发的**时刻**字符串 → 本机 epoch 毫秒。
+     *
+     * 解析不出来返回 null，调用方据此退回原串显示 —— 宁可显示得笨一点，
+     * 也不要因为一个格式变化让整页时间变成空白。
+     *
+     * 与 [parseDay] 同一个时区假设（设备与服务器同网同时区）。秒的小数部分由
+     * ISO_LOCAL_DATE_TIME 兼容，服务端加不加都对得上。
+     */
+    fun parseInstant(raw: String?): Long? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            LocalDateTime.parse(raw.trim(), DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+        }.getOrNull()
     }
 }

@@ -59,8 +59,12 @@ class GatewayForegroundService : Service() {
          * 于是服务在跑、界面却显示停止，而「启动网关」按钮此后永远点不动 ——
          * 服务本来就活着，点它只会补发一次 start，onCreate 不会再执行。
          *
-         * 服务回调都在主线程，无需同步。
+         * 服务回调都在主线程，但 [stop] 不一定：`AuthState.markTokenRejected` 与上传 worker
+         * 都会从 IO 线程调它（前者在 401 之后，后者在服务端拒绝令牌时），
+         * 而那两处都要碰这个字段。加 @Volatile 是因为它的写入方现在跨线程了 ——
+         * 单看回调那一侧「都在主线程」这条理由已经不再完整。
          */
+        @Volatile
         private var liveInstance: GatewayForegroundService? = null
 
         fun start(context: Context) {
@@ -83,6 +87,18 @@ class GatewayForegroundService : Service() {
                 context, EventLog.GATEWAY_STOPPED, EventLog.LEVEL_INFO,
                 reason = "用户主动停止"
             )
+
+            // 先摘掉存活实例，再让系统销毁它。
+            //
+            // 这一步专门为 onDestroy 里那条判断服务：那里的条件是 `liveInstance === this`，
+            // 而它下面跟着一条 WARN 级的 GATEWAY_DESTROYED（「服务被系统销毁」）。
+            // 不清这个字段的话，**每一次手动停止**都会多记一条「服务被系统销毁」——
+            // 日志页上就看不出「这次到底是用户停的、还是 MIUI 杀的」，
+            // 而那正是这台设备上最需要分清的一件事。
+            //
+            // 放在 stopService 之前而不是之后：stopService 是异步的，onDestroy 可能
+            // 在它返回之前就跑起来了。
+            liveInstance = null
 
             val intent = Intent(context, GatewayForegroundService::class.java)
             context.stopService(intent)
@@ -129,10 +145,45 @@ class GatewayForegroundService : Service() {
         // 先水合再算文案：开机广播/系统重启拉起进程时，这个类往往是全进程第一个碰
         // 心跳状态的地方，不水合就只会显示「等待首次心跳」——哪怕这台设备已经连了三天。
         HeartbeatSender.ensureLoaded(this)
-        startForeground(NOTIFICATION_ID, buildNotification(notificationText()))
+
+        if (!ensureForeground()) return
+
         if (heartbeatJob?.isActive != true) {
             heartbeatJob = startHeartbeatLoop()
         }
+    }
+
+    /**
+     * 把自己变成前台服务。返回 false 表示系统明确拒绝，本次启动应当放弃。
+     *
+     * [startForeground] 必须包在 try 里，这不是防御性写法：
+     * Android 12+ 在没有电池白名单、又不在「可在后台启动前台服务」豁免名单上的场景下
+     * （系统用 START_STICKY 重新拉起服务就是这种），它会抛
+     * `ForegroundServiceStartNotAllowedException`。这个回调里没人接得住它 ——
+     * 结果是**进程崩溃**，而下游还跟着一串：进程崩了 → START_STICKY 又被拉起 →
+     * 又崩，直到系统判定这个应用不可靠、不再拉起它。而这台设备无人值守：
+     * 从那一刻起短信不再上报，现场能看到的只有「设备离线」，没有任何证据指向这里。
+     *
+     * 接住之后放弃这一次（没有前台通知的服务活不长，硬留着只会变成一个空壳：
+     * 运行态是 true、通知还挂着、却随时会被系统回收），并**留一条痕**。
+     */
+    private fun ensureForeground(): Boolean = try {
+        startForeground(NOTIFICATION_ID, buildNotification(notificationText()))
+        true
+    } catch (e: Exception) {
+        Log.e(TAG, "startForeground 被系统拒绝，本次启动放弃", e)
+        serviceAlive = false
+        if (liveInstance === this) liveInstance = null
+        GatewayState.set(this, false)
+        // 用 write 而不是 writeNow：这是个非 suspend 的回调，而 writeNow 要求协程作用域。
+        // 写库由 EventLog 自己的 scope 承担，且 stopSelf() 不会带走那个 scope ——
+        // 这一点与 SmsReceiver 里必须用 writeNow 的场景不同，那里是「进程随时会被回收」。
+        EventLog.write(
+            this, EventLog.GATEWAY_START_BLOCKED, EventLog.LEVEL_ERROR,
+            reason = "系统不允许在后台启动前台服务（${e.javaClass.simpleName}），请手动打开应用"
+        )
+        stopSelf()
+        false
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -140,7 +191,7 @@ class GatewayForegroundService : Service() {
         // 会走，应用每次打开的对账补发（见 DashboardViewModel.ensureGatewayServiceRunning）
         // 也会走一遍。写死的话，一台已被管理员禁用、或服务器根本不可达的设备，
         // 会在每次打开应用的那一瞬间把通知刷成「已连接」，几十秒后才被心跳纠正回来。
-        startForeground(NOTIFICATION_ID, buildNotification(notificationText()))
+        if (!ensureForeground()) return START_NOT_STICKY
 
         // 每次收到启动命令都重申一次运行态，而不是只在 onCreate 里置位。
         //
