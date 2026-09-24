@@ -1,5 +1,13 @@
 import { del, get, post, put } from './http'
-import type { Device, EnrollToken, RecoveryCode, Stats, PaginatedResponse } from '../types'
+import type {
+  Device,
+  DeviceCommand,
+  DeviceCommandType,
+  EnrollToken,
+  RecoveryCode,
+  Stats,
+  PaginatedResponse,
+} from '../types'
 
 export function getDeviceList(params: {
   page?: number
@@ -72,6 +80,47 @@ export function rotateEnrollToken(): Promise<EnrollToken> {
  */
 export function setEnrollTokenEnabled(enabled: boolean): Promise<EnrollToken> {
   return put('/admin/enroll-token/enabled', undefined, { params: { enabled } })
+}
+
+/**
+ * 签发一条远程指令。
+ *
+ * **这是会改变设备本机状态的写操作**，调用方必须先二次确认，并把后果写进确认框
+ * （例如「停掉之后短信会留在手机上不再上传」）。服务端会拒掉同一设备的同类型
+ * 重复指令（返回已有的那条），所以连点两下不会产生两条记录。
+ *
+ * @param argument 只有 SET_PHONE 需要（号码）。其余类型传了会被服务端拒绝 ——
+ *   那是刻意的：静默丢掉参数会让调用方以为它生效了。
+ */
+export function issueDeviceCommand(
+  deviceId: string,
+  type: DeviceCommandType,
+  argument?: string | null
+): Promise<DeviceCommand> {
+  return post(`/admin/device/${encodeURIComponent(deviceId)}/command`, {
+    type,
+    argument: argument ?? null,
+  })
+}
+
+/** 某台设备的指令列表，最近的在前（后端按 id 倒序）。 */
+export function getDeviceCommands(
+  deviceId: string,
+  params: { page?: number; pageSize?: number } = {}
+): Promise<PaginatedResponse<DeviceCommand>> {
+  return get(`/admin/device/${encodeURIComponent(deviceId)}/command/list`, params)
+}
+
+/**
+ * 撤销一条指令。
+ *
+ * 这是**唯一**能在指令送达设备之前阻止它生效的手段 —— 「已下发但还没回执」的指令
+ * 也能撤销（设备离线时点错了，就靠这个）。已经走到终态的指令服务端会拒绝，报 400。
+ *
+ * 路径里不带 deviceId：id 是全局唯一的，两个都能到达同一条指令的地址只会让人困惑。
+ */
+export function cancelDeviceCommand(id: number): Promise<DeviceCommand> {
+  return post(`/admin/device/command/${id}/cancel`)
 }
 
 /**

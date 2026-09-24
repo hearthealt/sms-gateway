@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smsgateway.config.NotifyProperties;
 import com.smsgateway.model.entity.NotifyChannel;
 import com.smsgateway.model.entity.NotifyDelivery;
+import com.smsgateway.model.enums.AlertType;
+import com.smsgateway.model.enums.EventType;
 import com.smsgateway.model.enums.NotifyDeliveryStatus;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.NotifyChannelRepository;
@@ -27,6 +29,11 @@ import org.mockito.quality.Strictness;
 import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -66,6 +73,13 @@ class NotifyDispatcherTest {
      */
     @Mock private AdminEventBroadcaster adminEvents;
     @Mock private EventLogService eventLogService;
+
+    /**
+     * 告警入队口。渠道被自动停用时会经它叫一声（见 {@code disableChannel}）——
+     * 与上面那两个 mock 同一个理由：@InjectMocks 只会注入「有对应 @Mock 的」参数，
+     * 缺了它就是 null，而生产里它由 Spring 注入、从来不会是 null。
+     */
+    @Mock private AlertOutbox alertOutbox;
 
     /**
      * 分类器用**真实实现**（无依赖、纯逻辑）：它决定了失败该重试还是判死，
@@ -160,5 +174,53 @@ class NotifyDispatcherTest {
 
         assertThat(delivery.getResponseCode()).isNull();
         assertThat(delivery.getLastError()).contains("Connection refused");
+    }
+
+    // ------------------------------------------------------------------ 告警载荷
+
+    private NotifyDelivery alertDelivery() {
+        NotifyDelivery delivery = NotifyDelivery.alert(
+                AlertType.DEVICE_OFFLINE, "device:android-abc", "设备「车间手机」已离线 32 分钟", 1L);
+        delivery.setId(7L);
+        return delivery;
+    }
+
+    @Test
+    @DisplayName("告警投递**不去碰** sms_message —— 它的 smsMessageId 是 null")
+    void alertDeliveryNeverTouchesSmsRepository() {
+        // 这一条守的是一个会**静默降级**的 bug：不去分支的话，findById(null) 会直接抛
+        // InvalidDataAccessApiUsageException，掉进通用 catch 被当成「没到达对端、可重试」，
+        // 于是同一条告警一直重试到判死 —— 而日志里只有一句「未预期异常」。
+        when(senderRegistry.get(any())).thenReturn(null); // 只关心有没有走到取正文那一步
+
+        NotifyDelivery delivery = alertDelivery();
+        dispatcher.sendOne(channel(), delivery);
+
+        verify(smsMessageRepository, never()).findById(any());
+        // 发送实现不存在 → 判死，而不是重试
+        assertThat(delivery.getStatus()).isEqualTo(NotifyDeliveryStatus.DEAD);
+    }
+
+    @Test
+    @DisplayName("告警走到终点记一条 ALERT_DELIVERY_DEAD")
+    void alertDeadRecordsErrorEvent() {
+        NotifyDelivery delivery = alertDelivery();
+
+        // 401 在分类器里是终态（配置错，重试无意义）
+        dispatcher.applyResult(channel(), delivery, SendResult.failed(401, "unauthorized"));
+
+        assertThat(delivery.getStatus()).isEqualTo(NotifyDeliveryStatus.DEAD);
+        verify(eventLogService).record(eq(EventType.ALERT_DELIVERY_DEAD), anyString());
+    }
+
+    @Test
+    @DisplayName("短信走到终点**不**记 ALERT_DELIVERY_DEAD —— 那是常态，记它只会把事件表刷满")
+    void smsDeadDoesNotRecordAlertEvent() {
+        NotifyDelivery delivery = delivery();
+
+        dispatcher.applyResult(channel(), delivery, SendResult.failed(401, "unauthorized"));
+
+        assertThat(delivery.getStatus()).isEqualTo(NotifyDeliveryStatus.DEAD);
+        verify(eventLogService, never()).record(eq(EventType.ALERT_DELIVERY_DEAD), anyString());
     }
 }

@@ -74,6 +74,27 @@ public class NotifyMessageFactory {
     }
 
     /**
+     * 告警消息的正文。
+     *
+     * <p>格式写死：{@code 【短信网关】<摘要>}。摘要由调用方拼好（「设备「车间手机」已离线
+     * 32 分钟（最后心跳 12:04）」），因为只有它知道该说清哪些信息。
+     *
+     * <p><b>刻意不理会 {@code notify.include-meta}。</b>那个开关的语义是「给**短信原文**
+     * 前面加一行来源信息」—— 因为短信正文里本来没有「哪台机器哪个号收的」。而告警的正文
+     * 是我们自己构造的，它本来就带着主体与时刻。跟着那个开关走只会让关掉它的人莫名其妙地
+     * 收到一条没有主语的告警。
+     *
+     * <p>前缀用应用名而不是设备名：一条告警可能关于某个渠道，与设备无关，
+     * 而「短信网关」总是对的。
+     */
+    public RenderedMessage buildAlert(String summary) {
+        String text = "【短信网关】" + (summary == null ? "" : summary);
+        // smsMessageId 为 null：告警不关联任何短信。RenderedMessage 用的是包装类型，
+        // 所以这个 record 一个字都不用改。
+        return new RenderedMessage(text, null, null, null, null, "");
+    }
+
+    /**
      * 按 **UTF-8 字节数**截断，且不切断多字节字符。
      *
      * <p>企微与钉钉的长度限制是按字节算的（markdown ≤ 4096 字节），而**中文一个字 3 字节**

@@ -6,10 +6,12 @@ import com.smsgateway.model.dto.RecoveryCodeView;
 import com.smsgateway.model.dto.StatsView;
 import com.smsgateway.model.entity.SmsDevice;
 import com.smsgateway.model.enums.EventType;
+import com.smsgateway.repository.DeviceCommandRepository;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.EventLogRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
 import com.smsgateway.repository.SmsMessageRepository;
+import com.smsgateway.repository.SmsOutboundRepository;
 import com.smsgateway.util.HashUtil;
 import com.smsgateway.util.SecretGenerator;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +34,8 @@ public class AdminDeviceService {
     private final DeviceRepository deviceRepository;
     private final SmsMessageRepository smsMessageRepository;
     private final NotifyDeliveryRepository notifyDeliveryRepository;
+    private final DeviceCommandRepository deviceCommandRepository;
+    private final SmsOutboundRepository smsOutboundRepository;
     private final DeviceService deviceService;
     private final EventLogRepository eventLogRepository;
     private final EventLogService eventLogService;
@@ -115,6 +119,14 @@ public class AdminDeviceService {
         // 认不回属于谁 —— 它们会一直挂在「投递记录」页上，渲染成一行发送方是「-」、
         // 内容是空白的孤儿（见 NotifyDeliveryService.toView）。
         int removedDeliveries = notifyDeliveryRepository.deleteByDeviceId(device.getId());
+        // 远程指令同理，而且更明显：device_command.device_id 上也没有外键，
+        // 留下来的行会在设备详情页上渲染成一条认不出设备的指令（设备名显示为空），
+        // 而它对应的设备已经不在列表里了，点都点不进去 —— 那种行没有任何人能处理掉。
+        int removedCommands = deviceCommandRepository.deleteByDeviceId(device.getId());
+        // 外发短信同理。**但这里有一个额外的理由**：留下来的行会带着收信方号码与正文，
+        // 而那是一条「本来该由这台设备发出去、但它已经不在了」的记录 —— 既不会有人
+        // 去发，也没有设备能解释它。删掉比留一堆看不懂的孤儿行好。
+        int removedOutbound = smsOutboundRepository.deleteByDeviceId(device.getId());
         int removedSms = smsMessageRepository.deleteByDeviceId(device.getId());
 
         // 这台设备的历史事件一并清掉，与上面两条同一个道理：设备既然移出车队，
@@ -128,8 +140,9 @@ public class AdminDeviceService {
         // 再写主键就是一个永远悬空的外键。
         eventLogService.recordAfterCommit(EventType.DEVICE_DELETED, deviceId, "管理员删除设备");
 
-        log.warn("Admin deleted device {}, together with {} sms rows and {} notify deliveries",
-                deviceId, removedSms, removedDeliveries);
+        log.warn("Admin deleted device {}, together with {} sms rows, {} notify deliveries, "
+                        + "{} device commands and {} outbound rows",
+                deviceId, removedSms, removedDeliveries, removedCommands, removedOutbound);
         return removedSms;
     }
 

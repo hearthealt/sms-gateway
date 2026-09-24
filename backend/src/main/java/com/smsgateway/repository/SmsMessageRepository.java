@@ -64,6 +64,32 @@ public interface SmsMessageRepository extends JpaRepository<SmsMessage, Long> {
                                                           @Param("ignoredStatus") SmsStatus ignoredStatus,
                                                           Pageable pageable);
 
+    /**
+     * 同上，再加一个关键词：发送方**或**正文命中。
+     *
+     * <p>关键词在**服务端**过滤，而不是让设备端在已加载的几页里筛 —— 设备端的记录页是
+     * 无限滚动的（一次只加载一页），前端筛只能筛到「已经拉到的那几页」，
+     * 于是「明明有这条却说没有」，比不做搜索更误导。
+     *
+     * <p>{@code :allKeywords} 是那个老写法（与 {@code EventLogRepository.search} 同源）：
+     * 枚举/参数传 null 去做 {@code is null} 判断时 Hibernate 6 的类型推断出过问题，
+     * 所以「要不要过滤」与「过滤成什么」拆成两个参数。这里关键词是字符串，本可以用
+     * {@code :keyword is null}，但保持一致更好读。
+     */
+    @Query("select m from SmsMessage m "
+            + "where m.deviceId = :deviceId "
+            + "and (:includeIgnored = true or m.status <> :ignoredStatus) "
+            + "and (:allKeywords = true "
+            + "     or m.sender like concat('%', :keyword, '%') "
+            + "     or m.content like concat('%', :keyword, '%')) "
+            + "order by m.receiveTime desc")
+    Page<SmsMessage> searchByDevice(@Param("deviceId") Long deviceId,
+                                    @Param("includeIgnored") boolean includeIgnored,
+                                    @Param("ignoredStatus") SmsStatus ignoredStatus,
+                                    @Param("allKeywords") boolean allKeywords,
+                                    @Param("keyword") String keyword,
+                                    Pageable pageable);
+
     long countByReceiveTimeBetween(LocalDateTime start, LocalDateTime end);
 
     long countByReceiveTimeBetweenAndCodeIsNotNull(LocalDateTime start, LocalDateTime end);

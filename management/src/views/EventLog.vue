@@ -167,7 +167,7 @@ const records = ref<EventLogItem[]>([])
 const typeOptions = ref<EventTypeOption[]>([])
 const loading = ref(false)
 const page = ref(1)
-const pageSize = ref(15)
+const pageSize = ref(10)
 const total = ref(0)
 const dateRange = ref<string[] | null>(null)
 

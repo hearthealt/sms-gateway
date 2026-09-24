@@ -13,6 +13,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 外发短信（服务端下发、由本机发出去）才用得到。
+         **不在启动时批量申请**：这个应用的主职是收码，为一个可能永远用不到的能力
+         在首次启动就弹「发送短信」授权，只会让人怀疑它是干嘛的。真正用到而没有权限时
+         会在控制台显示一条能照着做的失败原因（见 SmsSender）。
+
+         ⚠️ 这个权限会触发 Google Play 的短信权限政策审查。本项目是侧载分发，
+         但要上架的话得先过那一关（README 的安全注意事项里写了）。 -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
     <!-- 应用锁用指纹/人脸代打 PIN。平台 BiometricPrompt 要求它；都是普通权限，不弹框。 -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
@@ -99,6 +108,57 @@
             android:name=".service.GatewayForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!--
+          外发短信的发送结果。由 `SmsSender` 用**显式组件**的 PendingIntent 触发，
+          所以不需要 intent-filter；exported="false" 表示只有本应用能触发它
+          （Android 12+ 起没有 intent-filter 的组件必须显式声明 exported）。
+
+          进程不在时也会被拉起来 —— 短信发出去到收到结果之间，进程完全可能被回收，
+          而那份结果只有一次送达机会（服务端只下发一次）。
+        -->
+        <receiver
+            android:name=".receiver.SmsSentReceiver"
+            android:exported="false" />
+
+        <!--
+          快捷设置磁贴（下拉通知栏里的那一块）。
+
+          `BIND_QUICK_SETTINGS_TILE` 是系统要求的权限：只有系统能绑定这个服务，
+          应用自己绑不了 —— 少了它，磁贴会一直显示成「无法加载」。
+          exported="true" 也是必须的（系统要能访问它），但受上面那个权限保护。
+        -->
+        <service
+            android:name=".service.GatewayTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_logo_mark"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          「一键导出诊断包」把生成好的文本交给系统分享面板用。
+
+          权限**必须**写 ${applicationId} 这个占位符，不能写死 com.smsgateway.app ——
+          本项目的 namespace 是 com.smsgateway.app，而 applicationId 是 com.yunyi.smshub，
+          而 FileProvider 校验的是**已安装的包名**。写死 namespace 的话
+          getUriForFile 会直接抛 IllegalArgumentException，表现是「点了导出没反应」。
+
+          exported="false" + grantUriPermissions="true"：只有拿到我们显式授权的
+          那一个 URI 的应用能读它，不是把目录开放出去。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>

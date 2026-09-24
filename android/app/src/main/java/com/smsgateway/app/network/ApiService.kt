@@ -1,6 +1,9 @@
 package com.smsgateway.app.network
 
 import com.smsgateway.app.model.ApiResponse
+import com.smsgateway.app.model.CommandAckRequest
+import com.smsgateway.app.model.CommandAckResult
+import com.smsgateway.app.model.DeviceEventLogEntry
 import com.smsgateway.app.model.DeviceInfo
 import com.smsgateway.app.model.DeviceSmsStats
 import com.smsgateway.app.model.DeviceTrend
@@ -38,6 +41,29 @@ interface ApiService {
     suspend fun reportOffline(): Response<ApiResponse<Unit>>
 
     /**
+     * 上报远程指令的执行结果。
+     *
+     * 走独立端点而不是搭下一次心跳：回执必须**立刻**发。搭下一次心跳意味着「已下发 →
+     * 已执行」最长要 60 秒，而管理员点了「停止网关」之后，控制台 60 秒内一直显示
+     * 「已下发」，他会以为按钮没反应而再点一次。
+     *
+     * 挂在 /api/device 下，同样受设备鉴权拦截器保护。
+     */
+    @POST("api/device/command/ack")
+    suspend fun ackCommands(@Body request: CommandAckRequest): Response<ApiResponse<CommandAckResult>>
+
+    /**
+     * 本设备在**服务端**的运行日志，给「一键导出诊断包」用。
+     *
+     * 不分页，只取最近 N 条（服务端夹到 200）：那是一次快照，不是浏览功能。
+     * 返回里的接收号码已由服务端打码。
+     */
+    @GET("api/device/eventlog")
+    suspend fun deviceEventLog(
+        @Query("limit") limit: Int
+    ): Response<ApiResponse<List<DeviceEventLogEntry>>>
+
+    /**
      * 本设备在服务端的历史记录。
      * 挂在 /api/device 下，因此自动受设备鉴权拦截器保护，设备身份由令牌决定，无需传 deviceId。
      */
@@ -45,7 +71,14 @@ interface ApiService {
     suspend fun mySms(
         @Query("page") page: Int,
         @Query("pageSize") pageSize: Int,
-        @Query("includeIgnored") includeIgnored: Boolean
+        @Query("includeIgnored") includeIgnored: Boolean,
+        /**
+         * 关键词，命中发送方**或**正文；null 表示不过滤。
+         *
+         * **必须在服务端筛**：这个列表是无限滚动的（一次只加载一页），
+         * 在已加载的几页里做前端筛只会给出「明明有这条却说没有」的结论。
+         */
+        @Query("keyword") keyword: String?
     ): Response<ApiResponse<PageResult<SmsRecord>>>
 
     /** 本设备今日的短信统计。设备身份同样来自令牌，服务端据此计算。 */

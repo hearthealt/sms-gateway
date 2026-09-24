@@ -14,6 +14,41 @@ public final class PhoneUtil {
     }
 
     /**
+     * 打码：保留前 3 位与后 4 位，中间用星号。
+     *
+     * <pre>
+     * "13800138000"    → "138****8000"
+     * "+86 138-0013-8000" → "138****8000"
+     * "12345"          → "1****"      （太短时只留首位，后段可能重叠，所以整段打掉）
+     * ""/null          → null
+     * </pre>
+     *
+     * <p>**这是给「离开服务端的数据」用的**：设备端的诊断包会把号码带出去给外部看，
+     * 那里只需要知道「有没有号码、两张卡分不分得清」，不需要完整值 ——
+     * 而完整值在管理后台里管理员本来就看得到，所以打码不损失任何运维信息
+     * （与运行日志页保留完整值并不冲突：那一条不出服务端）。
+     *
+     * <p>先归一化再打码：不这么做的话 {@code +86 138****8000} 这种形态里
+     * 星号旁边的数字还能拼出一部分原号，而「格式不同、打出来的结果不同」本身
+     * 也会让对比两条记录变得不可靠。
+     */
+    public static String mask(String raw) {
+        String digits = normalize(raw);
+        if (digits.isEmpty()) {
+            return null;
+        }
+        if (digits.length() >= 11) {
+            return digits.substring(0, 3) + "****" + digits.substring(digits.length() - 4);
+        }
+        if (digits.length() >= 7) {
+            // 7~10 位：前 3 后 2，中间全部打掉
+            return digits.substring(0, 3) + "****" + digits.substring(digits.length() - 2);
+        }
+        // 位数太少，前 3 后 2 会重叠 —— 那等于把整个号码露出来，所以只留首位
+        return digits.substring(0, 1) + "****";
+    }
+
+    /**
      * 归一化为纯数字，并去掉中国大陆的 86 国家码。
      *
      * <pre>

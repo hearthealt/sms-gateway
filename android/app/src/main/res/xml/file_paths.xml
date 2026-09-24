@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只暴露 diagnostics/ 这一个子目录，**不写 <cache-path path="." />**。
+
+  FileProvider 是一个把应用私有目录暴露给外部应用的通道，暴露面越窄越好：
+  写 "." 等于把整个 cacheDir 都交出去（那里还会有 Retrofit/OkHttp 之类的临时文件），
+  而我们需要共享的只有诊断包这一个文件。
+-->
+<paths>
+    <cache-path name="diagnostics" path="diagnostics/" />
+</paths>

@@ -129,4 +129,26 @@ interface SmsQueueDao {
 
     @Query("DELETE FROM sms_queue WHERE status = 'uploaded'")
     suspend fun deleteAllUploaded(): Int
+
+    /**
+     * 全部重试：把 failed 的那些扫回 pending，并**清零重试计数**。
+     *
+     * 与逐条 [retryNow] 同义（用户主动介入，重新给满重试预算），只是一次做完整批。
+     * 不碰 `uploaded` 的行 —— 那已经传上去了，重排只会让服务端记一次重复。
+     *
+     * 也不碰 `pending` 的行：它们本来就在等着重试，动它们反而会把 in-flight 的
+     * 退避时刻（nextRetryAt）清零、导致一条正常退避中的短信被立刻重发。
+     */
+    @Query("UPDATE sms_queue SET status = 'pending', retryCount = 0, nextRetryAt = 0 WHERE status = 'failed'")
+    suspend fun retryAllFailed(): Int
+
+    /**
+     * 删除全部 failed 的行。
+     *
+     * **只提供「删已失败」，不提供「全部删除」**：后者会把还没上传的验证码直接丢掉，
+     * 而且没有撤销。已失败的行是服务端明确拒绝过的（400/422），重试多少次结果都一样 ——
+     * 删它们是清理，不是丢数据。
+     */
+    @Query("DELETE FROM sms_queue WHERE status = 'failed'")
+    suspend fun deleteFailed(): Int
 }

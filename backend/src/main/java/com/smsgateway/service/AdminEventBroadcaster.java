@@ -66,6 +66,30 @@ public class AdminEventBroadcaster {
     public static final String EVENT_EVENTS = "events";
 
     /**
+     * 外发短信有入队、状态推进或撤销。处置方：发送短信页。
+     *
+     * <p>这条**是**实时性承诺（与告警规则页那种「只覆盖另一个管理员改了」不同）：
+     * 状态由设备的心跳回执推进，那不是任何人在界面上的操作，不推就只能靠轮询。
+     */
+    public static final String EVENT_OUTBOUND = "outbound";
+
+    /**
+     * 告警规则被增删改。处置方：告警规则页。
+     *
+     * <p>这一页同转发规则页：**没有服务端自变源**（变化只来自管理员自己），
+     * 推它只覆盖「另一个管理员改了」，别把它当成实时性承诺。
+     */
+    public static final String EVENT_ALERT_RULES = "alert-rules";
+
+    /**
+     * 远程指令有签发、下发结果、回执或撤销。处置方：设备详情页的指令面板。
+     *
+     * <p>不发这个信号的话，管理员点了「停止网关」之后要自己刷新页面才知道结果，
+     * 而这个按钮的全部价值就是「点完能看到它到底生效没有」。
+     */
+    public static final String EVENT_COMMANDS = "commands";
+
+    /**
      * 当前挂着的事件流。
      *
      * <p>CopyOnWriteArraySet：订阅/取消订阅远比广播频繁，读多写少，

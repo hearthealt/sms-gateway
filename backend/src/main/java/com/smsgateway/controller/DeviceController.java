@@ -2,7 +2,10 @@ package com.smsgateway.controller;
 
 import com.smsgateway.model.dto.*;
 import com.smsgateway.service.AdminSmsService;
+import com.smsgateway.service.DeviceCommandService;
 import com.smsgateway.service.DeviceService;
+import com.smsgateway.service.EventLogService;
+import com.smsgateway.service.SmsOutboundService;
 import com.smsgateway.service.notify.NotifyChannelService;
 import com.smsgateway.util.PageUtil;
 import jakarta.servlet.http.HttpServletRequest;
@@ -25,6 +28,9 @@ public class DeviceController {
     private final DeviceService deviceService;
     private final AdminSmsService adminSmsService;
     private final NotifyChannelService notifyChannelService;
+    private final DeviceCommandService deviceCommandService;
+    private final SmsOutboundService smsOutboundService;
+    private final EventLogService eventLogService;
 
     @PostMapping("/register")
     public ResponseEntity<ApiResult<DeviceRegisterResponse>> register(@Valid @RequestBody DeviceRegisterRequest request) {
@@ -49,8 +55,29 @@ public class DeviceController {
         String deviceId = (String) httpRequest.getAttribute("deviceId");
 
         log.debug("Heartbeat request: deviceId={}", deviceId);
+
+        // 先处理心跳本身再取指令：心跳里会校验设备是否存在（不存在就抛），
+        // 而 claimForDelivery 是查不到设备就静默返回空 —— 顺序反了的话，
+        // 一台已被删除的设备会拿到 200 而不是那个本该出现的错误。
         String status = deviceService.heartbeat(deviceId, request);
-        return ResponseEntity.ok(ApiResult.success(new HeartbeatResponse(status)));
+
+        boolean probe = Boolean.TRUE.equals(request.getCommandProbe());
+
+        // 外发短信的结果**所有心跳都收**（含探测心跳）：网关虽然停了，
+        // 停之前发出去那几条的结果还是该报上来。
+        smsOutboundService.applyResults(deviceId, request.getOutboundResults());
+
+        // 远程指令搭心跳响应下发。commandProbe=true 时（网关已停止后的低频探测）
+        // 只下发「启动网关」一条，理由见 HeartbeatRequest.commandProbe。
+        List<DeviceCommandPayload> commands = deviceCommandService.claimForDelivery(deviceId, probe);
+
+        // 外发短信**只在常规心跳上下发**：停掉网关的意图是「这台机器冻结住」，
+        // 那时让它发短信（要计费、对方会收到）是违背这个意图的。
+        List<SmsOutboundPayload> outbound = probe
+                ? List.of()
+                : smsOutboundService.claimForDelivery(deviceId);
+
+        return ResponseEntity.ok(ApiResult.success(new HeartbeatResponse(status, commands, outbound)));
     }
 
     /**
@@ -80,11 +107,13 @@ public class DeviceController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int pageSize,
             @RequestParam(defaultValue = "true") boolean includeIgnored,
+            @RequestParam(required = false) String keyword,
             HttpServletRequest httpRequest) {
 
         String deviceId = (String) httpRequest.getAttribute("deviceId");
-        return ResponseEntity.ok(ApiResult.success(
-                adminSmsService.byDevice(deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize), includeIgnored)));
+        return ResponseEntity.ok(ApiResult.success(adminSmsService.byDevice(
+                deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize),
+                includeIgnored, keyword)));
     }
 
     /**
@@ -158,5 +187,23 @@ public class DeviceController {
 
         String deviceId = (String) httpRequest.getAttribute("deviceId");
         return ResponseEntity.ok(ApiResult.success(deviceService.trend(deviceId, days)));
+    }
+
+    /**
+     * 本设备在服务端的运行日志 —— 给「一键导出诊断包」用。
+     *
+     * <p>挂在这里而不是管理端：设备读的是**自己**的记录（身份取自令牌），
+     * 与 {@link #mySms} 同一条规矩。诊断包的价值恰恰在于把两端拼到一起 ——
+     * 只有设备本地那一半，「设备说传上去了、服务端说没收到」这个问题仍然没人能回答。
+     *
+     * <p>不分页，只取最近 N 条（服务端夹到 200）：那是一次快照，不是浏览功能。
+     */
+    @GetMapping("/eventlog")
+    public ResponseEntity<ApiResult<List<DeviceEventLogView>>> eventLog(
+            @RequestParam(defaultValue = "200") int limit,
+            HttpServletRequest httpRequest) {
+
+        String deviceId = (String) httpRequest.getAttribute("deviceId");
+        return ResponseEntity.ok(ApiResult.success(eventLogService.forDevice(deviceId, limit)));
     }
 }

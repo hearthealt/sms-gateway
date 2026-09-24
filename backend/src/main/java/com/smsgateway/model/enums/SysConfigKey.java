@@ -62,6 +62,17 @@ public enum SysConfigKey {
             "渠道失败阈值",
             "渠道连续失败达到这个次数后自动停用。"),
 
+    // ---------------------------------------------------------------- 外发短信
+
+    OUTBOUND_DAILY_LIMIT_PER_DEVICE(
+            "outbound.daily-limit-per-device",
+            "20",
+            Type.INT,
+            Group.OUTBOUND,
+            "每台设备每日上限（条）",
+            "外发短信要计费，也受运营商与合规约束。一次误操作不该把一台设备变成短信轰炸机。"
+                    + "**0 表示不限。**"),
+
     // ---------------------------------------------------------------- 短信数据
 
     SMS_RETENTION_DAYS(
@@ -97,6 +108,52 @@ public enum SysConfigKey {
             "运行日志清理时间",
             "每天在这个时刻清理。比短信清理晚 10 分钟，两批不在同一分钟抢锁。"),
 
+    // ---------------------------------------------------------------- 故障告警
+    //
+    // 刻意**没有** alert.enabled 总开关：转发总开关已经管着整条投递链路，
+    // 再加一个会让两者的交互变成要解释的事（「转发开着、告警关着」算不算配错？），
+    // 而每条告警规则已经有自己的 enabled。
+
+    ALERT_OFFLINE_AFTER_MINUTES(
+            "alert.offline-after-minutes",
+            "10",
+            Type.INT,
+            Group.ALERT,
+            "离线多久后告警（分钟）",
+            "设备的最后一次心跳超过这个时长才算离线。太短会把网络抖动变成告警。"),
+
+    ALERT_COOLDOWN_MINUTES(
+            "alert.cooldown-minutes",
+            "60",
+            Type.INT,
+            Group.ALERT,
+            "同类告警冷却（分钟）",
+            "同一台设备反复上下线时，每冷却窗口最多一条。调小会让不稳定的网络刷屏。"),
+
+    ALERT_QUIET_HOURS_ENABLED(
+            "alert.quiet-hours-enabled",
+            "false",
+            Type.BOOLEAN,
+            Group.ALERT,
+            "启用静默时段",
+            "开启后，静默时段内产生的告警推迟到时段结束时发出，**不会丢弃**。"),
+
+    ALERT_QUIET_HOURS_START(
+            "alert.quiet-hours-start",
+            "22:00",
+            Type.TIME,
+            Group.ALERT,
+            "静默时段开始",
+            "可以跨零点，例如 22:00 到次日 08:00。"),
+
+    ALERT_QUIET_HOURS_END(
+            "alert.quiet-hours-end",
+            "08:00",
+            Type.TIME,
+            Group.ALERT,
+            "静默时段结束",
+            "仅在上面的开关打开时生效。"),
+
     // ---------------------------------------------------------------- 安全与会话
 
     ADMIN_TOKEN_TTL_SECONDS(
@@ -124,6 +181,8 @@ public enum SysConfigKey {
     /** 管理端按它把配置分成几张卡片。 */
     public enum Group {
         NOTIFY("消息转发"),
+        ALERT("故障告警"),
+        OUTBOUND("外发短信"),
         DATA("短信数据"),
         SECURITY("安全与会话");
 

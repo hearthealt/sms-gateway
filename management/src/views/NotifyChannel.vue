@@ -635,16 +635,23 @@ async function handleDelete(row: NotifyChannel) {
 </script>
 
 <style scoped>
+/*
+ * 标题行与表格之间用一条细分隔线分区 —— 与其余页面（采集规则 / 投递记录 /
+ * 设备列表 / 短信记录 / API 密钥 / 运行日志 / 接口文档 / 系统设置）完全一致。
+ * 圆角与边框由 App.vue 的 .el-card 全局规则给，这里不重复声明。
+ */
 .action-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  padding-bottom: 20px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 .action-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .action-title {
   font-size: 16px;

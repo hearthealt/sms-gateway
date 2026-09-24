@@ -5,6 +5,7 @@ import com.smsgateway.model.dto.PageResult;
 import com.smsgateway.model.entity.NotifyChannel;
 import com.smsgateway.model.entity.NotifyDelivery;
 import com.smsgateway.model.entity.SmsMessage;
+import com.smsgateway.model.enums.NotifyDeliverySource;
 import com.smsgateway.model.enums.NotifyDeliveryStatus;
 import com.smsgateway.repository.NotifyChannelRepository;
 import com.smsgateway.repository.NotifyDeliveryRepository;
@@ -22,6 +23,7 @@ import com.smsgateway.service.AdminEventBroadcaster;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -59,9 +61,16 @@ public class NotifyDeliveryService {
 
         List<NotifyDelivery> rows = result.getContent();
 
-        // 各批量取一次，避免 N+1：一页 20 条时逐个 findById 就是 20 次查询
+        // 各批量取一次，避免 N+1：一页 20 条时逐个 findById 就是 20 次查询。
+        // 告警行的 smsMessageId 是 null，**必须滤掉**再交给 findAllById ——
+        // 里面混进 null 会让 Hibernate 直接抛异常，整页投递记录都打不开。
+        List<Long> smsIds = rows.stream()
+                .map(NotifyDelivery::getSmsMessageId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
         Map<Long, SmsMessage> smsById = smsMessageRepository
-                .findAllById(rows.stream().map(NotifyDelivery::getSmsMessageId).distinct().toList())
+                .findAllById(smsIds)
                 .stream()
                 .collect(Collectors.toMap(SmsMessage::getId, Function.identity(), (a, b) -> a));
 
@@ -120,8 +129,11 @@ public class NotifyDeliveryService {
 
         log.info("手动重投：deliveryId={}", id);
 
-        // channel 在上面校验时就查过了，这里直接复用（那时已保证非 null）
-        SmsMessage sms = smsMessageRepository.findById(delivery.getSmsMessageId()).orElse(null);
+        // channel 在上面校验时就查过了，这里直接复用（那时已保证非 null）。
+        // 告警行没有关联短信，findById(null) 会抛 —— 必须先判来源。
+        SmsMessage sms = delivery.getSmsMessageId() == null
+                ? null
+                : smsMessageRepository.findById(delivery.getSmsMessageId()).orElse(null);
         return toView(delivery, sms, channel);
     }
 
@@ -151,6 +163,19 @@ public class NotifyDeliveryService {
         view.setLastError(delivery.getLastError());
         view.setSentAt(delivery.getSentAt());
         view.setCreatedAt(delivery.getCreatedAt());
+        view.setSourceType(delivery.getSourceType().name());
+
+        // 告警行：正文预览就是那条告警的摘要。
+        //
+        // **这一支必须判在 `sms == null` 之前。** 告警的 sms 天然为 null，
+        // 沿用下面那个判据的话，每一行告警都会显示成「（原短信已删除）」——
+        // 而那是一句看起来很确定的谎话，排查时会把人引到完全错误的方向。
+        if (delivery.getSourceType() == NotifyDeliverySource.ALERT) {
+            view.setAlertTypeLabel(
+                    delivery.getAlertType() == null ? null : delivery.getAlertType().label());
+            view.setContentPreview(delivery.getAlertSummary());
+            return view;
+        }
 
         if (sms != null) {
             view.setSender(sms.getSender());

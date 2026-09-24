@@ -63,12 +63,24 @@ public class AdminSmsService {
         return PageResult.of(toViews(result.getContent()), result.getTotalElements(), page, pageSize);
     }
 
-    public PageResult<SmsView> byDevice(String deviceId, int page, int pageSize, boolean includeIgnored) {
+    /**
+     * 某台设备的短信记录。
+     *
+     * @param keyword 关键词，命中**发送方或正文**任一即可；空表示不过滤。
+     *                在服务端筛而不是让设备端在已加载的几页里筛 —— 设备端是无限滚动的，
+     *                前端筛只会给出「明明有却说没有」的结论。
+     */
+    public PageResult<SmsView> byDevice(String deviceId, int page, int pageSize,
+                                        boolean includeIgnored, String keyword) {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new IllegalArgumentException("设备不存在: " + deviceId));
 
-        Page<SmsMessage> result = smsMessageRepository.findByDeviceIdOrderByReceiveTimeDesc(
-                device.getId(), includeIgnored, SmsStatus.IGNORED, PageRequest.of(page - 1, pageSize));
+        String trimmed = keyword == null || keyword.isBlank() ? null : keyword.trim();
+
+        Page<SmsMessage> result = smsMessageRepository.searchByDevice(
+                device.getId(), includeIgnored, SmsStatus.IGNORED,
+                trimmed == null, trimmed == null ? "" : trimmed,
+                PageRequest.of(page - 1, pageSize));
 
         return PageResult.of(toViews(result.getContent()), result.getTotalElements(), page, pageSize);
     }

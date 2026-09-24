@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
@@ -56,4 +57,32 @@ public interface DeviceRepository extends JpaRepository<SmsDevice, Long> {
             + "where d.status <> 'DISABLED' and d.lastHeartbeatAt is not null and d.lastHeartbeatAt > :since "
             + "and (d.reportedOfflineAt is null or d.lastHeartbeatAt > d.reportedOfflineAt)")
     Set<Long> findOnlineIds(@Param("since") LocalDateTime since);
+
+    /**
+     * 「沉默下去」超过给定时刻的设备 —— 离线告警的判据。
+     *
+     * <p>三个条件缺一不可，理由见 {@code OfflineAlertWatcher} 的类注释：
+     *
+     * <ol>
+     *   <li>{@code status <> 'DISABLED'} —— 被禁用的设备本来就该安静，
+     *       为它告警等于对着一个已经处理过的状态重复叫人。</li>
+     *   <li>{@code lastHeartbeatAt is not null} —— **从没心跳过的设备是「还没启用」，
+     *       不是「离线」**。少了这一条，每一台刚扫码接入、还没被打开的机器都会在
+     *       十几分钟后收到一条离线告警。</li>
+     *   <li>{@code reportedOfflineAt is null or lastHeartbeatAt > reportedOfflineAt}
+     *       —— 只挑「沉默下去的」，不挑「说过再见的」。{@code reported_offline_at}
+     *       只在有人主动停网关时写入（设备自己报的，或服务端在收到远程停机回执时补的），
+     *       那不是故障，不该告警。**否则管理员远程停掉一台设备之后，会收到一条
+     *       由他自己的动作触发的离线告警。**</li>
+     * </ol>
+     *
+     * <p>判据与 {@link #countOnlineSince} / {@code DeviceService.isOnline} 同源，
+     * 所以不会出现「仪表盘说在线、告警说离线」这种两套说法。
+     */
+    @Query("select d from SmsDevice d "
+            + "where d.status <> 'DISABLED' and d.lastHeartbeatAt is not null "
+            + "and (d.reportedOfflineAt is null or d.lastHeartbeatAt > d.reportedOfflineAt) "
+            + "and d.lastHeartbeatAt < :silentSince "
+            + "order by d.id asc")
+    List<SmsDevice> findSilentSince(@Param("silentSince") LocalDateTime silentSince);
 }

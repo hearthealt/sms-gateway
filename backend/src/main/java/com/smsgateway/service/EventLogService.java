@@ -1,5 +1,6 @@
 package com.smsgateway.service;
 
+import com.smsgateway.model.dto.DeviceEventLogView;
 import com.smsgateway.model.dto.EventLogView;
 import com.smsgateway.model.dto.EventTypeOption;
 import com.smsgateway.model.dto.PageResult;
@@ -10,6 +11,7 @@ import com.smsgateway.model.enums.EventLevel;
 import com.smsgateway.model.enums.EventType;
 import com.smsgateway.repository.DeviceRepository;
 import com.smsgateway.repository.EventLogRepository;
+import com.smsgateway.util.PhoneUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -271,6 +273,45 @@ public class EventLogService {
     public List<EventTypeOption> types() {
         return Arrays.stream(EventType.values())
                 .map(t -> new EventTypeOption(t.name(), t.label(), t.defaultLevel().name()))
+                .toList();
+    }
+
+    /** 设备端导出诊断包时一次最多取多少条。 */
+    private static final int DEVICE_EXPORT_MAX = 200;
+
+    /**
+     * 某台设备自己的运行日志，**给设备端的诊断包用**。
+     *
+     * <p>先例是 {@code GET /api/device/sms}：设备读自己在服务端的数据。价值在于最常见的
+     * 现场正是「设备说传上去了、服务端说没收到」—— 而答案就在服务端事件里
+     * （存下 / 重复 / 被规则忽略 / 被拒）。只有设备本地那一半，报告读过之后
+     * 仍然回答不了那个问题。
+     *
+     * <p><b>不分页</b>：这是一次快照，不是浏览功能。分页会带来 {@code page}/{@code total}
+     * 与「用户翻到第五页再导出」的一整套界面问题，而设备要的就是「最近发生了什么」。
+     *
+     * <p>手机号在服务端就打码（见 {@link DeviceEventLogView}）。
+     */
+    public List<DeviceEventLogView> forDevice(String deviceCode, int limit) {
+        SmsDevice device = deviceRepository.findByDeviceId(deviceCode).orElse(null);
+        if (device == null) {
+            // 设备行不在时返回空而不是全量：与 list() 同一个取舍 ——
+            // 筛一台不存在的设备却把所有人的事件倒出来，是最误导的答案。
+            return List.of();
+        }
+
+        int size = Math.max(1, Math.min(DEVICE_EXPORT_MAX, limit));
+        return eventLogRepository
+                .findByDeviceIdOrderByCreatedAtDesc(device.getId(), PageRequest.of(0, size))
+                .stream()
+                .map(row -> new DeviceEventLogView(
+                        row.getEventType().name(),
+                        row.getEventType().label(),
+                        row.getLevel().name(),
+                        row.getReason(),
+                        row.getSender(),
+                        PhoneUtil.mask(row.getPhone()),
+                        row.getCreatedAt()))
                 .toList();
     }
 

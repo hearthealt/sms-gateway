@@ -256,6 +256,20 @@ public class DeviceService {
         SmsDevice device = deviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new RuntimeException("Device not found: " + deviceId));
 
+        // 探测心跳只读，**一个字段都不写**。
+        //
+        // 它是「网关已停止」时那个 15 分钟的 WorkManager 周期任务发出来的，唯一目的是
+        // 取回「启动网关」这条指令。写 last_heartbeat_at 会让后台在停止之后仍显示在线，
+        // 而那是用户明明按了停止、界面却绿着 —— 正是 reported_offline_at 那套机制要消灭的现象。
+        // 写遥测字段同样有害：一台已经不进不出、什么事都不做的设备，电量与待上传数不该再更新。
+        //
+        // 判断放在这里而不是控制器：在线状态的写入本来就归 service，
+        // 放到控制器会让「谁负责不写心跳时间」变得没有答案。
+        if (Boolean.TRUE.equals(request.getCommandProbe())) {
+            log.debug("Probe heartbeat from device {} (gateway stopped): presence untouched", deviceId);
+            return device.getStatus();
+        }
+
         // 更新之前先算一次上次的在线状态：只在这一下「掉线又回来」时推事件。
         // 每 30 秒的心跳都推，管理后台就变成每 30 秒刷一次，与轮询没有区别。
         boolean wasOnline = isOnline(device);
@@ -426,7 +440,14 @@ public class DeviceService {
 
         adminEvents.broadcast(AdminEventBroadcaster.EVENT_DEVICES,
                 Map.of("deviceId", authenticatedDeviceId));
-        recordQuietly(EventType.DEVICE_OFFLINE_REPORTED, device, "用户停止了网关");
+        // 文案刻意是中性的：「网关已停止」既可能是人在手机上点的，也可能是远程指令停的。
+        // 原先写死「用户停止了网关」，远程停机上线之后那句话就成了假话，而排查时
+        // 「谁停的」正是第一句要问的。是谁停的由**紧邻的**那条 DEVICE_COMMAND_ACKED /
+        // DEVICE_COMMAND_ISSUED 事件说明（同一台设备、相邻时刻，列表上读得出来）。
+        //
+        // 拒绝的替代做法：在这里反查「最近 5 分钟有没有一条 STOP_GATEWAY 被回执」来决定文案。
+        // 那是给每一条停止上报加一次查询、给两个模块加一层耦合，只为省掉读者看一眼相邻行。
+        recordQuietly(EventType.DEVICE_OFFLINE_REPORTED, device, "网关已停止");
         log.info("Device reported gateway stopped: {}", authenticatedDeviceId);
     }
 

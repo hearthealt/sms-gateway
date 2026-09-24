@@ -47,8 +47,12 @@ public class AdminSmsController {
             @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(defaultValue = "false") boolean includeIgnored) {
 
+        // 传 null 关键词：管理端的短信列表有自己的筛选项（号码 / 验证码 / 设备），
+        // 而**设备端**的记录页没有筛选能力，所以关键词那一维是给它的。
+        // 需要时这里加一个 @RequestParam 就能开，查询本身已经支持。
         return ResponseEntity.ok(ApiResult.success(
-                adminSmsService.byDevice(deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize), includeIgnored)));
+                adminSmsService.byDevice(deviceId, PageUtil.safePage(page), PageUtil.safePageSize(pageSize),
+                        includeIgnored, null)));
     }
 
     @GetMapping("/stats/daily")

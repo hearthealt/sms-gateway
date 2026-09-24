@@ -38,8 +38,7 @@ const router = createRouter({
           path: 'sms',
           name: 'SmsList',
           component: () => import('../views/SmsList.vue'),
-          meta: { title: '短信记录' },
-        },
+          meta: { title: '短信记录' },        },
         {
           path: 'rules',
           name: 'RuleManagement',
@@ -62,6 +61,22 @@ const router = createRouter({
           name: 'NotifyRoute',
           component: () => import('../views/NotifyRoute.vue'),
           meta: { title: '转发规则' },
+        },
+        // 告警规则排在投递记录**之前**：它和上面两条同属「配置」，而投递记录是
+        // 「看结果」。位置与侧边栏一致，两处不要各排各的。
+        // 发送短信排在短信记录之后：读记录与发短信是设备这一侧的两件事，
+        // 顺序与侧边栏一致。
+        {
+          path: 'outbound',
+          name: 'OutboundSms',
+          component: () => import('../views/OutboundSms.vue'),
+          meta: { title: '发送短信' },
+        },
+        {
+          path: 'alert/rules',
+          name: 'AlertRule',
+          component: () => import('../views/AlertRule.vue'),
+          meta: { title: '告警规则' },
         },
         {
           path: 'notify/deliveries',

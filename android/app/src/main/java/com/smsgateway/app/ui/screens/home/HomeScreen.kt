@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.smsgateway.app.DashboardState
+import com.smsgateway.app.ui.components.RefreshableScreen
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
 
@@ -41,6 +42,9 @@ private val CONTENT_MAX_WIDTH = 640.dp
  * 摆在这里只是让主页又变成一屏列表 —— 这个页面的目标始终是**一眼看完**。
  *
  * 顶栏两个入口：扫一扫、自检；设置在最右（最常碰的放最顺手的位置）。
+ *
+ * 支持下拉刷新：这一页的数字各有各的轮询周期（本地 5 秒、服务端统计 30 秒、
+ * 趋势 5 分钟），想立刻要个准数时得有个办法，否则最坏要干等 5 分钟。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,7 +58,13 @@ fun HomeScreen(
     onOpenSelfTest: () -> Unit,
     onOpenQuickConnect: () -> Unit,
     onToggleService: () -> Unit,
-    onCheckStatus: () -> Unit
+    onCheckStatus: () -> Unit,
+    /**
+     * 下拉刷新。必须传**挂起**版本（`viewModel::refreshHomeNow`）而不是
+     * 「派给 viewModelScope 就返回」的那层壳 —— 后者在数据回来之前就返回了，
+     * 圈会在请求还没落地时被收掉。
+     */
+    onRefresh: suspend () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -83,12 +93,15 @@ fun HomeScreen(
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
                 color = AppColor.Screen
             ) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.TopCenter
-                ) {
+                // 下拉刷新套在「纸」里面而不是整屏外面：手势只有落在**可滚动**的区域上
+                // 才会上报位移（嵌套滚动的前提），而这一页唯一的可滚动内容是纸里的那一列 ——
+                // 套在外面不会让蓝色头部也能下拉，只会把指示器画到渐变上去。
+                RefreshableScreen(onRefresh = onRefresh) {
                     Column(
                         modifier = Modifier
+                            // content 的 receiver 是 BoxScope，靠它保持居中的宽度上限；
+                            // RefreshableScreen 内部那个 Box 没有 contentAlignment。
+                            .align(Alignment.TopCenter)
                             .widthIn(max = CONTENT_MAX_WIDTH)
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())

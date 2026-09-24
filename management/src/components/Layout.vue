@@ -217,6 +217,9 @@ export default defineComponent({
         children: [
           { path: '/devices', icon: 'Monitor', label: '设备管理' },
           { path: '/sms', icon: 'ChatDotSquare', label: '短信记录' },
+          // 发送短信与上面两条同属设备这一侧：它用的是某台设备的卡，
+          // 而不是「哪些短信要转发」。
+          { path: '/outbound', icon: 'Promotion', label: '发送短信' },
         ],
       },
 
@@ -232,6 +235,9 @@ export default defineComponent({
           { path: '/rules', icon: 'Setting', label: '采集规则' },
           { path: '/notify/channels', icon: 'Connection', label: '转发渠道' },
           { path: '/notify/routes', icon: 'Share', label: '转发规则' },
+          // 告警规则与转发规则同级：两者都是「什么条件下通知谁」，只是条件维度不同。
+          // 排在投递记录之前，与路由表里的顺序一致。
+          { path: '/alert/rules', icon: 'WarningFilled', label: '告警规则' },
           { path: '/notify/deliveries', icon: 'Tickets', label: '投递记录' },
         ],
       },

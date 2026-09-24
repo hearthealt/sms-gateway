@@ -3,7 +3,9 @@ package com.smsgateway.service.notify;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smsgateway.config.NotifyProperties;
+import com.smsgateway.model.enums.AlertType;
 import com.smsgateway.model.enums.EventType;
+import com.smsgateway.model.enums.NotifyDeliverySource;
 import com.smsgateway.model.enums.SysConfigKey;
 import com.smsgateway.service.AdminEventBroadcaster;
 import com.smsgateway.service.EventLogService;
@@ -70,6 +72,7 @@ public class NotifyDispatcher {
     private final Executor executor;
     private final AdminEventBroadcaster adminEvents;
     private final EventLogService eventLogService;
+    private final AlertOutbox alertOutbox;
 
     /**
      * 正在发送中的渠道。挡的是「同一渠道同时跑两批」—— 见类注释。
@@ -99,7 +102,8 @@ public class NotifyDispatcher {
                             ObjectMapper objectMapper,
                             @Qualifier("notifyExecutor") Executor executor,
                             AdminEventBroadcaster adminEvents,
-                            EventLogService eventLogService) {
+                            EventLogService eventLogService,
+                            AlertOutbox alertOutbox) {
         this.properties = properties;
         this.sysConfigService = sysConfigService;
         this.deliveryRepository = deliveryRepository;
@@ -115,6 +119,7 @@ public class NotifyDispatcher {
         this.executor = executor;
         this.adminEvents = adminEvents;
         this.eventLogService = eventLogService;
+        this.alertOutbox = alertOutbox;
     }
 
     /**
@@ -298,18 +303,43 @@ public class NotifyDispatcher {
         }
     }
 
-    private void sendOne(NotifyChannel channel, NotifyDelivery delivery) {
+    /**
+     * 发一条。
+     *
+     * <p>**包级可见是为了能被单测直接调**，与 {@link #applyResult} 同一个理由：
+     * 这里守着「告警行不能去碰 sms_message」这条规矩 —— 告警的 smsMessageId 是 null，
+     * 而 {@code findById(null)} 会抛异常，掉进通用 catch 后会被当成「可重试」，
+     * 于是同一条告警一直重试到判死。走 {@code dispatch} 去测要连着调度器、
+     * 线程池和限流一起桩掉，绕远且测不到重点。
+     */
+    void sendOne(NotifyChannel channel, NotifyDelivery delivery) {
         delivery.setStatus(NotifyDeliveryStatus.SENDING);
         delivery.setAttempts(delivery.getAttempts() + 1);
         deliveryRepository.save(delivery);
 
         SendResult result;
         try {
-            SmsMessage sms = smsMessageRepository.findById(delivery.getSmsMessageId()).orElse(null);
-            if (sms == null) {
-                // 短信被删了（管理端删设备会连带删它的短信）。再重试也没有可发的内容。
-                markDead(channel, delivery, "对应的短信记录已不存在");
-                return;
+            RenderedMessage message;
+            if (delivery.getSourceType() == NotifyDeliverySource.ALERT) {
+                // 告警：正文来自记录自己带着的摘要，**不去碰 sms_message**。
+                //
+                // 这个分支是必须的，不是优化：告警行的 smsMessageId 是 null，而
+                // findById(null) 会直接抛 InvalidDataAccessApiUsageException，
+                // 掉进下面的通用 catch 被当成「可重试」，于是同一条告警会一直重试到判死。
+                String summary = delivery.getAlertSummary();
+                if (summary == null || summary.isBlank()) {
+                    markDead(channel, delivery, "告警内容缺失，无法投递");
+                    return;
+                }
+                message = messageFactory.buildAlert(summary);
+            } else {
+                SmsMessage sms = smsMessageRepository.findById(delivery.getSmsMessageId()).orElse(null);
+                if (sms == null) {
+                    // 短信被删了（管理端删设备会连带删它的短信）。再重试也没有可发的内容。
+                    markDead(channel, delivery, "对应的短信记录已不存在");
+                    return;
+                }
+                message = messageFactory.build(sms, resolveDeviceName(sms));
             }
 
             ChannelSender sender = senderRegistry.get(channel.getType());
@@ -318,7 +348,6 @@ public class NotifyDispatcher {
                 return;
             }
 
-            RenderedMessage message = messageFactory.build(sms, resolveDeviceName(sms));
             result = sender.send(ChannelConfig.of(decryptConfig(channel)), message);
 
         } catch (MissingConfigException | SsrfBlockedException e) {
@@ -439,6 +468,20 @@ public class NotifyDispatcher {
         deliveryRepository.save(delivery);
         notifyDeliveriesChanged(delivery.getId());
 
+        // 告警自己走到终点必须**单独留一条 ERROR 事件**：这是最深的一层失败 ——
+        // 告警本来就是为了「别静默失败」而存在的，而它自己静默地没发出去。
+        // 短信走到 DEAD 不记这条：那在投递记录页上是常态（一条验证码的对端挂了），
+        // 记它只会把事件表刷满。
+        if (delivery.getSourceType() == NotifyDeliverySource.ALERT) {
+            try {
+                eventLogService.record(EventType.ALERT_DELIVERY_DEAD,
+                        "告警投递放弃：" + NotifyRedactor.truncate(reason, 200));
+            } catch (Exception e) {
+                // 记事件失败不能把调度线程带走（这是个 @Scheduled 路径上的调用）
+                log.warn("Failed to record alert-dead event for delivery={}", delivery.getId(), e);
+            }
+        }
+
         registerFailure(channel, reason);
         log.warn("投递放弃：channelId={}, deliveryId={}, 原因：{}",
                 channel.getId(), delivery.getId(), NotifyRedactor.truncate(reason, 200));
@@ -483,6 +526,24 @@ public class NotifyDispatcher {
             // 记事件失败不能把调度线程带走（这是个 @Scheduled 路径上的方法）
             log.warn("Failed to record channel auto-disable event for channel={}", channel.getId(), e);
         }
+
+        // 日志是给正在看日志的人看的，事件是给事后翻记录的人看的 —— 而「渠道挂了」
+        // 这件事还需要**主动叫人**：一个没人盯着的部署里，渠道半夜挂掉，
+        // 直到早上有人想起「验证码怎么没来」才会被发现。
+        //
+        // 必须排除**刚死掉的那个渠道**：它已经发不出去了，不排除的话那条投递会被
+        // 下面的 cancelDeliveriesForDisabledChannels 清扫改成「已取消」——
+        // 一条静默取消的告警，而它本来是要去叫人的。
+        //
+        // **不会自激**（这段推理值得写下来，否则将来有人会怀疑这里有反馈环）：
+        // 告警投递失败 → registerFailure → 达阈值自动停用 → 入队一条本类告警 →
+        // 若还有别的可用渠道就发出去，一个都没有就记 ALERT_UNDELIVERABLE。
+        // 而 AlertGate 的冷却去重保证同一条渠道的这类告警在冷却窗口内最多一条。
+        alertOutbox.enqueue(
+                AlertType.CHANNEL_AUTO_DISABLED,
+                AlertSubjects.channel(channel.getId()),
+                "转发渠道「" + channel.getName() + "」已自动停用：" + reason,
+                Set.of(channel.getId()));
     }
 
     /**

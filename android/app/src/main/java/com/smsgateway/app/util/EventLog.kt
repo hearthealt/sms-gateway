@@ -161,6 +161,58 @@ object EventLog {
      */
     const val GATEWAY_START_BLOCKED = "gateway_start_blocked"
 
+    // ── 远程指令 ────────────────────────────────────────────────────────────
+    //
+    // 这六条是「管理端点了按钮，这台手机上到底有没有照做」的唯一证据。
+    // 远程动作没有人在现场看着，所以它比任何本地动作都更需要留痕：
+    // 管理端显示「已执行」只说明回执发成功了，执行得对不对要看这里的 reason。
+    //
+    // **不记探测轮次**（网关已停止时那个 15 分钟的周期心跳）：15 分钟一条、
+    // 7 天就是 672 条「什么都没发生」，会把真事件淹掉 —— 与「常规心跳不记」
+    // 是同一条取舍。
+
+    /** 收到一条下发指令。**在执行之前**记，所以「只有它、没有下面那条」= 执行过程中进程没了。 */
+    const val COMMAND_RECEIVED = "command_received"
+
+    const val COMMAND_DONE = "command_done"
+
+    /** 执行过程中抛异常。reason 里只有异常类名，不带 message（受控文案）。 */
+    const val COMMAND_FAILED = "command_failed"
+
+    /** 本机看不懂或做不到这条指令（旧版本 App 遇到了新类型）。服务端会据此收到 REJECTED 回执。 */
+    const val COMMAND_REJECTED = "command_rejected"
+
+    /** 本地时钟判定已过期：不执行、也不回执。服务端自己的清理任务会独立给出同样的结论。 */
+    const val COMMAND_EXPIRED_LOCAL = "command_expired_local"
+
+    /**
+     * 回执发不出去。
+     *
+     * **必须有这一条**：回执发失败意味着服务端会重发，而现场看到的现象是
+     * 「同一条指令被执行了两次」。没有这个类型，那件事在日志里完全没有痕迹 ——
+     * 而 [COMMAND_RECEIVED] 与 [COMMAND_DONE] 各一条、看起来一切正常。
+     */
+    const val COMMAND_ACK_FAILED = "command_ack_failed"
+
+    // ── 外发短信 ────────────────────────────────────────────────────────────
+    //
+    // 这三条是「服务端让我发一条短信，到底发出去没有」的唯一本地证据。
+    // 服务端那边只能看到回执，而回执是这台手机自己报的 —— 出了争议（「对方说没收到」）
+    // 要回来翻的正是这里。
+
+    /** 已交给无线电。**不等于**对方收到了（那是 DELIVERED，多数运营商拿不到）。 */
+    const val OUTBOUND_SENT = "outbound_sent"
+
+    const val OUTBOUND_FAILED = "outbound_failed"
+
+    /**
+     * 压根没能开始发：没授 `SEND_SMS` 权限、没有可用 SIM。
+     *
+     * 单独一类而不是并进 FAILED：这两种情况**都是可以修好的**（去授权、插卡），
+     * 而它们在看板上与「对方无信号」长得一模一样的话，现场只会去查网络。
+     */
+    const val OUTBOUND_UNAVAILABLE = "outbound_unavailable"
+
     /**
      * 界面上的中文标签。放在常量旁边而不是界面层：两处各写一份的话，
      * 加一个新事件类型时总有一边会被忘掉，而那一边的表现是日志页上冒出一串英文常量名。
@@ -194,6 +246,15 @@ object EventLog {
         GATEWAY_STOPPED -> "网关停止"
         GATEWAY_DESTROYED -> "网关被系统销毁"
         GATEWAY_START_BLOCKED -> "网关未能启动（系统限制）"
+        COMMAND_RECEIVED -> "收到远程指令"
+        COMMAND_DONE -> "指令已完成"
+        COMMAND_FAILED -> "指令执行失败"
+        COMMAND_REJECTED -> "指令被拒绝"
+        COMMAND_EXPIRED_LOCAL -> "指令已过期未执行"
+        COMMAND_ACK_FAILED -> "指令回执发送失败"
+        OUTBOUND_SENT -> "已发出短信"
+        OUTBOUND_FAILED -> "短信发送失败"
+        OUTBOUND_UNAVAILABLE -> "本机无法发送短信"
         else -> type
     }
 

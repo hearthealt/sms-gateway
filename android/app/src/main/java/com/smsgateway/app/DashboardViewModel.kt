@@ -3,6 +3,7 @@ package com.smsgateway.app
 import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
@@ -10,7 +11,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.gson.Gson
 import com.smsgateway.app.database.AppDatabase
 import com.smsgateway.app.database.EventLogEntity
 import com.smsgateway.app.database.SmsQueueEntity
@@ -19,11 +19,14 @@ import com.smsgateway.app.network.ProbeResult
 import com.smsgateway.app.network.RetrofitClient
 import com.smsgateway.app.qr.QrIdentity
 import com.smsgateway.app.service.GatewayForegroundService
+import com.smsgateway.app.util.ApiError
 import com.smsgateway.app.util.AuthState
 import com.smsgateway.app.util.DeviceName
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.DevicePrefs
+import com.smsgateway.app.util.DeviceRegistrar
 import com.smsgateway.app.util.DeviceStatus
+import com.smsgateway.app.util.DiagnosticExporter
 import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
@@ -37,7 +40,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.io.IOException
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -54,6 +56,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 enum class SelfTestAction(val label: String) {
     /** 应用详情页：权限、通知开关都在那里。 */
     OPEN_APP_SETTINGS("去开启"),
+
+    /**
+     * 直接弹系统的权限申请框（目前只有「发送短信」用它）。
+     *
+     * 与 [OPEN_APP_SETTINGS] 分开：那个要人自己在设置里翻到权限那一页，
+     * 而这个是一键。**只在能弹框的地方用** —— 权限申请必须有 Activity，
+     * 所以它只能由界面上的按钮触发，不能用后台服务去请求。
+     */
+    REQUEST_SEND_SMS("去授权"),
 
     /** 电池优化白名单。它在系统设置的另一处，应用详情页里没有。 */
     OPEN_BATTERY_SETTINGS("去设置"),
@@ -224,6 +235,14 @@ data class DashboardState(
     val smsTotal: Long = 0,
     /** 当前已加载到第几页（从 1 开始）。「加载更多」读它 +1。 */
     val smsPage: Int = 1,
+    /**
+     * 服务端记录页的关键词。空串表示不过滤。
+     *
+     * 放在 state 里而不是页面的 `remember`：翻页、下拉刷新、以及上传成功后自动刷新
+     * 都会重新发请求，而它们都要带上同一个关键词 —— 由页面各记一份的话，
+     * 迟早有一处漏带，表现为「刷新一下筛选就不见了」。
+     */
+    val smsKeyword: String = "",
     val smsLoading: Boolean = false,
     val smsError: String? = null,
     /**
@@ -297,8 +316,6 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _state = MutableStateFlow(DashboardState())
     val state: StateFlow<DashboardState> = _state.asStateFlow()
-
-    private val gson = Gson()
 
     /**
      * 注册请求的并发闸门。
@@ -626,8 +643,80 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
+     * 主页下拉刷新：把这一页显示的所有东西重新取一遍。
+     *
+     * 三块数据各有各的轮询周期（本地 5 秒、服务端统计 30 秒、趋势 5 分钟），所以
+     * **不必等也可能等到**都不对：一台「刚换完网络、想知道现在通不通」的设备，
+     * 最坏要干等 5 分钟才看到趋势刷新。下拉刷新给的是「我现在就要一个准数」。
+     *
+     * 取的是**挂起**版本并逐项 await，不是「派出去就返回」—— 下拉指示器必须等到数据
+     * 真的回来再收手（见 [com.smsgateway.app.ui.components.RefreshableScreen]），
+     * 否则圈收掉了、数字还是旧的，用户只会以为刷新没用。
+     *
+     * 串行而不是并发：这几件事都会打服务端，串着来语义简单（都回来才算刷完），
+     * 而单次刷新的耗时本来就在一两秒之内。
+     */
+    suspend fun refreshHomeNow() {
+        val app = getApplication<Application>()
+
+        // 心跳放最前面：HeroCard 那句状态（运行中 / 连接已断开 / 已被禁用）就是它带回来的，
+        // 而它的周期是 30 秒 —— 只刷数字不刷状态的话，「刚恢复网络」这会儿主页仍然写着断连。
+        // 未注册时它立刻返回，不会白跑一次请求。
+        HeartbeatSender.send(app)
+
+        // 本地积压：只读本地库，最快，先把它刷出来
+        refreshPendingCount()
+
+        // 这两个要走服务端，网络不通时各自会超时；失败时各自置好错误态（趋势有
+        // trendAttempted、统计有兜底文案），所以这里不吞异常也不需要额外提示 ——
+        // 「刷新失败」这个信息已经由界面上的占位与文案说明了。
+        refreshServerStats()
+        refreshTrend()
+    }
+
+    /**
+     * 队列页：把**全部失败**的那些重新排队。
+     *
+     * 与逐条的 [retrySms] 同义（用户主动介入，重新给满重试预算），只是一次做完整批。
+     * 只动 `failed` 的行 —— 见 {@code SmsQueueDao.retryAllFailed} 里为什么不能顺手
+     * 把 pending 的也清一遍退避。
+     *
+     * 不提示条数：改完队列会经 Room 的 Flow 自己刷新，用户直接看到结果。
+     * （与逐条重试/删除同一个口径 —— 那一页原先就没有结果提示。）
+     */
+    fun retryAllFailed() {
+        viewModelScope.launch {
+            try {
+                val changed = database.smsQueueDao().retryAllFailed()
+                if (changed > 0) {
+                    SmsUploadWorker.enqueue(getApplication())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Retry all failed SMS failed", e)
+            }
+        }
+    }
+
+    /**
+     * 队列页：删掉全部失败的行。
+     *
+     * **只删 failed**：那是服务端明确拒绝过的（400/422），重试多少次结果都一样。
+     * 不给「全部删除」—— 那会把还没上传的验证码直接丢掉，而且没有撤销。
+     * 界面上有二次确认（见 QueueScreen）。
+     */
+    fun deleteFailed() {
+        viewModelScope.launch {
+            try {
+                database.smsQueueDao().deleteFailed()
+            } catch (e: Exception) {
+                Log.e(TAG, "Delete failed SMS failed", e)
+            }
+        }
+    }
+
+    /**
      * 重算「待上传」。这是本地队列的真实积压量，只能读本地库 ——
-     * 服务端不知道这台设备还有多少条没传上去。
+     * 服务端不知道这台手机还有多少条没传上去。
      *
      * 必须用 update{} 而不是 `_state.value = _state.value.copy(...)`。
      *
@@ -756,9 +845,6 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(phone = normalized) }
     }
 
-    /** 注册时上报的设备名：跟随手机本身，读不到由 [DeviceName] 兜底。 */
-    private fun effectiveDeviceName(): String = DeviceName.read(getApplication())
-
     fun registerDevice() {
         // 连点两下曾会发出两个并发请求、各生成一个随机设备号，服务端于是多出一台「新设备」。
         if (!registerInFlight.compareAndSet(false, true)) return
@@ -778,125 +864,32 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * 跑一次注册，把成败翻成一句给现场看的话。
      *
-     * 异常一律在这里收口，于是调用方只剩「把这句话放上自己的通道」一件事 ——
-     * 而两条通道的去处不同：设置页那条是一闪而过的 snackbar，快速连接那条要留在
-     * 扫码页上让人照着排查。共用前半段、只在展示处分叉，才不会两边各写一遍 try/catch。
+     * 请求本身与错误分类都在 [DeviceRegistrar] 里（远程指令 `RE_REGISTER` 也要走同一条路，
+     * 而那个调用方没有 ViewModel）。这里只负责**界面那一半**：把设备标识先显示出来、
+     * 成功后把网关跑起来、刷新统计。
      */
-    private suspend fun runRegistration(): ConnectOutcome = try {
-        performRegistration()
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: IOException) {
-        Log.e(TAG, "Registration failed: server unreachable", e)
-        EventLog.write(
-            getApplication(), EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
-            reason = "连不上服务器"
-        )
-        ConnectOutcome(false, "连不上服务器，请到设置里检查服务器地址")
-    } catch (e: Exception) {
-        Log.e(TAG, "Registration failed", e)
-        EventLog.write(
-            getApplication(), EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
-            reason = e.javaClass.simpleName
-        )
-        ConnectOutcome(false, "注册失败：${e.message ?: e.javaClass.simpleName}")
-    }
-
-    /**
-     * 真正发注册请求。
-     *
-     * **刻意不写 registerMessage**：由调用方决定这条结论走哪条通道（理由见 [runRegistration]）。
-     */
-    private suspend fun performRegistration(): ConnectOutcome {
+    private suspend fun runRegistration(): ConnectOutcome {
         val app = getApplication<Application>()
 
-        // 「首次注册」与「重新注册」在日志里长得一模一样，而设备身份被重置过一次
-        // 恰恰是排查「服务端怎么多出一台设备」的关键线索。必须在下面 updateToken
-        // 之前读，那之后 token 已经换成新的了。
-        val isReRegister = DevicePrefs.deviceToken(app).isNotBlank()
+        // 先把标识显示出来：请求可能失败，而标识一旦生成就是持久的，
+        // 界面上应该立刻能看到它 —— 否则失败一次仍是空白，现场会以为没生成。
+        _state.update { it.copy(deviceId = DevicePrefs.getOrCreateDeviceId(app)) }
 
-        // 先落盘再发请求。UUID 一旦生成就是持久的，即使这次请求失败或进程中途被杀，
-        // 重试复用的也是同一个标识，不会再注册出第二台设备。
-        val deviceId = DevicePrefs.getOrCreateDeviceId(app)
-        _state.update { it.copy(deviceId = deviceId) }
+        val result = DeviceRegistrar.register(app)
 
-        val phone = DevicePrefs.phone(app).ifBlank { null }
-
-        val response = RetrofitClient.getApiService().registerDevice(
-            DeviceInfo(
-                deviceId = deviceId,
-                deviceName = effectiveDeviceName(),
-                platform = "android",
-                phone = phone,
-                appVersion = BuildConfig.VERSION_NAME,
-                enrollSecret = DevicePrefs.getOrCreateEnrollSecret(app),
-                // 服务端只在**首次注册**时看它，已注册的设备带着也无妨。
-                // 为空表示这台服务器没启用准入校验（或是老用户没扫过码），服务端会放行。
-                enrollToken = DevicePrefs.enrollToken(app).ifBlank { null }
-            )
-        )
-
-        val data = response.body()?.data
-        if (!response.isSuccessful || data == null) {
-            // 这里原本读 body()?.message —— 但 Retrofit 在非 2xx 时 body() 恒为 null，
-            // 载荷其实在 errorBody() 里，不解析就永远只能显示一个光秃秃的状态码。
-            val detail = parseErrorMessage(response.errorBody()?.string())
-            EventLog.write(
-                app, EventLog.DEVICE_REGISTER_FAILED, EventLog.LEVEL_ERROR,
-                reason = "HTTP ${response.code()}"
-            )
-            return ConnectOutcome(
-                false,
-                "注册失败（HTTP ${response.code()}）" + (detail?.let { "：$it" } ?: ""),
-                retryable = true
-            )
+        if (result.success) {
+            _state.update {
+                it.copy(deviceToken = DevicePrefs.deviceToken(app), phone = result.phone.orEmpty())
+            }
+            refreshServerStats()
+            // 刻意只在**界面这条路径**上启动网关。远程指令里的 RE_REGISTER 不这么做：
+            // 「网关停着」正是 START_GATEWAY 那条指令存在的意义，重新注册顺手把它拉起来
+            // 会在管理员看不见的地方改变设备状态。
+            startService()
         }
 
-        val token = data.deviceToken
-        RetrofitClient.updateToken(token)
-        RetrofitClient.updateDeviceId(deviceId)
-
-        prefs.edit().apply {
-            putString(KEY_DEVICE_TOKEN, token)
-            if (phone != null) putString(KEY_PHONE, phone)
-        }.apply()
-
-        // 注册响应带着设备状态，这里同步一次：被禁用的设备重新注册后仍是禁用，
-        // 不该因为「注册成功了」就显示成可用。
-        DeviceStatus.set(app, data.status.equals("DISABLED", ignoreCase = true))
-
-        // 注册前收到的短信是以空 deviceId/phone 入库的，先把身份补上再触发上传。
-        try {
-            database.smsQueueDao().backfillIdentity(deviceId, phone.orEmpty())
-        } catch (e: Exception) {
-            Log.w(TAG, "Backfill queue identity failed", e)
-        }
-
-        _state.update { it.copy(deviceToken = token, phone = phone.orEmpty()) }
-
-        SmsUploadWorker.enqueue(app)
-        refreshServerStats()
-        startService()
-
-        EventLog.write(
-            app, EventLog.DEVICE_REGISTERED, EventLog.LEVEL_INFO,
-            reason = if (isReRegister) "重新注册" else "首次注册"
-        )
-
-        // 成功也要说一声。之前成功分支置 null，于是点了「重新注册」之后界面上什么都不变 ——
-        // 现场无从判断到底成没成，只能靠猜。
-        return ConnectOutcome(true, "注册成功")
+        return ConnectOutcome(result.success, result.message, result.retryable)
     }
-
-    /** 从错误响应体里取出后端给的 message。解析失败就当没有，不因此再抛一次。 */
-    private fun parseErrorMessage(raw: String?): String? {
-        if (raw.isNullOrBlank()) return null
-        return runCatching {
-            gson.fromJson(raw, ErrorBody::class.java)?.message?.takeIf { it.isNotBlank() }
-        }.getOrNull()
-    }
-
-    private data class ErrorBody(val code: Int = 0, val message: String? = null)
 
     /**
      * 「快速连接」：扫码拿到服务器地址后，一气做完 保存地址 → 测试连接 → 注册设备。
@@ -1244,7 +1237,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                     _state.update {
                         it.copy(
                             notifyTesting = false,
-                            notifyTestError = parseErrorMessage(response.errorBody()?.string())
+                            notifyTestError = ApiError.parseMessage(response.errorBody()?.string())
                                 ?: "测试失败（HTTP ${response.code()}）"
                         )
                     }
@@ -1317,6 +1310,20 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         serverSmsMutex.withLock { loadServerSmsLocked(page, append) }
     }
 
+    /**
+     * 搜索服务端记录。
+     *
+     * 关键词进了 state，所以后续的翻页与刷新都会自动带上它 —— 见 [DashboardState.smsKeyword]。
+     * **每次都从第 1 页重来**：关键词变了之后原来的页码没有意义（结果集已经不是那个了）。
+     */
+    fun searchServerSms(keyword: String) {
+        val trimmed = keyword.trim()
+        if (trimmed == _state.value.smsKeyword) return
+
+        _state.update { it.copy(smsKeyword = trimmed, smsPage = 1) }
+        viewModelScope.launch { loadServerSmsNow(page = 1, append = false) }
+    }
+
     private suspend fun loadServerSmsLocked(page: Int, append: Boolean) {
         // 未注册时不发。与 refreshNotifyChannels 同一个理由：请求不带 Authorization 头
         // 必然 401，而那条 401 会把网关停掉并写一条「服务端已不认这台设备」的 ERROR ——
@@ -1337,8 +1344,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
         _state.update { it.copy(smsLoading = true, smsError = null) }
         try {
+            val keyword = _state.value.smsKeyword.ifBlank { null }
             val response = RetrofitClient.getApiService()
-                .mySms(page = page, pageSize = SMS_PAGE_SIZE, includeIgnored = true)
+                .mySms(page = page, pageSize = SMS_PAGE_SIZE, includeIgnored = true, keyword = keyword)
 
             val body = response.body()
             if (response.isSuccessful && body?.data != null) {
@@ -1368,7 +1376,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                         smsLoading = false,
                         smsLoaded = true,
                         smsError = "读取失败（HTTP ${response.code()}）" +
-                            (parseErrorMessage(response.errorBody()?.string())?.let { m -> "：$m" }
+                            (ApiError.parseMessage(response.errorBody()?.string())?.let { m -> "：$m" }
                                 ?: "")
                     )
                 }
@@ -1403,90 +1411,150 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
         viewModelScope.launch {
             val app = getApplication<Application>()
-            val results = mutableListOf<SelfTestItem>()
-
-            fun add(
-                label: String,
-                ok: Boolean,
-                detail: String,
-                action: SelfTestAction? = null
-            ) {
-                results += SelfTestItem(label, ok, detail, action)
-                _state.update { it.copy(selfTest = results.toList()) }
+            // 逐项推给界面 —— 那是这个页面存在的价值：用户能看着结果一条条出来，
+            // 而不是对着一个不说话的圈干等（心跳与探活加起来可能几秒）。
+            collectSelfTest(app) { item ->
+                _state.update { it.copy(selfTest = it.selfTest + item) }
             }
-
-            val smsPermission = hasPermission(app, Manifest.permission.RECEIVE_SMS)
-            add(
-                "短信接收权限",
-                smsPermission,
-                if (smsPermission) "已授予" else "未授予，收不到任何短信",
-                SelfTestAction.OPEN_APP_SETTINGS
-            )
-            // 这里原本还有一行「短信读取权限」（READ_SMS）。那个权限已经移除 ——
-            // 本应用只从 SMS_RECEIVED 广播取消息，从没读过系统短信库，
-            // 显示一个用不到的权限只会把人引去授权一个无关的东西。
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val ok = hasPermission(app, Manifest.permission.POST_NOTIFICATIONS)
-                add(
-                    "通知权限",
-                    ok,
-                    if (ok) "已授予" else "未授予，前台服务通知会被隐藏",
-                    SelfTestAction.OPEN_APP_SETTINGS
-                )
-            }
-
-            // 电话权限单列一项。它缺了**不会**报任何错、也不会让哪一步失败：
-            // 短信照收照传，只是上传的 phone 可能是空的，而服务端据此跳过
-            // sms:code:{号码} 缓存 —— 按号码等验证码的调用方于是每一条都超时，
-            // 设备侧的记录却从头到尾都是「上传成功」。这是全链路最难查的一种，
-            // 所以它的判据必须出现在自检页上，而不是只在主页横幅里一闪。
-            val phonePermission = DevicePhone.hasPermission(app)
-            add(
-                "电话权限",
-                phonePermission,
-                if (phonePermission) {
-                    "已授予，能分辨短信来自哪张卡"
-                } else {
-                    "未授予：双卡机分不清短信来自哪张卡，上传可能不带号码" +
-                        "（单卡机不受影响，号码会回落到你填的那个）"
-                },
-                SelfTestAction.OPEN_APP_SETTINGS
-            )
-
-            val ignoring = isIgnoringBatteryOptimizations(app)
-            add(
-                "电池优化白名单",
-                ignoring,
-                if (ignoring) "已加入，后台服务不易被杀" else "未加入，系统可能随时杀掉后台服务",
-                SelfTestAction.OPEN_BATTERY_SETTINGS
-            )
-
-            val registered = DevicePrefs.isRegistered(app)
-            add(
-                "设备注册",
-                registered,
-                if (registered) "已注册" else "未注册：先扫码连接服务器，否则一条也传不上去",
-                SelfTestAction.OPEN_QUICK_CONNECT
-            )
-
-            if (registered) {
-                // 探测结果自带「是否通过」。原先这里第二个参数写死 true，于是 404 也报通过。
-                val (serverOk, serverDetail) = describeProbe(
-                    RetrofitClient.probe(DevicePrefs.serverUrl(app))
-                )
-                add("服务器连通", serverOk, serverDetail)
-
-                val heartbeatOk = HeartbeatSender.send(app)
-                add(
-                    "令牌有效",
-                    heartbeatOk,
-                    if (heartbeatOk) "心跳成功" else "心跳被拒绝，可能令牌失效或服务器不可达"
-                )
-            }
-
             _state.update { it.copy(selfTestRunning = false) }
         }
+    }
+
+    /**
+     * 生成诊断包并把分享用的 Intent 交给界面。
+     *
+     * 自检结果直接用返回值而不是读界面状态：设置页那条入口进来时，
+     * `state.selfTest` 是空的（没人点过「重新自检」），而诊断包里正需要它。
+     *
+     * 失败（自检命中凭据、写文件失败）直接抛，由界面弹一条错误 ——
+     * 这里静默失败特别坏：用户会以为文件已经分享出去了。
+     */
+    suspend fun buildDiagnostics(): DiagnosticExporter.Result {
+        val app = getApplication<Application>()
+        // **刻意不重跑自检**，只用已经跑出来的那一份。
+        //
+        // 这一条是踩过之后改的：原先这里调 collectSelfTest，而自检里有两次网络往返
+        // （服务器探活 + 一次心跳），探活的预算最坏 25 秒、心跳的读超时 30 秒，
+        // 再加上取服务端日志那一次 —— 服务器不可达时导出要卡 80 秒以上，
+        // 而用户看到的是「点了没反应，还能一直点」。
+        //
+        // 诊断包要的是**此刻的快照**，不是一次新的连通性测试。要那份自检结果，
+        // 去自检页点一下「重新自检」，再在那里导出（那一页导出时屏幕上就有结果）。
+        return DiagnosticExporter.export(app, _state.value.selfTest)
+    }
+
+    /**
+     * 跑一遍自检并返回结果。**与 [runSelfTest] 共用同一份判据** ——
+     * 两处各写一遍的话，「导出诊断包说没通过、自检页说通过」这种不一致迟早出现，
+     * 而它正是这份报告最不该有的东西。
+     *
+     * @param onItem 每查完一项回调一次（给界面逐条显示用）；导出那条路传 null，
+     *               它只关心最终的列表。
+     */
+    suspend fun collectSelfTest(
+        app: Context,
+        onItem: ((SelfTestItem) -> Unit)? = null
+    ): List<SelfTestItem> {
+        val results = mutableListOf<SelfTestItem>()
+
+        fun add(
+            label: String,
+            ok: Boolean,
+            detail: String,
+            action: SelfTestAction? = null
+        ) {
+            val item = SelfTestItem(label, ok, detail, action)
+            results += item
+            onItem?.invoke(item)
+        }
+
+        val smsPermission = hasPermission(app, Manifest.permission.RECEIVE_SMS)
+        add(
+            "短信接收权限",
+            smsPermission,
+            if (smsPermission) "已授予" else "未授予，收不到任何短信",
+            SelfTestAction.OPEN_APP_SETTINGS
+        )
+        // 这里原本还有一行「短信读取权限」（READ_SMS）。那个权限已经移除 ——
+        // 本应用只从 SMS_RECEIVED 广播取消息，从没读过系统短信库，
+        // 显示一个用不到的权限只会把人引去授权一个无关的东西。
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val ok = hasPermission(app, Manifest.permission.POST_NOTIFICATIONS)
+            add(
+                "通知权限",
+                ok,
+                if (ok) "已授予" else "未授予，前台服务通知会被隐藏",
+                SelfTestAction.OPEN_APP_SETTINGS
+            )
+        }
+
+        // 电话权限单列一项。它缺了**不会**报任何错、也不会让哪一步失败：
+        // 短信照收照传，只是上传的 phone 可能是空的，而服务端据此跳过
+        // sms:code:{号码} 缓存 —— 按号码等验证码的调用方于是每一条都超时，
+        // 设备侧的记录却从头到尾都是「上传成功」。这是全链路最难查的一种，
+        // 所以它的判据必须出现在自检页上，而不是只在主页横幅里一闪。
+        val phonePermission = DevicePhone.hasPermission(app)
+        add(
+            "电话权限",
+            phonePermission,
+            if (phonePermission) {
+                "已授予，能分辨短信来自哪张卡"
+            } else {
+                "未授予：双卡机分不清短信来自哪张卡，上传可能不带号码" +
+                    "（单卡机不受影响，号码会回落到你填的那个）"
+            },
+            SelfTestAction.OPEN_APP_SETTINGS
+        )
+
+        // 「发送短信」权限**只在没授予时才列出来**。
+        //
+        // 这一页的目的是「为什么某个功能用不了」，而不是「把所有能力列一遍」：
+        // 绝大多数设备永远不发短信，给它们常驻一条绿色的「发送短信权限」只是噪音。
+        // 而缺了它的时候，它恰好是那一件用不了的事 —— 控制台那边会显示
+        // 「本机未授予「发送短信」权限」，现场顺着这句就能找到这里点一下。
+        if (!hasPermission(app, Manifest.permission.SEND_SMS)) {
+            add(
+                "发送短信权限",
+                false,
+                "未授予：控制台让你发的短信发不出去（会显示「本机未授予发送短信权限」）。" +
+                    "收短信、传短信不受影响",
+                SelfTestAction.REQUEST_SEND_SMS
+            )
+        }
+
+        val ignoring = isIgnoringBatteryOptimizations(app)
+        add(
+            "电池优化白名单",
+            ignoring,
+            if (ignoring) "已加入，后台服务不易被杀" else "未加入，系统可能随时杀掉后台服务",
+            SelfTestAction.OPEN_BATTERY_SETTINGS
+        )
+
+        val registered = DevicePrefs.isRegistered(app)
+        add(
+            "设备注册",
+            registered,
+            if (registered) "已注册" else "未注册：先扫码连接服务器，否则一条也传不上去",
+            SelfTestAction.OPEN_QUICK_CONNECT
+        )
+
+        if (registered) {
+            // 探测结果自带「是否通过」。原先这里第二个参数写死 true，于是 404 也报通过。
+            val (serverOk, serverDetail) = describeProbe(
+                RetrofitClient.probe(DevicePrefs.serverUrl(app))
+            )
+            add("服务器连通", serverOk, serverDetail)
+
+            val heartbeatOk = HeartbeatSender.send(app)
+            add(
+                "令牌有效",
+                heartbeatOk,
+                if (heartbeatOk) "心跳成功" else "心跳被拒绝，可能令牌失效或服务器不可达"
+            )
+        }
+
+        return results
     }
 
     /**

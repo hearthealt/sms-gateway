@@ -35,11 +35,27 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="来源" width="120">
+          <template #default="{ row }">
+            <!--
+              这张表同时装着短信投递与故障告警投递。不标出来的话，告警行的
+              「发送方」是空的（它没有发送方），看起来像数据缺了。
+              告警的类型比渠道更有信息量，所以直接显示类型名。
+            -->
+            <el-tag v-if="row.sourceType === 'ALERT'" type="warning" size="small" effect="plain">
+              {{ row.alertTypeLabel || '告警' }}
+            </el-tag>
+            <el-tag v-else type="info" size="small" effect="plain">短信</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="channelName" label="渠道" width="140" show-overflow-tooltip />
-        <el-table-column label="短信" min-width="200" show-overflow-tooltip>
+        <el-table-column label="内容" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="cell-mono">{{ row.sender || '-' }}</span>
-            <!-- 预览是打过码的：这条记录本身就不存渲染后的正文（存了等于把验证码写两遍、第二遍还没 TTL） -->
+            <!--
+              短信的预览是打过码的（这条记录本身就不存渲染后的正文：存了等于把验证码
+              写两遍、第二遍还没 TTL）；告警的预览就是那条告警的摘要本身。
+            -->
             <span class="preview">{{ row.contentPreview || '' }}</span>
           </template>
         </el-table-column>

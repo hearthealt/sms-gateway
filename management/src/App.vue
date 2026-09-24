@@ -232,4 +232,17 @@ a:hover { color: var(--color-primary-dark); }
 .el-message__content {
   white-space: pre-line;
 }
+
+/*
+ * 同理，ElMessageBox 的正文也要开 pre-line。
+ *
+ * 几处确认框都靠**空行分段**（「会发生什么」一段、「什么时候生效」一段）——
+ * 不开的话 \n 会被折成空格，整段挤成一坨。挂在 body 上的弹窗 scoped 样式够不到它，
+ * 所以只能放全局；也正因为放全局，**不要**再各页自己挂 customClass：
+ * 那样写的样式会落在某个懒加载的 chunk 里，只有访问那一页时才加载，
+ * 在别的页面上换行就失效了（这个坑踩过一次）。
+ */
+.el-message-box__message p {
+  white-space: pre-line;
+}
 </style>

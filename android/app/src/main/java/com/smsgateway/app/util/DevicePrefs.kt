@@ -90,6 +90,22 @@ object DevicePrefs {
     const val KEY_LOCK_PIN_SALT = "lock_pin_salt"
     const val KEY_LOCK_PIN_HASH = "lock_pin_hash"
 
+    /**
+     * 已执行过的远程指令台账（JSON），见 [CommandAckStore]。
+     *
+     * 存在的理由：服务端会把一条没收到回执的指令**重复下发**，而设备必须能认出
+     * 「这条我做过了」——否则回执丢一次，那条指令就会被执行两次。
+     */
+    const val KEY_COMMAND_ACKS = "command_acks"
+
+    /**
+     * 已发出、还没上报给服务端的外发短信结果（JSON），见 [OutboundResultStore]。
+     *
+     * 与 [KEY_COMMAND_ACKS] 分开存：两者的生命周期不同（指令回执在服务端确认后就没用了，
+     * 而这个要反复带上直到过期），混在一份 JSON 里只会让两边都得去猜对方的结构。
+     */
+    const val KEY_OUTBOUND_RESULTS = "outbound_results"
+
     /** 模拟器访问宿主机 localhost 的地址。 */
     const val DEFAULT_SERVER_URL = "http://10.0.2.2:8080"
 

@@ -2,6 +2,7 @@ package com.smsgateway.controller;
 
 import com.smsgateway.model.dto.*;
 import com.smsgateway.service.ClientSmsService;
+import com.smsgateway.service.SmsOutboundService;
 import com.smsgateway.service.SmsService;
 import com.smsgateway.service.WaitingService;
 import com.smsgateway.util.PageUtil;
@@ -25,8 +26,13 @@ import java.util.concurrent.TimeoutException;
  * <p>这里混了两类调用方，鉴权走不同的拦截器（见 {@code SecurityConfig}）：
  * <ul>
  *   <li>{@code POST /receive} —— 设备上报，DeviceAuthInterceptor（deviceToken）</li>
- *   <li>{@code GET /list}、{@code GET /wait} —— 外部调用方，ClientAuthInterceptor（API Key）</li>
+ *   <li>{@code GET /list}、{@code GET /wait}、{@code POST /send}、{@code GET /send/{id}}
+ *       —— 外部调用方，ClientAuthInterceptor（API Key）</li>
  * </ul>
+ *
+ * <p>⚠️ 拦截器是**按具名路径**注册的：加一条外部接口必须同时改
+ * {@code SecurityConfig}，而且不能图省事写成 {@code /api/sms/**} ——
+ * 那会把设备上报的 {@code /api/sms/receive} 也卷进 API Key 鉴权，直接打死主链。
  */
 @Slf4j
 @RestController
@@ -37,6 +43,7 @@ public class SmsController {
     private final SmsService smsService;
     private final WaitingService waitingService;
     private final ClientSmsService clientSmsService;
+    private final SmsOutboundService smsOutboundService;
 
     /**
      * 设备上报短信。
@@ -97,6 +104,45 @@ public class SmsController {
 
         return ResponseEntity.ok(ApiResult.success(
                 clientSmsService.list(phone, startTime, endTime, safePage, safePageSize)));
+    }
+
+    /**
+     * 用某台设备的号发一条短信。
+     *
+     * <p><b>这是对外接口里边唯一一个会产生费用、且不可撤回的动作。</b>三条约束：
+     *
+     * <ul>
+     *   <li>{@code deviceId} 可以省略，那时按 {@code phone} 反查设备；
+     *       **匹配到多台会拒绝**（发错手机的代价是用别人的号发短信）。</li>
+     *   <li>每台设备每天有上限（{@code outbound.daily-limit-per-device}，默认 20，0 = 不限）。</li>
+     *   <li>返回的 {@code status} 是**入队**时的状态（PENDING）。真要确认发出去没有，
+     *       拿返回的 id 调 {@code GET /api/sms/send/{id}} 轮询 ——
+     *       设备回执要等下一次心跳（约 30 秒）。</li>
+     * </ul>
+     */
+    @PostMapping("/send")
+    public ResponseEntity<ApiResult<ClientOutboundView>> send(
+            @Valid @RequestBody SmsSendRequest request,
+            HttpServletRequest httpRequest) {
+
+        // 发起人的名字由 ClientAuthInterceptor 写入，用于审计「这条短信是谁发的」
+        String apiKeyName = (String) httpRequest.getAttribute("apiKeyName");
+        log.info("Client {} sends SMS to {} via device {}", apiKeyName, request.getPhone(), request.getDeviceId());
+
+        return ResponseEntity.ok(ApiResult.success(
+                smsOutboundService.enqueueFromClient(request, apiKeyName)));
+    }
+
+    /**
+     * 查一条外发短信的状态。
+     *
+     * <p>调用方拿 {@code /send} 返回的 id 来查。刻意不提供「按号码查最近一条」这种更
+     * 方便的口子：那会把两个调用方的记录混在一起（号码可能被多台设备共用），
+     * 而 id 是它自己刚拿到的、唯一的。
+     */
+    @GetMapping("/send/{id}")
+    public ResponseEntity<ApiResult<ClientOutboundView>> sendStatus(@PathVariable Long id) {
+        return ResponseEntity.ok(ApiResult.success(smsOutboundService.clientView(id)));
     }
 
     /**

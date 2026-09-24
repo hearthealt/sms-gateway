@@ -66,6 +66,20 @@
         </el-descriptions>
       </el-card>
 
+      <!--
+        远程指令。放在设备信息与短信之间：它是这一页上唯一会**改变设备状态**的东西，
+        而下面那块是只读的历史。ref 只是为了接 SSE 的刷新信号（见脚本末尾的说明）——
+        页面只有一条事件流，组件自己不订阅。
+
+        `online` 是给启停按钮定方向的：在线说明网关在跑（心跳是服务发的），
+        离线则按「启动」显示 —— 控制台没有别的依据能判断网关状态。
+      -->
+      <DeviceCommandCard
+        ref="commandCard"
+        :device-id="device.deviceId"
+        :online="device.status === 'online'"
+      />
+
       <!-- Recent SMS -->
       <el-card shadow="never" class="detail-card">
         <template #header>
@@ -150,6 +164,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 import StatusBadge from '../components/StatusBadge.vue'
 import RecoveryCodeDialog from '../components/RecoveryCodeDialog.vue'
+import DeviceCommandCard from '../components/DeviceCommandCard.vue'
 import { getDeviceDetail, toggleDeviceStatus } from '../api/device'
 import { getDeviceSms } from '../api/sms'
 import { copyText } from '../utils/clipboard'
@@ -194,6 +209,8 @@ async function copyCode(code: string) {
 // 那套逻辑（先要地址再签发、关闭即清明文、只显示一次）在设备列表页也要用，
 // 抄一份迟早会分叉。
 const recoveryDialog = ref<InstanceType<typeof RecoveryCodeDialog>>()
+
+const commandCard = ref<InstanceType<typeof DeviceCommandCard>>()
 
 function handleIssueRecoveryCode() {
   const id = device.value?.deviceId
@@ -262,13 +279,23 @@ async function handleToggle() {
 onMounted(loadDevice)
 
 /*
- * 设备的心跳、在线状态、电量、待上传量都在自己变；`sms` 是这一页下半部分那几张图与列表。
- * 两者都不是任何人的操作，只能靠推。
+ * 这一页关心的东西全都在自己变：设备的心跳 / 在线状态 / 电量 / 待上传量，下半部分的
+ * 短信列表，以及远程指令的下发与回执。所以**收到任何事件都整体重拉一遍**。
+ *
+ * 原先这里按事件名做了窄分支（`if (event !== 'devices' && event !== 'sms') return`），
+ * 而那违反了 useAdminEvents 里写明的契约：它的 300ms 合并窗口只上报**最后一个**事件名，
+ * 所以一次抖动里如果先到 `devices`、后到 `commands`，窄分支看到的就是 commands ——
+ * 于是设备状态那一次刷新被整个丢掉。`hello` 那一支以前还写在条件里，但它本来就是
+ * 死代码（首连的那条已被 composable 吃掉）。
+ *
+ * 这一页请求很少（一个设备详情 + 一页短信 + 一页指令），整体重拉是最省心的做法。
  */
-useAdminEvents((event) => {
-  if (event !== 'devices' && event !== 'sms' && event !== 'hello') return
+useAdminEvents(() => {
   loadDevice()
   loadSms()
+  // 组件挂在 `v-if="device"` 里面：首屏设备还没加载出来时它没挂载，
+  // 这里要容错（可选链），否则第一条事件就会抛一个「读不到 reload」。
+  commandCard.value?.reload()
 })
 </script>
 

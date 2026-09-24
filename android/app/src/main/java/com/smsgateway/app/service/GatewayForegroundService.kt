@@ -19,6 +19,7 @@ import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
+import com.smsgateway.app.worker.CommandProbeWorker
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
@@ -32,6 +33,14 @@ class GatewayForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "GatewayService"
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
+
+        /**
+         * 通知栏动作。用 action 字符串而不是另开一个 Receiver：服务本身就在前台，
+         * 一个 `PendingIntent.getService` 就能把动作直接送到它的 `onStartCommand`，
+         * 而那里已经有完整的「每次启动请求都重申运行态」逻辑 —— 天然是幂等的接入点。
+         */
+        const val ACTION_FLUSH_NOW = "com.smsgateway.app.action.FLUSH_NOW"
+        const val ACTION_PAUSE_GATEWAY = "com.smsgateway.app.action.PAUSE_GATEWAY"
 
         /** 被禁用时降频：这个状态下没有时间敏感的事，但必须保持轮询才能发现「已恢复」。 */
         private const val DISABLED_HEARTBEAT_INTERVAL_MS = 60_000L
@@ -100,6 +109,11 @@ class GatewayForegroundService : Service() {
             // 在它返回之前就跑起来了。
             liveInstance = null
 
+            // 网关停着就没人发心跳，而远程指令正是搭心跳下发的 —— 「启动网关」这条
+            // 唯一能在这种状态下送达的指令，只能靠这个 15 分钟的周期任务取回来。
+            // 排在 stopService 之前：服务没了之后这个进程随时可能被回收。
+            CommandProbeWorker.schedule(context)
+
             val intent = Intent(context, GatewayForegroundService::class.java)
             context.stopService(intent)
         }
@@ -113,6 +127,12 @@ class GatewayForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+
+        // 网关起来了，30 秒一次的正规心跳已经接手 —— 撤掉「停机探测」那个闹钟。
+        // 不收放的后果是：一台正常运行的设备还多一个每 15 分钟拉起一次进程的任务，
+        // 而它发出的探测心跳还会让服务端少更新一次在线状态。
+        CommandProbeWorker.cancel(this)
+
         serviceAlive = true
         liveInstance = this
         // markStarted 而不是 set(true)：这里同时是「本次启动时刻」唯一的写入点。
@@ -187,6 +207,26 @@ class GatewayForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 通知栏动作先分派：它们各自有明确的意图，不该再走一遍「重申运行态 + 排上传」。
+        // 两条路径都仍然要先保证自己是前台服务（系统是经 startForegroundService 把我们
+        // 拉起来的，不转前台会被判 ANR 杀掉）。
+        when (intent?.action) {
+            ACTION_FLUSH_NOW -> {
+                if (!ensureForeground()) return START_NOT_STICKY
+                // 这里刻意**不**记事件：真正该记的是这次上传的结果（UPLOAD_OK / UPLOAD_RETRYING），
+                // 而「用户点了一下」本身在事件表里没有信息量。
+                SmsUploadWorker.enqueue(this)
+                return START_STICKY
+            }
+
+            ACTION_PAUSE_GATEWAY -> {
+                // 走与界面同一个 stop()：它会落盘运行态、记 GATEWAY_STOPPED（「用户主动停止」），
+                // 并摘掉 liveInstance —— 于是这次停止在日志里与在界面上按一下完全一样。
+                stop(this)
+                return START_NOT_STICKY
+            }
+        }
+
         // 用 notificationText() 而不是写死一句「已连接」：这个回调不只是「用户点了启动」
         // 会走，应用每次打开的对账补发（见 DashboardViewModel.ensureGatewayServiceRunning）
         // 也会走一遍。写死的话，一台已被管理员禁用、或服务器根本不可达的设备，
@@ -294,7 +334,28 @@ class GatewayForegroundService : Service() {
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            // 两个动作，都是「拿着手机时最想立刻做的一件事」：
+            // 卡住的验证码立即重试、以及把网关停下来。
+            //
+            // 「暂停网关」放这里是经过权衡的：docs/android-review-2026-09.md 记着主页
+            // **刻意没做整行可点的开关**，因为误触会停掉网关。而通知栏动作需要
+            // 「拉下通知栏 + 精确点按」两次动作，与整行可点不是一回事；
+            // 而「现在就想让它停」恰恰是拿着手机时才会有的念头。
+            .addAction(0, "立即上传", servicePendingIntent(ACTION_FLUSH_NOW, 1))
+            .addAction(0, "暂停网关", servicePendingIntent(ACTION_PAUSE_GATEWAY, 2))
             .build()
+    }
+
+    /**
+     * 通知栏动作的 PendingIntent。requestCode 必须不同 ——
+     * 相同的话后一个会把前一个覆盖掉，两个按钮都变成同一个动作。
+     */
+    private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent {
+        val intent = Intent(this, GatewayForegroundService::class.java).setAction(action)
+        return PendingIntent.getService(
+            this, requestCode, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
     }
 
     private fun startHeartbeatLoop(): Job = serviceScope.launch {

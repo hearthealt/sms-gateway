@@ -2,6 +2,8 @@ package com.smsgateway.app.ui.screens.queue
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,16 +13,20 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -28,6 +34,7 @@ import androidx.compose.ui.Modifier
 import com.smsgateway.app.DashboardState
 import com.smsgateway.app.DashboardViewModel
 import com.smsgateway.app.ui.AppScreen
+import com.smsgateway.app.ui.AppTextButton
 import com.smsgateway.app.ui.components.EmptyState
 import com.smsgateway.app.ui.components.QueueRow
 import com.smsgateway.app.ui.components.RefreshableFill
@@ -35,6 +42,7 @@ import com.smsgateway.app.ui.components.RefreshableScreen
 import com.smsgateway.app.ui.theme.AppAnimations
 import com.smsgateway.app.ui.theme.AppColor
 import com.smsgateway.app.ui.theme.AppSpacing
+import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.ui.utils.rememberNow
 
 /**
@@ -59,6 +67,9 @@ fun QueueScreen(
     // 发射，倒计时会一直停在那儿，到点了也不会消失。整个列表共用这一个走针，
     // 不要挪进 QueueRow 里让它每行各起一个（见 rememberNow）。
     val now = rememberNow(periodMs = 1_000L)
+
+    // 「删除已失败」的二次确认。删除不可撤销，而它删的是短信 —— 必须问一句。
+    var showDeleteFailedConfirm by remember { mutableStateOf(false) }
 
     // 进页面自己读一次。原先这件事由 MainActivity 的导航回调代劳，
     // 结果是「页面不知道自己该加载什么」，多一个入口就要多记一次。
@@ -106,6 +117,19 @@ fun QueueScreen(
                     contentPadding = PaddingValues(AppSpacing.gutter),
                     verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
+                    // 批量操作只在**真有失败的行**时出现：一个永远可点、点了没反应的按钮，
+                    // 与「按了有效果」在界面上分不出来。
+                    val failedCount = state.queue.count { it.status == "failed" }
+                    if (failedCount > 0) {
+                        item {
+                            QueueBatchBar(
+                                count = failedCount,
+                                onRetryAll = { viewModel.retryAllFailed() },
+                                onDeleteAll = { showDeleteFailedConfirm = true }
+                            )
+                        }
+                    }
+
                     itemsIndexed(state.queue, key = { _, row -> row.id }) { index, row ->
                         // 进场动画的开关。用 rememberSaveable 而不是 remember：
                         // LazyColumn 按 key 保存每项的状态，滚出去再滚回来不会重播动画。
@@ -126,6 +150,54 @@ fun QueueScreen(
                     }
                 }
             }
+        }
+    }
+
+    if (showDeleteFailedConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteFailedConfirm = false },
+            title = { Text("删除已失败的短信？") },
+            text = {
+                Text(
+                    "这些是服务端明确拒绝过的记录，删掉之后不会再重试。\n" +
+                        "还没上传的短信不受影响。删除不可撤销。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteFailedConfirm = false
+                    viewModel.deleteFailed()
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteFailedConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/**
+ * 队列页的顶部批量条：已失败 N 条 + 两个批量动作。
+ *
+ * **不给「全部删除」**：那会把还没上传的验证码直接丢掉，而且没有撤销。
+ * 失败的行是服务端明确拒绝过的（400/422），重试多少次结果都一样 ——
+ * 删它们是清理，不是丢数据。
+ */
+@Composable
+private fun QueueBatchBar(count: Int, onRetryAll: () -> Unit, onDeleteAll: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = "$count 条被服务端拒绝",
+            style = AppTypography.bodyMedium,
+            color = AppColor.Danger
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)) {
+            AppTextButton(onClick = onRetryAll) { Text("全部重试") }
+            AppTextButton(onClick = onDeleteAll) { Text("删除") }
         }
     }
 }

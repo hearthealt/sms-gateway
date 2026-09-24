@@ -4,8 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,23 +15,34 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,7 +50,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -185,6 +200,20 @@ fun ServerSmsScreen(
                     )
                 }
 
+                // 「搜了但没搜到」要单独说一句，并且**给一个清除搜索的出口**：
+                // 与「服务端一条记录都没有」共用那个空状态的话，人会以为自己的记录没了；
+                // 而搜索框在这个分支里是看不见的（列表区被空状态顶掉了），
+                // 不给出口就只能退出去再进来。
+                state.smsRecords.isEmpty() && state.smsKeyword.isNotEmpty() -> RefreshableFill {
+                    EmptyState(
+                        icon = Icons.Default.SearchOff,
+                        title = "没有匹配的记录",
+                        description = "关键词「${state.smsKeyword}」在发送方和内容里都没找到",
+                        actionLabel = "清除搜索",
+                        onAction = { viewModel.searchServerSms("") }
+                    )
+                }
+
                 state.smsRecords.isEmpty() -> RefreshableFill {
                     EmptyState(
                         icon = Icons.Default.Sms,
@@ -195,15 +224,26 @@ fun ServerSmsScreen(
                     )
                 }
 
-                else -> LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(AppSpacing.gutter),
-                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
-                ) {
-                    state.smsError?.let { error ->
-                        item { RefreshFailedNotice(error = error, onRetry = { viewModel.loadServerSms() }) }
-                    }
+                // 列表与「浮在它上面的搜索栏」放进一个 Box，而不是套一层 Column ——
+                // 套 Column 会让下面每个 item 里的 AnimatedVisibility 解析到
+                // `ColumnScope.AnimatedVisibility` 那个重载而编译不过（Compose 的一个已知坑）。
+                //
+                // 搜索栏的高度是**量出来的**，不写死：固定值在大字号设置下会把输入框压扁，
+                // 而这一页的所有排版都跟着用户字体设置走。
+                else -> Box(modifier = Modifier.fillMaxSize()) {
+                    var searchBarHeight by remember { mutableIntStateOf(0) }
+
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(top = with(LocalDensity.current) { searchBarHeight.toDp() }),
+                        contentPadding = PaddingValues(AppSpacing.gutter),
+                        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                    ) {
+                        state.smsError?.let { error ->
+                            item { RefreshFailedNotice(error = error, onRetry = { viewModel.loadServerSms() }) }
+                        }
 
                     itemsIndexed(
                         state.smsRecords,
@@ -232,6 +272,24 @@ fun ServerSmsScreen(
                             )
                         }
                     }
+                    }
+
+                    // 搜索栏浮在列表之上，而不是当列表的第一项：它是**筛选条件**，
+                    // 跟着滚走的话翻到第二屏就改不了了。
+                    if (state.smsLoaded && state.smsTotal > 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                // 不透明：透明的话列表卡片会从它底下穿过去
+                                .background(AppColor.Screen)
+                                .onSizeChanged { searchBarHeight = it.height }
+                        ) {
+                            SmsSearchField(
+                                initial = state.smsKeyword,
+                                onSearch = { viewModel.searchServerSms(it) }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -246,6 +304,48 @@ fun ServerSmsScreen(
             }
         }
     }
+}
+
+/**
+ * 搜索框。命中**发送方或正文**，由服务端筛（理由见 [com.smsgateway.app.network.ApiService.mySms]）。
+ *
+ * 用「按回车/搜索键才提交」而不是边输边搜：每一次输入都发一个请求不合适
+ * （这个列表是分页拉的，而用户还在打字），而这一页的动作本来就慢一拍 ——
+ * 搜索是「找一条记得的短信」，不是「实时过滤」。
+ */
+@Composable
+private fun SmsSearchField(initial: String, onSearch: (String) -> Unit) {
+    // 本地输入态与已提交的关键词分开：输入框要能让用户改到一半不触发请求，
+    // 而清空按钮必须立刻生效（那是明确的意图）。
+    var input by remember(initial) { mutableStateOf(initial) }
+    val focusManager = LocalFocusManager.current
+
+    OutlinedTextField(
+        value = input,
+        onValueChange = { input = it },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = AppSpacing.gutter, vertical = AppSpacing.xs),
+        singleLine = true,
+        placeholder = { Text("搜索发送方或内容") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        trailingIcon = {
+            if (input.isNotEmpty()) {
+                IconButton(onClick = {
+                    input = ""
+                    focusManager.clearFocus()
+                    onSearch("")
+                }) {
+                    Icon(Icons.Default.Close, contentDescription = "清空")
+                }
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = {
+            focusManager.clearFocus()
+            onSearch(input)
+        })
+    )
 }
 
 /**

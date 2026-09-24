@@ -19,6 +19,118 @@ export interface Device {
   createTime: string | null
 }
 
+/**
+ * 一条外发短信（服务端下发、由设备发出去）。
+ *
+ * 这张表是全站唯一一个**会产生费用**的地方，所以字段比别处细：分段数（=计费条数）、
+ * 发起人、以及「交给设备」与「设备发出」两个时刻都分开记。
+ */
+export interface SmsOutbound {
+  id: number
+  deviceId: string
+  deviceName: string | null
+  /** 收信方号码。 */
+  phone: string
+  content: string
+  /** PENDING / DISPATCHED / SENT / FAILED / CANCELLED / UNKNOWN。 */
+  status: string
+  /** 中文名，服务端给。 */
+  statusLabel: string
+  /** ADMIN / API。 */
+  source: string
+  /** 管理员账号或 API Key 名称。 */
+  createdBy: string | null
+  /** 分段数（=计费条数）。设备回执之前为空。 */
+  segments: number | null
+  errorReason: string | null
+  /** 交给设备的时刻。与 sentAt 是两件事：这个只说明「塞进心跳了」。 */
+  dispatchedAt: string | null
+  /** 设备回报「已发出」的时刻。 */
+  sentAt: string | null
+  deliveredAt: string | null
+  createTime: string | null
+}
+
+/** 告警类型下拉的一项。label 由后端给（枚举上带着），前端不硬编码。 */
+export interface AlertTypeOption {
+  value: string
+  label: string
+}
+
+/**
+ * 一条故障告警规则：什么坏了就通知谁。
+ *
+ * 与转发规则（NotifyRoute）是两张表、两个页面：那个的匹配维度是短信的
+ * （发送方 / 关键词 / 号码），而这个的维度是「告警类型 + 哪台设备」。
+ */
+export interface AlertRule {
+  id: number
+  ruleName: string
+  /** null 表示**不限类型**（所有告警都发）。 */
+  alertType: string | null
+  /** 中文名，服务端给；类型为 null 时是「不限类型」。 */
+  alertTypeLabel: string
+  /** null 表示不限设备（业务标识，精确相等）。 */
+  deviceId: string | null
+  enabled: boolean
+  channelIds: number[]
+  /** 与 channelIds 一一对应；查不到的渠道给占位名，停用的带「（已停用）」后缀。 */
+  targetChannelNames: string[]
+  createTime: string | null
+}
+
+/**
+ * 远程指令的类型。与后端 DeviceCommandType 枚举一一对应。
+ *
+ * 写成字符串字面量联合（与 Device['status'] 同一写法）：拼错时编译期就报错，
+ * 而中文字面量由后端随 view 一起下发（typeLabel），前端不维护第二份映射 ——
+ * 否则后端加一种指令，界面上就会冒出一串英文常量名。
+ */
+export type DeviceCommandType =
+  | 'START_GATEWAY'
+  | 'STOP_GATEWAY'
+  | 'SET_PHONE'
+  | 'REUPLOAD'
+  | 'CLEAR_UPLOADED'
+  | 'RE_REGISTER'
+
+/**
+ * 远程指令的状态。见后端 DeviceCommandStatus。
+ *
+ * SENT 是一个**会被长期停留**的状态（回执丢了、设备离线都会停在那里，服务端会
+ * 重复下发直到回执或过期），所以界面上不能把它当成「已送达」的终态来展示。
+ */
+export type DeviceCommandStatus =
+  | 'PENDING'
+  | 'SENT'
+  | 'ACKED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+
+export interface DeviceCommand {
+  id: number
+  deviceId: string
+  deviceName: string | null
+  type: DeviceCommandType
+  /** 中文名，服务端给（枚举上带着）。 */
+  typeLabel: string
+  argument: string | null
+  status: DeviceCommandStatus
+  /** 中文名，服务端给。 */
+  statusLabel: string
+  /** 已下发次数。> 1 说明设备一直没回执，这本身就是排查线索。 */
+  attempts: number
+  nextDeliverAt: string | null
+  sentAt: string | null
+  expiresAt: string | null
+  ackedAt: string | null
+  resultDetail: string | null
+  /** 签发这条指令的管理员账号。 */
+  issuedBy: string | null
+  createTime: string | null
+}
+
 export interface SmsRecord {
   id: number
   /** 业务设备标识（Android 端为 UUID），不是数据库主键。 */

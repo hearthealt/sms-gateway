@@ -2,8 +2,11 @@ package com.smsgateway.app.ui.screens.settings
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import com.smsgateway.app.ui.components.DiagnosticPreviewDialog
+import com.smsgateway.app.util.DiagnosticExporter
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +24,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
@@ -70,6 +74,7 @@ import com.smsgateway.app.ui.theme.AppTypography
 import com.smsgateway.app.util.DeviceName
 import com.smsgateway.app.util.DevicePhone
 import com.smsgateway.app.util.SimSlotsResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
@@ -79,7 +84,7 @@ import kotlinx.coroutines.launch
  * 1. 服务器地址 - 显示当前地址，提供扫码连接和导出配置功能
  * 2. 设备信息 - 设备 ID、设备名称、手机号输入、重新注册
  * 3. 应用锁
- * 4. 其他 - 查看日志、清理本地记录
+ * 4. 其他 - 查看日志、导出诊断包、清理本地记录
  * 5. 关于 - 应用版本、包名、开源许可
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,6 +105,37 @@ fun SettingsScreen(
     var phoneInput by remember(state.phone) { mutableStateOf(state.phone) }
     var showReregisterDialog by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf<MaintenanceAction?>(null) }
+
+    /**
+     * 正在生成诊断包。挡住连点 —— 生成里有一次网络往返（取服务端日志），
+     * 服务器不可达时它会一直等到读超时，连点两下会开出两个分享面板。
+     */
+    var exportingDiagnostics by remember { mutableStateOf(false) }
+
+    /**
+     * 生成好、等待用户决定要不要分享的那一份。
+     *
+     * 生成完**先弹预览**而不是直接弹分享面板：这份文件会离开设备，
+     * 而「里面到底有什么」应该由人看一眼再决定（也给了「不分享、自己看看」这条路）。
+     */
+    var diagnosticResult by remember { mutableStateOf<DiagnosticExporter.Result?>(null) }
+
+    fun exportDiagnostics() {
+        exportingDiagnostics = true
+        scope.launch {
+            try {
+                diagnosticResult = viewModel.buildDiagnostics()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 自检命中凭据、写文件失败都会走到这里。
+                // **必须说出来** —— 静默失败会让用户以为文件已经生成好了。
+                snackbarHostState.showSnackbar("导出失败：${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                exportingDiagnostics = false
+            }
+        }
+    }
 
     // 设备名称跟随手机本身，不是本应用的配置项：这里只读展示，改要到手机的
     // 「设置 → 关于手机 → 设备名称」。见 DeviceName。
@@ -339,6 +375,21 @@ fun SettingsScreen(
                 )
 
                 ActionRow(
+                    label = "导出诊断包",
+                    icon = Icons.Default.BugReport,
+                    // 副标题要回答的正是用户唯一会犹豫的那个问题：这东西能不能发给别人。
+                    // 生成期间换成「正在生成…」：这一行原先没有任何进行中的反馈，
+                    // 而生成要读库、还要等一次服务端日志（最坏 8 秒），
+                    // 那几秒里人只能一直点 —— 有反馈就不会了。
+                    hint = if (exportingDiagnostics) {
+                        "正在生成…"
+                    } else {
+                        "生成后可先自己看，再决定要不要分享；不含短信正文与密钥"
+                    },
+                    onClick = { if (!exportingDiagnostics) exportDiagnostics() }
+                )
+
+                ActionRow(
                     label = "清理本地已上传记录",
                     icon = Icons.Default.UploadFile,
                     hint = "只删本地已上传的，服务端不受影响",
@@ -359,6 +410,17 @@ fun SettingsScreen(
             // 和上面那些会动手的入口不是一类东西。
             AboutCard()
         }
+    }
+
+    diagnosticResult?.let { result ->
+        DiagnosticPreviewDialog(
+            result = result,
+            onShare = {
+                context.startActivity(Intent.createChooser(result.shareIntent, "分享诊断包"))
+                diagnosticResult = null
+            },
+            onDismiss = { diagnosticResult = null }
+        )
     }
 
     if (showSimPicker) {

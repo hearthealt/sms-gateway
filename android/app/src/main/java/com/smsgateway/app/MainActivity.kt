@@ -338,7 +338,11 @@ private fun GatewayApp(
                     onOpenSelfTest = { viewModel.runSelfTest(); go(Screen.SELF_TEST) },
                     onOpenQuickConnect = { go(Screen.QUICK_CONNECT) },
                     onToggleService = { viewModel.toggleService() },
-                    onCheckStatus = { viewModel.checkStatusNow() }
+                    onCheckStatus = { viewModel.checkStatusNow() },
+                    // 方法引用（挂起函数）而不是 { viewModel.refreshHomeNow() }：
+                    // 后者会让 RefreshableScreen 拿到一个立刻返回的 lambda，
+                    // 圈在数据还没回来时就被收掉。
+                    onRefresh = viewModel::refreshHomeNow
                 )
             }
 

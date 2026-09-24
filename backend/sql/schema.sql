@@ -289,13 +289,27 @@ CREATE TABLE IF NOT EXISTS notify_route_channel (
 --
 -- 兼作投递日志，省掉一张表。
 --
--- **刻意不存渲染后的消息正文**：正文含验证码明文，落库等于把验证码写了两遍、
+-- **刻意不存渲染后的短信正文**：正文含验证码明文，落库等于把验证码写了两遍、
 -- 且第二遍没有 TTL。排查用 last_error + response_code 够；要看正文按
 -- sms_message_id 关联回 sms_message（那里本来就有）。
+--
+-- **告警也走这张表**（source_type=ALERT），不另起一张表 + 第二套调度器：
+-- 那要复制退避、限流、卡死回收、自动停用、脱敏与控制台页面约 400 行并发代码，
+-- 两份必然分叉。代价是下面那几列，以及三处必须按 source_type 分支的读取点
+-- （见 NotifyDispatcher.sendOne / NotifyDeliveryService.toView）。
 CREATE TABLE IF NOT EXISTS notify_delivery (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    sms_message_id BIGINT NOT NULL,
+    -- 告警投递为 NULL。**唯一索引 uk_sms_channel 原样保留**：InnoDB 的唯一索引
+    -- 允许出现多个 NULL，所以告警行不受它约束，而短信行的幂等性一个字没变。
+    sms_message_id BIGINT DEFAULT NULL COMMENT '关联短信；告警投递为 NULL（source_type=ALERT）',
     channel_id BIGINT NOT NULL,
+    source_type VARCHAR(16) NOT NULL DEFAULT 'SMS' COMMENT 'SMS / ALERT。默认 SMS，老行因此不需要迁移',
+    alert_type VARCHAR(32) DEFAULT NULL COMMENT '见 AlertType 枚举；仅 ALERT 行有值',
+    subject_key VARCHAR(160) DEFAULT NULL COMMENT '告警主体，如 device:42 / channel:7。去重与「是哪台设备」都靠它',
+    -- 与短信那一侧**刻意相反**：告警的正文摘要落库。短信不落是因为正文含验证码明文；
+    -- 而重新渲染告警要回头解析 subject_key 对应的设备行 —— 那一行可能已经被删了，
+    -- 于是控制台上会出现一行没有内容的告警。
+    alert_summary VARCHAR(255) DEFAULT NULL COMMENT '告警正文摘要，仅 ALERT 行有值',
     status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/SENDING/SUCCESS/FAILED/DEAD',
     attempts INT NOT NULL DEFAULT 0,
     next_retry_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '到点才捞，限流推迟也写这里',
@@ -313,7 +327,141 @@ CREATE TABLE IF NOT EXISTS notify_delivery (
 
 
 -- ---------------------------------------------------------------------------
--- 10. 运行期配置（sys_config）
+-- 10. 故障告警规则（alert_rule + alert_rule_channel）
+-- ---------------------------------------------------------------------------
+-- 与转发规则（notify_route）**刻意分开**，与「不复用 sms_collect_rule」是同一个
+-- 理由，只是这一层更直接：路由的匹配维度是短信的（发送方 / 正文关键词 / 接收号码），
+-- 而告警的维度是「什么坏了 + 哪台设备」。把 sender_pattern 临时改成「告警类型」，
+-- 就是让一列承载两种语义 —— 改一次告警就要回头读一遍转发逻辑。
+--
+-- 与转发规则相同的地方是刻意保留的：渠道走关联表（一条规则配多个渠道）、
+-- device_id 用精确相等（设备号是标识符，用 LIKE 匹配它只会让人以为可以模糊查）。
+--
+-- **没有总开关。** 转发总开关（notify.enabled）已经管着整条投递链路，再加一个
+-- alert.enabled 会让两者的交互变成要解释的事（「转发开着、告警关着」算不算配错？），
+-- 而每条规则已经有自己的 enabled。
+--
+-- alert_type 为 NULL 表示**不限类型**（所有告警都发），与 notify_route 里
+-- 「空模式 = 不限制这一项」的写法一致。
+CREATE TABLE IF NOT EXISTS alert_rule (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    rule_name VARCHAR(100) NOT NULL,
+    alert_type VARCHAR(32) DEFAULT NULL COMMENT '见 AlertType 枚举；NULL = 不限类型',
+    device_id VARCHAR(128) DEFAULT NULL COMMENT '限定设备（业务标识，精确相等）；空 = 不限',
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 一条规则配多个渠道，与 notify_route_channel 同构。
+CREATE TABLE IF NOT EXISTS alert_rule_channel (
+    rule_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    PRIMARY KEY (rule_id, channel_id),
+    INDEX idx_channel (channel_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- ---------------------------------------------------------------------------
+-- 11. 远程指令（device_command）—— 服务端 → 设备的下行通道
+-- ---------------------------------------------------------------------------
+-- 在此之前这个协议是单向的：设备上报，服务端只能看。管理员要改一台设备的状态
+-- 必须有人走到那台手机前面。这张表让「远程动作」成为可能。
+--
+-- **指令搭心跳响应下发，不新开长轮询。** 设备没有第二条常连通道（内网部署、
+-- 没有 FCM），而它本来就每 30 秒问一次；长轮询要多造一整条连接生命周期
+-- （hold 超时、重连退避、与在线判定冲突），换来的只是 30 秒的延迟改进 ——
+-- 而这几条指令没有一条是时间敏感的。详见 DeviceCommandService 的类注释。
+--
+-- **SENT 会被重复下发，直到回执或过期。** 这是「回执丢了怎么办」的答案：
+-- 效果执行成功但回执丢在路上时，指令停在 SENT，下一个心跳再下一次，设备按
+-- command id 认出「这条我做过」因而不重复执行、只重发一次回执。
+-- 「恰好一次投递」需要服务端的 claim/lease 协议，而设备端每种指令本来就是幂等的
+-- （起一个已在跑的服务、删一次已上传行都是空操作），投递语义的强度用不着一张新协议。
+--
+-- 过期时刻**在创建时按指令类型定死并落库**，不用一个全局的 TTL 配置：
+-- 「一周前下发的停止」如果在设备回来后生效，现场只会看到一台莫名不动的机器，
+-- 而没有人记得为什么。落库而不是查询时算，是为了让当时的策略可审计。
+CREATE TABLE IF NOT EXISTS device_command (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    -- 按**主键**而不是业务标识：设备行被删时这条命令一并删（见 AdminDeviceService.delete），
+    -- 与投递记录必须赶在短信之前删是同一个道理 —— 没有外键，不主动删就是永久孤儿。
+    device_id BIGINT NOT NULL COMMENT 'FK to sms_device.id',
+    device_code VARCHAR(128) NOT NULL COMMENT '设备业务标识冗余，设备行不在了也认得出',
+    command_type VARCHAR(32) NOT NULL COMMENT '见 DeviceCommandType 枚举',
+    argument VARCHAR(255) DEFAULT NULL COMMENT '指令参数，目前只有 SET_PHONE 用到（号码）',
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/SENT/ACKED/FAILED/EXPIRED/CANCELLED',
+    attempts INT NOT NULL DEFAULT 0 COMMENT '已下发次数。设备重复收到靠 command id 去重，这个计数只用于放弃判定',
+    next_deliver_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '到点才下发。否则一条未回执的指令会在每个心跳上都重发一次',
+    sent_at DATETIME DEFAULT NULL,
+    expires_at DATETIME NOT NULL COMMENT '过期即不再下发。**按类型定死**，见 DeviceCommandType.ttl()',
+    acked_at DATETIME DEFAULT NULL,
+    result_detail VARCHAR(255) DEFAULT NULL COMMENT '设备回报的一句话。**受控文案**：设备侧只发固定短语，服务端截断到 255；不得回传短信正文',
+    issued_by VARCHAR(64) DEFAULT NULL COMMENT '签发这条指令的管理员账号。「谁把这台设备停了」是现场最常问的一句话',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- 心跳下发时的主查询：(device_id, status)，且按 id 升序取前 N 条
+    INDEX idx_device_status (device_id, status),
+    -- 过期清理任务按 (status, expires_at) 扫
+    INDEX idx_expiry (status, expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- 注：刻意**没有**再加一个「取设备最新一条指令」用的索引。管理端列表按
+-- (device_id, id desc) 走 idx_device_status 的前缀即可，而设备数不大。
+-- 新表不进 sms_gateway_schema_upgrade：CREATE TABLE IF NOT EXISTS 已经幂等，
+-- 那个过程只服务「给**已存在**的表补列/补索引」。
+
+
+-- ---------------------------------------------------------------------------
+-- 12. 外发短信（sms_outbound）—— 服务端下发、由设备发出去的短信
+-- ---------------------------------------------------------------------------
+-- 在它之前，这套系统只有「收码」这半边：设备上报，服务端识码、转发。
+-- 表让「补发一条短信」「给运营发一条通知短信」这类需求不必再拿起别人的手机。
+--
+-- **与 device_command 分开两张表**，虽然两者都走心跳下发：
+-- 指令是「让设备做个动作」，外发短信是「一条有正文、要计费、要回执的业务数据」，
+-- 它的状态机、列表页、计费口径、甚至重试语义都不同（见下面那条）。
+--
+-- **外发短信只在心跳里下发一次，绝不重发。**
+-- 这是它与指令最关键的差别：指令重发的代价是「设备可能多做一次」（而且那些动作
+-- 本来幂等），而短信重发的代价是**真的又发一条出去**、又计费一次、收信方多收一条。
+-- 所以回执丢了就只能记成「结果未知」，不能靠重发去确认。
+--
+-- 正文**存库**（与 sms_message 的取舍相反）：收进来的短信不存正文是因为里面有验证码
+-- 明文，多存一遍就是多一处泄漏面；而外发短信的正文本来就是我们自己写进去的，
+-- 不存反而等于「发出去一条谁也不知道内容的短信」。
+CREATE TABLE IF NOT EXISTS sms_outbound (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    device_id BIGINT NOT NULL COMMENT 'FK to sms_device.id',
+    device_code VARCHAR(128) NOT NULL COMMENT '设备业务标识冗余，设备行不在了也认得出',
+    phone VARCHAR(32) NOT NULL COMMENT '收信方号码',
+    content VARCHAR(1000) NOT NULL COMMENT '正文。上限 500 字符由服务端校验（见 SmsOutboundService）',
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING'
+        COMMENT 'PENDING/DISPATCHED/SENT/FAILED/CANCELLED/UNKNOWN',
+    source VARCHAR(16) NOT NULL COMMENT 'ADMIN / API —— 谁发起的',
+    created_by VARCHAR(64) DEFAULT NULL COMMENT '管理员账号或 API Key 名称。「谁发出去的」必须查得到',
+    outbound_key VARCHAR(64) NOT NULL COMMENT '幂等键，随心跳下发、由设备回执时带回',
+    segments INT DEFAULT NULL COMMENT '分段数（一条长短信可能被拆成多条计费）',
+    sim_slot INT DEFAULT NULL COMMENT '指定卡槽；NULL = 设备自己选一张',
+    error_reason VARCHAR(255) DEFAULT NULL COMMENT '失败原因，**受控文案**（对端码 / 异常类名）',
+    -- 「交给设备」与「设备发出去」必须分开记：前者只说明我们把它塞进了心跳响应，
+    -- 后者才说明那条短信真的离开了那台手机。合成一个就会在回执丢的时候
+    -- 把「不知道发没发」说成「已发出」—— 而这条短信是**要计费**的。
+    dispatched_at DATETIME DEFAULT NULL COMMENT '交给设备的时刻（心跳下发）',
+    sent_at DATETIME DEFAULT NULL COMMENT '设备回报「已发出」的时刻',
+    delivered_at DATETIME DEFAULT NULL COMMENT '设备回报「对方已收到」的时刻（多数运营商拿不到）',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_outbound_key (outbound_key),
+    -- 心跳下发时的主查询：(device_id, status)
+    INDEX idx_device_status (device_id, status),
+    -- 每日限额要数「这台设备今天发了多少条」，按 (device_id, created_at) 走
+    INDEX idx_device_created (device_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- ---------------------------------------------------------------------------
+-- 13. 运行期配置（sys_config）
 -- ---------------------------------------------------------------------------
 -- 管理后台「系统设置」页读写这张表，**改完立即生效、不用重启**。
 --
@@ -336,7 +484,7 @@ CREATE TABLE IF NOT EXISTS sys_config (
 
 
 -- ---------------------------------------------------------------------------
--- 11. 运行事件（event_log）
+-- 14. 运行事件（event_log）
 -- ---------------------------------------------------------------------------
 -- 起因是一条验证码短信**静默丢失**：设备说没传上去、服务端说没收到，两边都查不到。
 -- 这张表回答「这条上报在服务端这一侧到底被判成了什么」——存下 / 重复 /
@@ -421,6 +569,72 @@ BEGIN
           AND INDEX_NAME = 'idx_device_id'
     ) THEN
         DROP INDEX idx_device_id ON sms_device;
+    END IF;
+
+    -- ---- 投递记录：支持与短信无关的告警投递 ------------------------------
+    --
+    -- 告警（设备离线、渠道被自动停用、远程指令失败）也走这条投递链路，
+    -- 而不是另起一张表 + 第二套调度器：那要复制退避、限流、卡死回收、自动停用、
+    -- 脱敏与控制台页面约 400 行并发代码，两份必然分叉。
+    --
+    -- **sms_message_id 改为可空。** 唯一索引 uk_sms_channel 原样保留：
+    -- InnoDB 的唯一索引允许出现多个 NULL，所以告警行（NULL, channel）不受它约束，
+    -- 而短信行的幂等性一个字都没变 —— 不需要动索引。
+    IF EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'notify_delivery'
+          AND COLUMN_NAME = 'sms_message_id'
+          AND IS_NULLABLE = 'NO'
+    ) THEN
+        ALTER TABLE notify_delivery
+            MODIFY COLUMN sms_message_id BIGINT NULL
+            COMMENT '关联短信；告警投递为 NULL（source_type=ALERT）';
+    END IF;
+
+    -- source_type 是**载荷分支**，不是元数据：NotifyDeliveryService 与 NotifyDispatcher
+    -- 都按它决定「去哪儿取正文」。默认 'SMS' 让已有的行不需要数据迁移。
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'notify_delivery'
+          AND COLUMN_NAME = 'source_type'
+    ) THEN
+        ALTER TABLE notify_delivery
+            ADD COLUMN source_type VARCHAR(16) NOT NULL DEFAULT 'SMS'
+            COMMENT 'SMS / ALERT。默认 SMS，老行因此不需要迁移';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'notify_delivery'
+          AND COLUMN_NAME = 'alert_type'
+    ) THEN
+        ALTER TABLE notify_delivery
+            ADD COLUMN alert_type VARCHAR(32) DEFAULT NULL COMMENT '见 AlertType 枚举；仅 ALERT 行有值';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'notify_delivery'
+          AND COLUMN_NAME = 'subject_key'
+    ) THEN
+        ALTER TABLE notify_delivery
+            ADD COLUMN subject_key VARCHAR(160) DEFAULT NULL
+            COMMENT '告警主体，如 device:42 / channel:7。去重与「是哪台设备」都靠它';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'notify_delivery'
+          AND COLUMN_NAME = 'alert_summary'
+    ) THEN
+        ALTER TABLE notify_delivery
+            ADD COLUMN alert_summary VARCHAR(255) DEFAULT NULL
+            COMMENT '告警正文摘要，仅 ALERT 行有值';
     END IF;
 
     -- ---- 种子数据：只在表为空时插入 ---------------------------------------

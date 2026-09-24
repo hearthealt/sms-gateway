@@ -42,8 +42,21 @@ public class NotifyDeliveryView {
     private LocalDateTime sentAt;
     private LocalDateTime createdAt;
 
-    // ---- 关联短信的摘要（打码后） ----
+    /**
+     * 载荷来源：SMS / ALERT。
+     *
+     * <p>前端据此区分「这条投递是关于短信的还是关于故障的」—— 告警行的
+     * {@code sender} / {@code phone} / {@code smsMessageId} 都是空的，
+     * 不区分的话那几列会显示成「-」，看着像数据缺了。
+     */
+    private String sourceType;
+
+    /** 告警类型中文名，仅 ALERT 行有值。前端不硬编码映射（同 EventType.label()）。 */
+    private String alertTypeLabel;
+
+    // ---- 关联短信的摘要（打码后）；ALERT 行为空 ----
     private String sender;
     private String phone;
+    /** 短信行是打码后的原文前一段；告警行是告警摘要本身（没有可打码的凭据）。 */
     private String contentPreview;
 }

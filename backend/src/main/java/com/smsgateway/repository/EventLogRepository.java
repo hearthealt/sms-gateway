@@ -49,6 +49,13 @@ public interface EventLogRepository extends JpaRepository<EventLog, Long> {
                           Pageable pageable);
 
     /**
+     * 某台设备最近的运行日志，新的在前。给设备端的诊断包用。
+     *
+     * <p>派生查询而不是 JPQL：条件只有 deviceId 一个，排序也固定。
+     */
+    List<EventLog> findByDeviceIdOrderByCreatedAtDesc(Long deviceId, Pageable pageable);
+
+    /**
      * 早于某时刻的一批 id，供保留策略分批删。
      *
      * <p>用原生 SQL 是因为要带 LIMIT（与 {@code SmsMessageRepository.findIdsByReceiveTimeBefore}
