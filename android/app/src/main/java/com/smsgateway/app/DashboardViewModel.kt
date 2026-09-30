@@ -1475,9 +1475,21 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             if (smsPermission) "已授予" else "未授予，收不到任何短信",
             SelfTestAction.OPEN_APP_SETTINGS
         )
-        // 这里原本还有一行「短信读取权限」（READ_SMS）。那个权限已经移除 ——
-        // 本应用只从 SMS_RECEIVED 广播取消息，从没读过系统短信库，
-        // 显示一个用不到的权限只会把人引去授权一个无关的东西。
+        // 对账腿要的权限。**必须与上面那条分开显示**：两者缺了的后果完全不同 ——
+        // 缺 RECEIVE_SMS 是一条短信都收不到，症状一眼可见；缺 READ_SMS 只是
+        // 「广播漏投时没法补采」，平时**看不出任何异常**，直到某条验证码彻底丢失
+        // （2026-09-30 现场就是这么丢的）。所以这里要把后果写出来，而不是只说「未授予」。
+        val readSmsPermission = hasPermission(app, Manifest.permission.READ_SMS)
+        add(
+            "短信库读取权限",
+            readSmsPermission,
+            if (readSmsPermission) {
+                "已授予，系统漏发短信广播时能对账补采"
+            } else {
+                "未授予：系统偶尔不把短信广播交给本应用，那时无法从短信库补采，验证码会永久丢失"
+            },
+            SelfTestAction.OPEN_APP_SETTINGS
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val ok = hasPermission(app, Manifest.permission.POST_NOTIFICATIONS)

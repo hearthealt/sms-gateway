@@ -165,6 +165,15 @@ fun HomeScreen(
  */
 data class DeviceChecks(
     val smsPermission: Boolean,
+    /**
+     * 读短信库的权限。
+     *
+     * 缺它**不影响收短信**（那条路走 `SMS_RECEIVED` 广播），只让**对账腿**失效 ——
+     * 而后果藏在两跳之外：系统偶尔不把广播投给三方应用（2026-09-30 现场就这么丢过
+     * 一条腾讯视频验证码），那时只能读库补采。没有权限就补不了，且界面、服务端、
+     * 队列三处都没有任何异常信号。
+     */
+    val readSmsPermission: Boolean,
     val phonePermission: Boolean,
     val ignoringBatteryOptimizations: Boolean
 )

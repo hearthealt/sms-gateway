@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import com.smsgateway.app.ui.components.BatteryBannerCompact
 import com.smsgateway.app.ui.components.PermissionBannerCompact
 import com.smsgateway.app.ui.components.PhonePermissionBanner
+import com.smsgateway.app.ui.components.ReconcilePermissionBanner
 
 /**
  * 主页顶部的警告横幅组。
@@ -19,6 +20,15 @@ import com.smsgateway.app.ui.components.PhonePermissionBanner
 fun HomeBanners(checks: DeviceChecks) {
     if (!checks.smsPermission) {
         PermissionBannerCompact()
+    }
+
+    // 缺读短信库的权限。**排在收短信那条之后**，且它出现时上面那条必然不在
+    // （加了 `checks.smsPermission &&`）：短信权限整个没给时，先说「一条都收不到」，
+    // 再补一句「补采也用不了」只会让人分不清哪句更要紧。
+    //
+    // 它的后果与电话权限那条同类 —— 平时看不出异常，出事时丢的是验证码本身。
+    if (checks.smsPermission && !checks.readSmsPermission) {
+        ReconcilePermissionBanner()
     }
 
     // 缺电话权限时也要说一声，哪怕它看起来「不影响收短信」。

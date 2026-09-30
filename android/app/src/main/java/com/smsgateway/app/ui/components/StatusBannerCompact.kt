@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.PhoneDisabled
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -140,6 +141,32 @@ fun PhonePermissionBanner() {
         // 这一行是给单卡机用户的：否则他会照着上面那句话去反复查权限，
         // 而自己的设备本来就不受这个问题影响
         detail = "单卡机不受影响。开启后号码归属才能标对，按号码等验证码的调用方才取得到码。"
+    )
+}
+
+/**
+ * 缺「读取短信库」权限的横幅。
+ *
+ * 用中性色而不是红色，理由与 [PhonePermissionBanner] 一样：设备此刻**照常收短信、
+ * 照常上报**，红的会让人以为坏了 —— 而红色那张的位置要留给真正收不到短信的情况。
+ *
+ * 但它比电话权限那条更值得说清后果：电话权限缺了只是「号码可能不带」，
+ * 这条缺了是「系统偶尔不发广播时，验证码直接永久丢失」，而平时一点异常都看不出来
+ * （见 [com.smsgateway.app.util.SmsInboxReconciler]）。所以 detail 里要把
+ * 「平时不影响」和「什么时候会出事」两句都写上。
+ */
+@Composable
+fun ReconcilePermissionBanner() {
+    val context = LocalContext.current
+    CompactWarningBanner(
+        icon = Icons.Default.Email,
+        message = "缺少读取短信权限，系统漏发广播时无法补采",
+        actionLabel = "去开启",
+        backgroundColor = AppColor.NeutralWarnBg,
+        contentColor = AppColor.NeutralWarn,
+        onClick = { SystemSettings.openAppDetails(context) },
+        detail = "平时不影响收短信。但系统偶尔会不把新短信通知给本应用（已发生过），" +
+            "那时只能从短信库补读；开启后这类验证码才不会丢。"
     )
 }
 

@@ -235,9 +235,13 @@ class MainActivity : ComponentActivity() {
      */
     private fun checkAndRequestPermissions() {
         val permissions = buildList {
-            // 短信只从 SMS_RECEIVED 广播里取，不读系统短信库 —— 没有 READ_SMS，
-            // 理由见清单里那条注释（多申请一次危险权限，还会触发应用市场的短信权限政策审查）。
+            // 收短信走 SMS_RECEIVED 广播（RECEIVE_SMS）；READ_SMS 是**对账腿**用的 ——
+            // 这台 ROM 偶尔不把 SMS_RECEIVED 投给三方 app，那时只能靠读系统短信库补采
+            // （见清单里那条注释与 util/SmsInboxReconciler）。少了 READ_SMS 不会报错，
+            // 只是那条兜底静默失效：广播一漏，验证码就永久丢了。
+            // 两个权限同属「短信」权限组，系统仍然只弹一次框。
             add(Manifest.permission.RECEIVE_SMS)
+            add(Manifest.permission.READ_SMS)
             // 读 SIM 卡列号与号码自动预填。两个都已在清单里声明，缺的只是申请这一步。
             // 它们同时也是「分辨短信来自哪张卡」的依据：缺了不报错，只是号码会留空。
             addAll(DevicePhone.requiredPermissions)
@@ -448,6 +452,7 @@ private fun rememberDeviceChecks(): DeviceChecks {
 
     fun read() = DeviceChecks(
         smsPermission = hasSmsPermission(context),
+        readSmsPermission = hasReadSmsPermission(context),
         phonePermission = DevicePhone.hasPermission(context),
         ignoringBatteryOptimizations = isIgnoringBatteryOptimizations(context)
     )
@@ -469,6 +474,11 @@ private fun rememberDeviceChecks(): DeviceChecks {
 
 private fun hasSmsPermission(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+
+/** 对账腿的权限。与 [hasSmsPermission] 分开：两者缺了的后果完全不同。 */
+private fun hasReadSmsPermission(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED
 
 private fun isIgnoringBatteryOptimizations(context: Context): Boolean {

@@ -47,6 +47,48 @@ interface SmsQueueDao {
     suspend fun getOutstanding(): List<SmsQueueEntity>
 
     /**
+     * 队列里有没有一条「同正文、且接收时刻落在窗口内」的行。
+     *
+     * **只给对账腿用**（[com.smsgateway.app.util.SmsIngest] 的 RECONCILED 分支）。
+     *
+     * 为什么不能靠 `localMessageId` 的唯一索引去重：那个键里带「收到时刻」，
+     * 而两条路拿到的时刻**来自不同的源** ——
+     *
+     * - 广播路径：PDU 里的 SCTS（短信中心时间戳，**只有秒**精度）；
+     * - 对账路径：provider 的 `date` 列（实测带毫秒，是**收信时的墙上时间**，
+     *   与 SCTS 不是同一个值，实测能差 0.4～2 秒，网络慢时更大）。
+     *
+     * 于是同一条短信在两条路下算出的键不同，唯一索引拦不住 —— 广播已收过的短信
+     * 会被对账腿当成新短信再捞一遍、再传一次。真机数据（2026-09-30）：
+     * `_id=226` 的 `date=…092853` 而 `date_sent=…091000`，两者都不整秒。
+     *
+     * **为什么连 `sender` 也不比**（原文是比的，2026-09-30 实测后拿掉）：
+     * MIUI 会把某些发送方在 provider 里存成**显示名**而不是号码 ——
+     * 同一条 106 短信，广播路径从 PDU 拿到的是 `10687534278973838005`，
+     * 而 provider 的 `address` 存的是「深度求索」（`b2c_numbers` 列也是这个名字，
+     * **没有任何一列留着原始号码**）。带上 sender 比，这类短信就永远匹配不上，
+     * 广播一旦正常投递就会重复入库。
+     *
+     * 去掉 sender **不损失任何东西**：服务端的去重键是 `uk_device_source_hash
+     * (device_id, source_hash)`，而 `source_hash` 是**正文的 SHA-256** ——
+     * 本来就不含发送方。本地按正文判重与服务端语义完全一致，
+     * 不会丢掉任何服务端会保留的记录。而真正要捞的验证码每条正文都不同，
+     * 误合并的概率可以忽略。
+     *
+     * 不建索引：这张表只留未上传的行 + 最近 7 天已上传的行，规模很小，
+     * 而正常情况下对账腿每轮要查的行数是 0。
+     */
+    @Query(
+        "SELECT COUNT(*) FROM sms_queue " +
+            "WHERE content = :content AND receiveTime BETWEEN :from AND :to"
+    )
+    suspend fun countSameContentInWindow(
+        content: String,
+        from: Long,
+        to: Long
+    ): Int
+
+    /**
      * [getOutstanding] 的**订阅版**，队列页用它。
      *
      * 队列页原先拿的是一次读库的快照，而库随时在被后台的 worker 改动 ——

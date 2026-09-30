@@ -173,10 +173,31 @@ object DiagnosticExporter {
                 DiagnosticReportTime.absolute(it)
             } ?: "-"),
             DiagnosticReport.Field("待上传", "$pending 条（队列未完成 $outstanding 条）"),
+            // 对账腿的两个状态。它们要一起看才说明问题：水位线会一直停在同一个值上 ——
+            // 既可能是「没有新短信」，也可能是「对账腿早就没跑了」，
+            // 而「上次对账」才分得清这两者（2026-09-30 那条验证码就是补采腿缺失时丢的）。
+            DiagnosticReport.Field("对账水位线", watermarkText(app)),
+            DiagnosticReport.Field(
+                "上次对账",
+                DevicePrefs.lastReconcileAt(app)?.let { DiagnosticReportTime.absolute(it) }
+                    ?: "从未跑过"
+            ),
             DiagnosticReport.Field("本地事件条数", eventCount.toString()),
             DiagnosticReport.Field("接入口令", if (DevicePrefs.enrollToken(app).isNotBlank()) "已配置" else "未配置"),
             DiagnosticReport.Field("应用锁", if (AppLock.isEnabled(app)) "已开启" else "未开启")
         )
+    }
+
+    /**
+     * 对账水位线的可读形态。
+     *
+     * 「未初始化」要单独说，不能拿 0 代替：0 是**初始化过、而当时收件箱是空的**的合法值
+     * （见 [DevicePrefs.KEY_INBOX_WATERMARK_ID]）。把两者混起来会让「对账腿一次都没跑过」
+     * 看起来像「跑过了、一切正常」—— 而那正是这份报告最不该制造的误判。
+     */
+    private fun watermarkText(app: Context): String {
+        val id = DevicePrefs.inboxWatermarkId(app)
+        return if (id < 0L) "未初始化（首次对账后写入）" else "已处理到 _id=$id"
     }
 
     private fun permissionFields(app: Context): List<DiagnosticReport.Field> {
@@ -189,6 +210,9 @@ object DiagnosticExporter {
 
         val fields = mutableListOf(
             DiagnosticReport.Field("接收短信", granted(Manifest.permission.RECEIVE_SMS)),
+            // 与上面那条分开列：缺 RECEIVE_SMS 是一条都收不到（症状明显），
+            // 缺 READ_SMS 只是「广播漏投时没法补采」，平时看不出任何异常。
+            DiagnosticReport.Field("读取短信库（对账补采用）", granted(Manifest.permission.READ_SMS)),
             DiagnosticReport.Field("相机（扫码用）", granted(Manifest.permission.CAMERA)),
             DiagnosticReport.Field("电话（读号码用）", granted(Manifest.permission.READ_PHONE_NUMBERS)),
             DiagnosticReport.Field("电池优化白名单", if (ignoringBatteryOptimizations(app)) "已加入" else "未加入")

@@ -19,6 +19,7 @@ import com.smsgateway.app.util.DeviceStatus
 import com.smsgateway.app.util.EventLog
 import com.smsgateway.app.util.GatewayState
 import com.smsgateway.app.util.HeartbeatSender
+import com.smsgateway.app.util.SmsInboxReconciler
 import com.smsgateway.app.worker.CommandProbeWorker
 import com.smsgateway.app.worker.SmsUploadWorker
 import kotlinx.coroutines.*
@@ -167,6 +168,14 @@ class GatewayForegroundService : Service() {
         HeartbeatSender.ensureLoaded(this)
 
         if (!ensureForeground()) return
+
+        // 对账腿：注册系统短信库的观察者（广播漏投时秒级补采），并立刻对一次账 ——
+        // 观察者只看得到注册之后的变化，而「网关停着的那段时间收到的短信」正是
+        // 最需要补的一批。
+        //
+        // 放在 ensureForeground 之后：服务没能转前台时它马上就要被销毁，
+        // 注册观察者只会多一次没意义的注销。传 this 当主人，理由见 stop 的说明。
+        SmsInboxReconciler.start(this, this)
 
         if (heartbeatJob?.isActive != true) {
             heartbeatJob = startHeartbeatLoop()
@@ -380,6 +389,21 @@ class GatewayForegroundService : Service() {
             // 换不来任何成功的机会。下一轮（30 秒后）会重新判断。
             if (heartbeatOk) flushPendingUploadsIfDue()
 
+            // 对账腿的兜底一轮，与心跳同频（30 秒）。
+            //
+            // **刻意不受 heartbeatOk 影响**：它读的是本机短信库，与服务器通不通毫无关系；
+            // 而「网断了、短信还在进来」恰恰是最需要它把短信先收进本地队列的时候
+            // （那时广播要是也漏了，这条短信就是彻底没了）。
+            //
+            // 用 requestReconcile（fire-and-forget）而不是挂起版：对账要在
+            // Mutex 后面排队等观察者那一轮跑完，而**这个循环是设备与服务器之间唯一
+            // 活着的连接**，不能有任何一段不设上限的等待挂在它上面。已有
+            // flushPendingUploadsIfDue 与 pruneEventLogIfDue 两个先例，都是这个写法。
+            //
+            // 不加节流变量：一轮对账通常查 0 行（带索引的 `_id > ?`），成本可以忽略，
+            // 而它省下的是「漏掉的验证码还有没有救」—— 这个方向上的取舍不对称。
+            SmsInboxReconciler.requestReconcile(this@GatewayForegroundService)
+
             pruneEventLogIfDue()
 
             delay(
@@ -417,6 +441,14 @@ class GatewayForegroundService : Service() {
 
     override fun onDestroy() {
         serviceAlive = false
+
+        // 注销短信库观察者。传 this 当主人：系统重建服务时旧实例的 onDestroy 可能
+        // 迟到到新实例的 onCreate 之后，不比对主人就会把新实例的观察者一起注销，
+        // 此后对账腿静默瘫掉（见 SmsInboxReconciler.stop）。
+        //
+        // 放在 liveInstance 那段判断**之外**：手动停止时 companion 的 stop() 会先把
+        // liveInstance 清成 null，若挂在那个判断里，用户每一次停网关都会漏掉这一次注销。
+        SmsInboxReconciler.stop(this, this)
 
         // 只清自己那一次的运行态：销毁的若不是当前存活实例，说明新实例已经接上了，
         // 这一刀下去会把新实例的运行态一并抹掉。

@@ -86,6 +86,32 @@ object DevicePrefs {
     /** 一次性修复标记：早期版本把上传失败的行错标成 failed，需要扫回 pending 一次。 */
     const val KEY_STRANDED_SWEPT = "stranded_rows_swept"
 
+    /**
+     * 对账腿的水位线：已经处理过的系统收件箱最大 `_id`。
+     * [WATERMARK_UNINITIALIZED] 表示**还没初始化**。
+     *
+     * 未初始化必须与 0 分开：首次跑对账腿时要把水位线设成当下收件箱的最大 `_id` 并
+     * **不处理任何行**（否则会把整机历史短信全部补传一遍，而那些验证码早就过期了，
+     * 补上去只是给服务端添噪音、还会让「今日短信」这类统计失真）。而收件箱为空时
+     * 那个最大值就是 0 —— 它是**初始化过**的合法值，每轮再判一次「没初始化」会让
+     * 「初始化后、第一轮查询前」到达的那条短信被当成历史跳过。
+     *
+     * 用 `_id` 而不是时间戳：provider 的 `_id` 单调递增且不受系统改时间影响 ——
+     * NTP 校时或用户手动改时间都会让「按时间取增量」漏掉或重取一段。
+     */
+    const val KEY_INBOX_WATERMARK_ID = "inbox_watermark_id"
+
+    /** 见 [KEY_INBOX_WATERMARK_ID]。SQLite 的自增 `_id` 从 1 起，-1 不会是合法值。 */
+    const val WATERMARK_UNINITIALIZED = -1L
+
+    /**
+     * 上一次对账腿真正跑完的时刻（epoch 毫秒）。0 表示从未跑过。
+     *
+     * 单独存它是因为水位线回答不了「这条腿还在不在动」：水位线会一直停在同一个值上——
+     * 既可能是「没有新短信」，也可能是「对账腿早就没跑了」。诊断包里两个一起看才分得清。
+     */
+    const val KEY_LAST_RECONCILE_AT = "last_reconcile_at"
+
     /** 应用锁的 PIN：只存派生物（见 [setLockPin]），不存明文。 */
     const val KEY_LOCK_PIN_SALT = "lock_pin_salt"
     const val KEY_LOCK_PIN_HASH = "lock_pin_hash"
@@ -305,6 +331,42 @@ object DevicePrefs {
 
     fun markStrandedRowsSwept(context: Context) =
         get(context).edit().putBoolean(KEY_STRANDED_SWEPT, true).apply()
+
+    // ---------- 对账腿 ----------
+
+    /** 已处理过的收件箱最大 `_id`；[WATERMARK_UNINITIALIZED] 表示还没初始化过。 */
+    fun inboxWatermarkId(context: Context): Long =
+        get(context).getLong(KEY_INBOX_WATERMARK_ID, WATERMARK_UNINITIALIZED)
+
+    /**
+     * 推进水位线。**值没变就不落盘** —— 对账腿每轮都会把绝大多数行的 `_id` 算出来，
+     * 而值只在真有新短信时才变；同 [setDisabled] 那条「值没变就不落盘」的取舍。
+     */
+    fun setInboxWatermarkId(context: Context, id: Long) {
+        if (inboxWatermarkId(context) == id) return
+        get(context).edit().putLong(KEY_INBOX_WATERMARK_ID, id).apply()
+    }
+
+    /** 上一次对账腿跑完的时刻；从未跑过返回 null。 */
+    fun lastReconcileAt(context: Context): Long? =
+        get(context).getLong(KEY_LAST_RECONCILE_AT, 0L).takeIf { it > 0L }
+
+    /**
+     * 记一次对账腿跑完。
+     *
+     * 节流比 [setLastHeartbeatAt] 松得多（5 分钟而不是 60 秒）：那个值要参与
+     * 「心跳是不是刚断」的判断，对精度有要求；这一个只出现在诊断包里，读者看的是
+     * 「对账腿还在动吗」—— 分钟级甚至十分钟级都够用，没必要陪着 30 秒一轮的对账
+     * 每天多写近三千次。
+     */
+    fun setLastReconcileAt(context: Context, at: Long) {
+        val last = lastReconcileAt(context)
+        if (last != null && at - last < RECONCILE_PERSIST_MIN_INTERVAL_MS) return
+        get(context).edit().putLong(KEY_LAST_RECONCILE_AT, at).apply()
+    }
+
+    /** 见 [setLastReconcileAt]。 */
+    private const val RECONCILE_PERSIST_MIN_INTERVAL_MS = 5 * 60 * 1000L
 
     // ---------- 应用锁的 PIN ----------
 

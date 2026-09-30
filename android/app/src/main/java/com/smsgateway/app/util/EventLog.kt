@@ -96,6 +96,33 @@ object EventLog {
      */
     const val SMS_NO_PHONE = "sms_no_phone"
 
+    /**
+     * 广播漏投，由对账腿从系统短信库补回来的短信。
+     *
+     * **这条事件的全部意义就是让 ROM 的漏投可见。** 2026-09-30 现场：一条腾讯视频
+     * 验证码在系统收件箱里、app 队列为空、事件表零记录 —— 广播压根没交到
+     * [com.smsgateway.app.receiver.SmsReceiver]，与「广播到了但入库失败」在别处
+     * 完全无法区分。补采本身不该是静默动作：它是「这台 ROM 没把短信交给我们」的
+     * 唯一证据，也是判断「还要不要继续治 ROM 那一半」的依据。
+     *
+     * 只在**确实新插入了行**时记（`insert` 返回 > 0）。对账腿每轮会把库里已在
+     * 广播路径入过库的短信重看一遍，那些撞唯一索引的行**必须静默** —— 否则一条
+     * 正常短信也会被记成「漏采」，日志页几天就被刷成收件箱镜像。
+     */
+    const val SMS_RECOVERED = "sms_recovered"
+
+    /**
+     * 对账腿没在跑：没授 `READ_SMS` 权限。
+     *
+     * 单独一类，因为它与 [SMS_RECOVERED] 恰好相反 —— 一个是「补到了」，
+     * 一个是「这条腿根本是断的」。两者都不发生的时候，界面上看不出任何区别，
+     * 而那时的语义是「广播漏投仍然会永久丢失」。
+     *
+     * 进程内只记一条（见 SmsInboxReconciler）：没权限的设备每轮都会命中，
+     * 逐轮记会按心跳节奏把事件表刷满。
+     */
+    const val SMS_RECONCILE_UNAVAILABLE = "sms_reconcile_unavailable"
+
     // ── 上传 ────────────────────────────────────────────────────────────────
 
     const val UPLOAD_OK = "upload_ok"
@@ -228,6 +255,8 @@ object EventLog {
         SMS_ENQUEUE_FAILED -> "入库失败"
         SMS_HELD -> "暂不上传"
         SMS_NO_PHONE -> "号码未知"
+        SMS_RECOVERED -> "广播漏采·对账补回"
+        SMS_RECONCILE_UNAVAILABLE -> "对账腿不可用（缺权限）"
         UPLOAD_OK -> "上传成功"
         UPLOAD_RETRYING -> "上传失败"
         UPLOAD_REJECTED -> "被服务端拒绝"

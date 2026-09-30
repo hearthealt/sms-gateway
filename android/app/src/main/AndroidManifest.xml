@@ -3,10 +3,19 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
-    <!-- 不要加 READ_SMS：本应用只从 SMS_RECEIVED 广播里取消息
-         （Telephony.Sms.Intents.getMessagesFromIntent），从头到尾没读过系统短信库。
-         声明用不到的短信读取权限，除了在首次启动时多弹一次危险权限，
-         还会在应用市场上触发短信权限政策审查。 -->
+    <!-- READ_SMS：**对账腿**读系统短信库，补采 SMS_RECEIVED 广播漏投的短信。
+         见 util/SmsInboxReconciler。
+
+         这一条在 2026-09-30 之后是必需的，不再是「用不到」：那天 10:32 一条
+         【腾讯科技】腾讯视频验证码在系统收件箱里（_id=225），而 app 本地队列为空、
+         事件表零记录 —— 广播压根没交到我们手上（同日 11:31 一条逐字同构的验证码
+         正常上传；同类事件 09-23 也发生过一次）。只靠广播就等于把网关的可靠性
+         押在一个不可控的 ROM 行为上。短信反正已经落在系统库里了，补读一遍就行。
+
+         原先这里写着「不要加 READ_SMS」，理由是「多弹一次危险权限 + 触发应用市场
+         的短信权限政策审查」。本项目侧载自用、不上架，两条都不成立；而 READ_SMS
+         与 RECEIVE_SMS 同属一个权限组，系统仍然只弹一次框。 -->
+    <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
